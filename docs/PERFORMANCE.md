@@ -133,6 +133,30 @@ asserts the renderer's texture and geometry counts have not grown beyond a small
 allowance. Every tier change disposes the previous FFT targets, surface material
 and ocean geometry before allocating replacements.
 
+## Running the suite: hardware matters
+
+The suite is only fully meaningful on a machine with a real GPU adapter.
+
+Observed on a software-only runner (Playwright's bundled Chromium, no WebGPU
+adapter, so WebGL2 backed by a software rasteriser): **9 failed, 6 passed,
+1 skipped in 21.7 minutes**. Nearly every failure was a timeout, not an
+assertion — a single frame of this scene through software rasterisation can take
+tens of seconds, so anything that waits on rendering runs out of time.
+
+Which is which:
+
+- **Trustworthy anywhere** — the sea-state assertions (read straight off the GPU
+  via `readRenderTargetPixelsAsync`), the WebGL fallback boot, and typecheck.
+  These passed on the software runner.
+- **Needs a GPU** — everything that waits on presented frames: screenshots,
+  preset comparison, frame-budget assertions, and the interaction tests that
+  poll after a state change. These time out on a software runner and their
+  failure says nothing about the code.
+
+Timeouts are set to 240 s to give a software runner a chance, but the honest
+recommendation is to run on GPU hardware and treat a software-runner result as
+inconclusive rather than as a regression.
+
 ## Known gaps
 
 - **No true GPU timings.** Needs timestamp queries; `frameMs` is a CPU-side upper

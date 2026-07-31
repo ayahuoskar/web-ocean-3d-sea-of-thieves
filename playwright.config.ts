@@ -16,8 +16,19 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? [['github'], ['html', { open: 'never' }]] : [['list']],
-  timeout: 90_000,
-  expect: { timeout: 20_000 },
+  /**
+   * Generous, because this is a GPU-bound scene and the runner is not always on
+   * a GPU. On a machine with a real adapter the whole suite is quick; on one
+   * without, Chromium falls back to a software rasteriser and a single frame of
+   * this scene can take tens of seconds. Measured: 21.7 minutes for 16 tests on
+   * a software-only runner, with most failures being timeouts rather than
+   * assertion failures.
+   *
+   * See docs/PERFORMANCE.md — the suite is meaningful on GPU hardware; on a
+   * software runner only the non-visual assertions are trustworthy.
+   */
+  timeout: 240_000,
+  expect: { timeout: 30_000 },
 
   use: {
     baseURL: 'http://127.0.0.1:4173',
