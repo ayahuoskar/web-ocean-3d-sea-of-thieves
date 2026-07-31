@@ -82,6 +82,69 @@ const SUN_LIGHT_DISTANCE = 3000;
 
 const ENV_SIZE = 128;
 
+/**
+ * Preetham returns scene-referred radiance in the tens; this maps it onto the
+ * renderer's ACES filmic curve at `toneMappingExposure = 1`. Calibrated by
+ * sampling the framebuffer: with `exposure: 1, rayleigh: 1.6, turbidity: 2.6` and
+ * the sun at 0.46 rad, the zenith lands on ~#2E6FB5, matching ref-default.png.
+ * `AtmosphereParams.exposure` then reads as a relative stop around that look.
+ */
+const SKY_RADIANCE_SCALE = 0.35;
+
+/**
+ * ACES filmic desaturates as it rolls off, which turns a deep zenith blue into
+ * pale sky-blue. A small chroma expansion in linear space before tonemapping
+ * restores the reference's zenith-to-horizon saturation without touching
+ * luminance. This is a grade, not a second tonemap.
+ */
+const SKY_CHROMA = 1.06;
+
+/**
+ * Preetham's `sunIntensity` collapses steeply as the sun approaches the horizon
+ * (it fakes the earth's shadow), and the long slant path costs another factor on
+ * top. Measured at `exposure: 1`, the sky 10 degrees up drops from RGB ~(176,213,230)
+ * at a 26-degree sun to ~(14,31,32) at a 1-degree sun — a 17x fall. A real camera
+ * or eye would open up across that range; our renderer's exposure is fixed, so
+ * the dome compensates itself. Without this every low-sun preset would have to
+ * carry an `exposure` in the teens, and ref-sunset.png would render near black.
+ *
+ * The curve below is measured, not guessed: for each sun height the framebuffer
+ * was sampled across an exposure sweep and the gain that lands the sky 10 degrees
+ * up on RGB ~205 green (the value a 20-degree sun produces unaided) was read off.
+ * The gain is deliberately capped near the horizon so dusk still reads as dusk
+ * rather than flattening into a permanent noon.
+ *
+ * Pairs are [sin(sunElevation), gain], ascending.
+ */
+const TWILIGHT_CURVE: ReadonlyArray<readonly [number, number]> = [
+  [-1.0, 17],
+  [0.0, 17],
+  [0.02, 15],
+  [0.05, 11.5],
+  [0.08, 7.6],
+  [0.12, 4.5],
+  [0.18, 2.7],
+  [0.25, 1.8],
+  [0.32, 1.0],
+  [1.0, 1.0],
+];
+
+function twilightGain(sunY: number): number {
+  for (let i = 1; i < TWILIGHT_CURVE.length; i++) {
+    const [y1, g1] = TWILIGHT_CURVE[i];
+    if (sunY <= y1) {
+      const [y0, g0] = TWILIGHT_CURVE[i - 1];
+      const k = y1 === y0 ? 0 : (sunY - y0) / (y1 - y0);
+      // Smoothstep the blend so the gain has no slope kinks at the knots.
+      return g0 + (g1 - g0) * (k * k * (3 - 2 * k));
+    }
+  }
+  return 1;
+}
+
+/** Rec. 709 luminance weights. */
+const LUMA = /*@__PURE__*/ new THREE.Vector3(0.2126, 0.7152, 0.0722);
+
 export interface AtmosphereParams {
   sunElevation: number; // radians, may be negative (below horizon)
   sunAzimuth: number; // radians
@@ -103,6 +166,10 @@ export const DEFAULT_ATMOSPHERE_PARAMS: AtmosphereParams = {
   rayleigh: 1.6,
   mieCoefficient: 0.005,
   mieDirectionalG: 0.8,
+  /**
+   * 1 == the calibrated reference look (see SKY_RADIANCE_SCALE). Treat this as a
+   * relative stop, not as three's `toneMappingExposure`.
+   */
   exposure: 1,
   groundColor: new THREE.Color(0.05, 0.09, 0.13),
   nightIntensity: 0,
@@ -153,6 +220,8 @@ export class Atmosphere {
   private readonly _sunColor = new THREE.Color(1, 1, 1);
 
   private elapsed = 0;
+  /** Clamped copy of `nightIntensity`; also gates the moonlight source. */
+  private nightAmount = 0;
 
   // --- uniforms -------------------------------------------------------------
   private readonly uSunDir = uniform(new THREE.Vector3(0, 1, 0));
@@ -161,8 +230,14 @@ export class Atmosphere {
   private readonly uBetaM = uniform(new THREE.Vector3());
   private readonly uSunE = uniform(0);
   private readonly uMieG = uniform(0.8);
-  private readonly uExposure = uniform(1);
-  private readonly uNight = uniform(0);
+  /**
+   * Day and night are scaled separately, folded on the CPU. They must not share
+   * a multiplier: the twilight gain exists to rescue a *sunlit* sky near the
+   * horizon, and applying it to the night term as well turns a moonlit sky into
+   * a bright blue one.
+   */
+  private readonly uDayRadiance = uniform(SKY_RADIANCE_SCALE);
+  private readonly uNightRadiance = uniform(0);
   // Colour uniforms are held loosely typed: TSL's declaration file narrows a
   // colour uniform to a float-ish node, which blocks legitimate vec3 chaining.
   private readonly uGround: any = uniform(new THREE.Color(0.05, 0.09, 0.13));
@@ -325,8 +400,12 @@ export class Atmosphere {
     this.uSunDir.value.copy(this._sunDirection);
     this.uMoonDir.value.copy(this._moonDirection);
     this.uMieG.value = Math.min(0.99, Math.max(0, p.mieDirectionalG));
-    this.uExposure.value = p.exposure;
-    this.uNight.value = Math.min(1, Math.max(0, p.nightIntensity));
+
+    this.nightAmount = Math.min(1, Math.max(0, p.nightIntensity));
+    const night = this.nightAmount;
+    const base = p.exposure * SKY_RADIANCE_SCALE;
+    this.uDayRadiance.value = base * twilightGain(this._sunDirection.y) * (1 - 0.95 * night);
+    this.uNightRadiance.value = base * night;
     this.uGround.value.copy(p.groundColor);
 
     // Preetham's per-frame vertex-stage constants. They depend only on uniforms,
@@ -392,11 +471,11 @@ export class Atmosphere {
       const moonUp = smoothstepScalar(-0.02, 0.15, this._moonDirection.y);
       this.sunLight.position.copy(this._moonDirection).multiplyScalar(SUN_LIGHT_DISTANCE);
       this.sunLight.color.copy(MOON_LIGHT_COLOR);
-      this.sunLight.intensity = 0.42 * moonUp * this.uNight.value;
+      this.sunLight.intensity = 0.42 * moonUp * this.nightAmount;
     }
 
     const day = smoothstepScalar(-0.12, 0.22, this._sunDirection.y);
-    const night = this.uNight.value;
+    const night = this.nightAmount;
 
     // Hemisphere fill approximates the dome's own irradiance: blue-dominant when
     // the sun is high, sun-tinted at low elevations, near-black at night.
@@ -476,10 +555,15 @@ export class Atmosphere {
       // --- night -------------------------------------------------------------
       const nightSky = this.buildNightNode(dir).toVar('nightSky');
 
-      const night = this.uNight;
-      const color = daySky.mul(mix(float(1), float(0.05), night)).add(nightSky.mul(night));
+      const color = daySky
+        .mul(this.uDayRadiance)
+        .add(nightSky.mul(this.uNightRadiance))
+        .toVar('skyColor');
 
-      return vec4(color.mul(this.uExposure).max(vec3(0, 0, 0)), 1.0);
+      const luma = dot(color, vec3(LUMA.x, LUMA.y, LUMA.z));
+      const graded = mix(vec3(luma, luma, luma), color, SKY_CHROMA);
+
+      return vec4(graded.max(vec3(0, 0, 0)), 1.0);
     })();
   }
 
@@ -494,8 +578,10 @@ export class Atmosphere {
     // --- star field ----------------------------------------------------------
     // One candidate star per grid cell of direction space. Sparse enough that a
     // single-cell lookup (no 3x3 neighbourhood) is visually indistinguishable
-    // and three times cheaper.
-    const cellSpace = d.mul(190.0);
+    // and three times cheaper. The cell size is chosen so a star lands at rougly
+    // one pixel at a typical field of view — finer than that and the whole field
+    // aliases away between frames.
+    const cellSpace = d.mul(130.0);
     const cell = floor(cellSpace);
     const local = fract(cellSpace);
 
@@ -507,14 +593,14 @@ export class Atmosphere {
     const starCentre = vec3(r1, r2, r3);
     const dist = local.sub(starCentre).length();
 
-    const present = smoothstep(0.952, 0.988, r0);
-    const core = pow(saturate(float(1).sub(dist.mul(5.5))), 7.0);
+    const present = smoothstep(0.938, 0.985, r0);
+    const core = pow(saturate(float(1).sub(dist.mul(5.0))), 6.0);
     const twinkle = sin(this.uTime.mul(2.6).add(r0.mul(61.0))).mul(0.3).add(0.7);
     const tint = mix(vec3(0.72, 0.81, 1.0), vec3(1.0, 0.88, 0.74), r1);
     const magnitude = r2.mul(0.85).add(0.25);
 
     const horizonFade = smoothstep(-0.03, 0.2, d.y);
-    const stars = tint.mul(core.mul(present).mul(twinkle).mul(magnitude).mul(6.0).mul(horizonFade));
+    const stars = tint.mul(core.mul(present).mul(twinkle).mul(magnitude).mul(11.0).mul(horizonFade));
 
     // --- moon ----------------------------------------------------------------
     const cosMoon = dot(d, this.uMoonDir).toVar('cosMoon');

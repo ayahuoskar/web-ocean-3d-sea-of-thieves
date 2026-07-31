@@ -1,7 +1,9 @@
 import * as THREE from 'three/webgpu';
-import { pass } from 'three/tsl';
+import { pass, positionWorld } from 'three/tsl';
 import { createRenderer, clampPixelRatio, type Backend } from './core/Renderer';
 import { Caustics, UnderwaterParticles, UnderwaterPass } from './underwater';
+import { AssetLoader, Props, Seafloor, Ship } from './scene';
+import { BuoyancySystem, BuoyantBody, Wake, createRadialProbes } from './physics';
 import { Loop } from './core/Loop';
 import { AdaptiveQuality, QUALITY_TIERS, type QualityTier } from './core/QualityManager';
 import { OceanSimulation } from './ocean/OceanSimulation';
@@ -59,6 +61,18 @@ class App {
   private particles!: UnderwaterParticles;
   private caustics!: Caustics;
 
+  private assets!: AssetLoader;
+  private seafloor!: Seafloor;
+  private ship: Ship | null = null;
+  private props: Props | null = null;
+  private buoyancy!: BuoyancySystem;
+  private wake!: Wake;
+  private shipBody: BuoyantBody | null = null;
+
+  /** Scratch — the frame path must not allocate. */
+  private readonly previousShipPosition = new THREE.Vector3();
+  private readonly chaseTarget = { position: new THREE.Vector3(), heading: 0 };
+
   private panel!: Panel;
   private hud!: Hud;
   private loop!: Loop;
@@ -102,11 +116,18 @@ class App {
     });
     this.sampler = new OceanSampler(this.renderer, this.simulation);
 
+    boot.set(0.4, 'Building seafloor…');
+    // The seafloor must exist before the water material: the surface samples its
+    // depth to shade shallows, and that binding is baked into the node graph.
+    this.seafloor = new Seafloor(4000);
+    this.scene.add(this.seafloor.mesh);
+
     boot.set(0.5, 'Compiling water shaders…');
     this.water = new OceanMaterial({
       displacementTextures: this.simulation.displacementTextures,
       derivativeTextures: this.simulation.derivativeTextures,
       tileSizes: this.simulation.tileSizes,
+      floorDepthNode: (worldPosition) => this.seafloor.depthNode(worldPosition),
     });
     this.oceanMesh = new OceanMesh(this.water.material, {
       radialSegments: quality.meshRings,
@@ -136,6 +157,9 @@ class App {
     this.scene.add(this.particles.object);
 
     this.caustics = new Caustics();
+    // Rebuilds the sand shader once, so it happens here at setup and never in a
+    // frame path.
+    this.seafloor.setCaustics(this.caustics.intensityNode(positionWorld));
 
     this.post = new THREE.PostProcessing(this.renderer);
     const scenePass = pass(this.scene, this.camera);
@@ -175,6 +199,55 @@ class App {
     window.setTimeout(() => boot.hide(), 350);
 
     this.exposeTestHooks();
+
+    // Models load after the first frames are on screen. The ocean is the
+    // headline; making the viewer wait on 26 MB of ship textures before seeing
+    // anything would be the wrong trade.
+    void this.loadSceneContent();
+  }
+
+  private async loadSceneContent(): Promise<void> {
+    this.assets = new AssetLoader();
+    this.buoyancy = new BuoyancySystem();
+    this.wake = new Wake();
+    this.scene.add(this.wake.debugObject);
+
+    try {
+      const [ship, props] = await Promise.all([
+        Ship.load(this.assets),
+        Props.load(this.assets),
+      ]);
+      if (this.disposed) return;
+
+      this.ship = ship;
+      this.props = props;
+      this.scene.add(ship.object, props.object);
+
+      this.shipBody = new BuoyantBody({
+        object: ship.object,
+        probePoints: ship.probePoints,
+        mass: 90_000,
+      });
+      this.buoyancy.add(this.shipBody);
+
+      for (const floater of props.floaters) {
+        this.buoyancy.add(
+          new BuoyantBody({
+            object: floater.object,
+            probePoints: createRadialProbes(floater.radius),
+            // Rough displacement for a hollow float of this size.
+            mass: 40 * floater.radius * floater.radius * floater.radius,
+          }),
+        );
+      }
+
+      ship.setDebugProbesVisible(this.state.buoyancyProbes);
+      this.wake.setDebugVisible(this.state.wakeProbes);
+      this.previousShipPosition.copy(ship.object.position);
+    } catch (error) {
+      // Missing models must not take the ocean down with them.
+      console.error('[ocean] scene content failed to load', error);
+    }
   }
 
   private buildUi(): void {
@@ -216,6 +289,12 @@ class App {
       case 'cameraMode':
         this.director.setMode(this.state.cameraMode);
         this.hud.setCameraMode(this.state.cameraMode);
+        break;
+      case 'buoyancyProbes':
+        this.ship?.setDebugProbesVisible(this.state.buoyancyProbes);
+        break;
+      case 'wakeProbes':
+        this.wake?.setDebugVisible(this.state.wakeProbes);
         break;
       case 'forceWebGL':
         // Switching backend means tearing down every GPU resource and rebuilding
@@ -330,9 +409,38 @@ class App {
     this.caustics.setSunDirection(this.atmosphere.sunDirection);
     this.caustics.update(dt);
 
+    this.updateSceneContent(dt);
+
     this.hud.setFps(this.loop.stats.fps);
     this.adaptive.update(dt, this.loop.stats.fps, this.state.quality, elapsed);
   };
+
+  /** Physics, wake and chase camera. No-ops cleanly until the models land. */
+  private updateSceneContent(dt: number): void {
+    if (!this.buoyancy) return;
+
+    // Safe before the sampler's first readback resolves: it reports height 0 and
+    // bodies simply settle to flat water rather than producing NaN.
+    this.buoyancy.update(dt, this.sampler);
+
+    const ship = this.ship;
+    if (!ship) return;
+
+    ship.update(dt);
+
+    const position = ship.object.position;
+    const speed = this.previousShipPosition.distanceTo(position) / Math.max(dt, 1e-4);
+    this.previousShipPosition.copy(position);
+
+    this.wake.setCenter(position.x, position.z);
+    this.wake.emit(position.x, position.z, ship.heading, speed, ship.hullBeam);
+    // Must run outside an active render target; it saves and restores its own.
+    this.wake.update(dt, this.renderer);
+
+    this.chaseTarget.position.copy(position);
+    this.chaseTarget.heading = ship.heading;
+    this.director.setChaseTarget(this.chaseTarget);
+  }
 
   private onResize = (): void => {
     this.camera.aspect = window.innerWidth / window.innerHeight;
@@ -398,6 +506,12 @@ class App {
     this.underwater?.dispose();
     this.particles?.dispose();
     this.caustics?.dispose();
+    this.buoyancy?.dispose();
+    this.wake?.dispose();
+    this.ship?.dispose();
+    this.props?.dispose();
+    this.seafloor?.dispose();
+    this.assets?.dispose();
     this.renderer?.dispose();
   }
 }

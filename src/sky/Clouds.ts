@@ -9,12 +9,14 @@ import {
   dot,
   exp,
   float,
+  interleavedGradientNoise,
   max,
   min,
   mx_fractal_noise_float,
   normalize,
   positionGeometry,
   pow,
+  screenCoordinate,
   smoothstep,
   uniform,
   vec3,
@@ -71,10 +73,52 @@ const MAX_STEPS = 96;
 const LIGHT_STEPS = 4;
 
 /** Longest slab crossing we will march, as a multiple of `thickness`. */
-const MAX_SPAN_FACTOR = 14;
+const MAX_SPAN_FACTOR = 10;
 
 /** Feature scale of the base noise: 1 noise unit ~= 1/NOISE_SCALE metres. */
 const NOISE_SCALE = 0.00055;
+
+/**
+ * Measured quantiles of `mx_fractal_noise_float(p, 4, 2, 0.5, 1) * 0.5 + 0.5`,
+ * sampled over a 256^2 patch: the field is near-Gaussian around 0.5 with
+ * sigma ~= 0.16, NOT uniform over 0..1.
+ *
+ * That matters because the naive `threshold = 1 - coverage` remap is then wildly
+ * non-linear — coverage 0.32 would put the threshold at 0.68, i.e. above the
+ * 90th percentile, leaving the sky essentially clear. Mapping coverage through
+ * the measured inverse CDF instead makes the slider behave as "fraction of sky
+ * covered", which is what the demo's Cloud Coverage control implies.
+ *
+ * Pairs are [coveredFraction, noiseThreshold], ascending in fraction.
+ */
+const COVERAGE_QUANTILES: ReadonlyArray<readonly [number, number]> = [
+  [0.0, 1.05],
+  [0.05, 0.761],
+  [0.25, 0.612],
+  [0.5, 0.502],
+  [0.75, 0.388],
+  [0.95, 0.239],
+  [1.0, -0.06],
+];
+
+/** Softness of the cloud edge in noise units. Crisper = puffier cumulus. */
+const EDGE_WIDTH = 0.1;
+
+/** Strength of the single-scattering term with the sun fully above the horizon. */
+const SUN_GAIN = 1.5;
+
+function coverageToThreshold(coverage: number): number {
+  const c = Math.min(1, Math.max(0, coverage));
+  for (let i = 1; i < COVERAGE_QUANTILES.length; i++) {
+    const [f1, t1] = COVERAGE_QUANTILES[i];
+    if (c <= f1) {
+      const [f0, t0] = COVERAGE_QUANTILES[i - 1];
+      const k = f1 === f0 ? 0 : (c - f0) / (f1 - f0);
+      return t0 + (t1 - t0) * k;
+    }
+  }
+  return COVERAGE_QUANTILES[COVERAGE_QUANTILES.length - 1][1];
+}
 
 export class Clouds {
   readonly mesh: THREE.Mesh;
@@ -88,7 +132,8 @@ export class Clouds {
   private readonly windVector = new THREE.Vector3(1, 0, 0);
 
   // --- uniforms -------------------------------------------------------------
-  private readonly uCoverage = uniform(0.32);
+  /** Noise threshold derived from `coverage` on the CPU — see COVERAGE_QUANTILES. */
+  private readonly uThreshold = uniform(0.66);
   private readonly uDensity = uniform(1);
   private readonly uAltitude = uniform(1400);
   private readonly uThickness = uniform(700);
@@ -103,7 +148,7 @@ export class Clouds {
   /** Extinction per metre of unit density. */
   private readonly uExtinction = uniform(0.006);
   private readonly uLightStep = uniform(175);
-  private readonly uSunGain = uniform(1.5);
+  private readonly uSunGain = uniform(SUN_GAIN);
   private readonly uAmbientGain = uniform(0.55);
 
   constructor() {
@@ -165,6 +210,11 @@ export class Clouds {
 
   setSunDirection(dir: THREE.Vector3): void {
     this.uSunDir.value.copy(dir).normalize();
+    // Once the sun is under the horizon the single-scattering term has to go
+    // with it, otherwise the deck stays lit like midday against a night sky.
+    // Derived here rather than exposed, so callers only have to push the vector.
+    const above = Math.min(1, Math.max(0, (this.uSunDir.value.y + 0.09) / 0.18));
+    this.uSunGain.value = SUN_GAIN * above * above * (3 - 2 * above);
   }
 
   update(dt: number): void {
@@ -188,7 +238,7 @@ export class Clouds {
   private applyParams(): void {
     const p = this.params;
 
-    this.uCoverage.value = Math.min(1, Math.max(0, p.coverage));
+    this.uThreshold.value = coverageToThreshold(p.coverage);
     this.uDensity.value = Math.max(0, p.density);
     this.uAltitude.value = p.altitude;
     this.uThickness.value = Math.max(1, p.thickness);
@@ -211,23 +261,32 @@ export class Clouds {
    * `Fn` with a declared layout so it inlines at both call sites (main march and
    * light march) without needing an exact TSL signature.
    */
-  private densityAt(p: any): any {
+  /**
+   * @param softness 0..1 LOD term. The march step grows with distance, so far
+   *   clouds are sampled far below the Nyquist rate of the noise field and
+   *   shimmer. Widening the density edge in step with the step size band-limits
+   *   the field instead — distant decks go smooth rather than hatched.
+   */
+  private densityAt(p: any, softness: any): any {
     const h = p.y.sub(this.uAltitude).div(this.uThickness);
 
-    // Flat base, rounded top — the cumulus profile in ref-default.png.
-    const profile = smoothstep(0.0, 0.14, h).mul(smoothstep(1.0, 0.5, h));
+    // Flat base, rounded top — the cumulus profile in ref-default.png. Raising
+    // the threshold toward the top and bottom of the slab (rather than only
+    // scaling density) is what makes the puffs read as rounded volumes instead
+    // of as a sheet with soft edges.
+    const profile = smoothstep(0.0, 0.12, h).mul(smoothstep(1.0, 0.42, h));
 
     const q = p.sub(this.uWindOffset).mul(NOISE_SCALE);
     const base = mx_fractal_noise_float(q, 4, 2.0, 0.5, 1.0).mul(0.5).add(0.5);
     // A second, higher-frequency field erodes the billow edges so the silhouette
-    // is not a smooth blob.
+    // is not a smooth blob. Centred on zero so it breaks edges up without
+    // shifting the overall coverage the threshold was calibrated for.
     const detail = mx_fractal_noise_float(q.mul(4.3).add(vec3(7.3, 2.1, 5.7)), 3, 2.0, 0.5, 1.0)
-      .mul(0.5)
-      .add(0.5);
+      .mul(0.5);
 
-    // Coverage remaps the threshold: 0 -> nothing survives, 1 -> everything does.
-    const threshold = float(1).sub(this.uCoverage);
-    const shaped = smoothstep(threshold, threshold.add(0.22), base.sub(detail.mul(0.17)));
+    const edge = this.uThreshold.add(float(1).sub(profile).mul(0.22));
+    const width = float(EDGE_WIDTH).add(softness.mul(0.4));
+    const shaped = smoothstep(edge, edge.add(width), base.add(detail.mul(0.3)));
 
     return shaped.mul(profile).mul(this.uDensity);
   }
@@ -252,27 +311,40 @@ export class Clouds {
 
         If(tExit.greaterThan(tEnter), () => {
           const stepSize = tExit.sub(tEnter).mul(this.uInvSteps).toVar('cloudStep');
-          const t = tEnter.add(stepSize.mul(0.5)).toVar('cloudT');
+          // Offsetting each pixel's first sample turns the raymarch's concentric
+          // banding into fine noise, which reads as cloud texture instead of as
+          // contour lines. Interleaved gradient noise rather than a plain hash:
+          // a 2D hash of the pixel coordinate leaves visible diagonal hatching at
+          // these step counts, IGN does not.
+          const jitter = interleavedGradientNoise(screenCoordinate);
+          const t = tEnter.add(stepSize.mul(jitter)).toVar('cloudT');
 
           const transmittance = float(1).toVar('cloudTr');
           const scattered = vec3(0, 0, 0).toVar('cloudScatter');
 
           const cosTheta = dot(rd, this.uSunDir).toVar('cloudCos');
           // Strong forward lobe + a weak backward lobe: the forward term is what
-          // makes cloud edges glow when the sun is behind them.
-          const phase = hg(cosTheta, 0.76).mul(0.75).add(hg(cosTheta, -0.2).mul(0.25)).mul(12.566)
-            .toVar('cloudPhase');
+          // makes cloud edges glow when the sun is behind them. The raw HG spike
+          // is ~30x at zero scattering angle, which blows the disc around the sun
+          // to pure white, so it is clamped to a usable silver-lining range.
+          const phase = clamp(
+            hg(cosTheta, 0.76).mul(0.75).add(hg(cosTheta, -0.2).mul(0.25)).mul(12.566),
+            0.35,
+            3.2,
+          ).toVar('cloudPhase');
+
+          const softness = clamp(stepSize.mul(0.0032), 0.0, 1.0).toVar('cloudLod');
 
           Loop(this.uSteps, () => {
             const p = ro.add(rd.mul(t));
-            const d = this.densityAt(p).toVar('cloudD');
+            const d = this.densityAt(p, softness).toVar('cloudD');
 
             If(d.greaterThan(0.002), () => {
               // --- single-scattering: transmittance toward the sun ------------
               const lightAcc = float(0).toVar('cloudLightAcc');
               Loop(LIGHT_STEPS, ({ i }: any) => {
                 const lp = p.add(this.uSunDir.mul(this.uLightStep.mul(float(i).add(1.0))));
-                lightAcc.addAssign(this.densityAt(lp));
+                lightAcc.addAssign(this.densityAt(lp, softness));
               });
               const lightT = exp(
                 lightAcc.mul(this.uLightStep).mul(this.uExtinction).negate(),
@@ -301,13 +373,17 @@ export class Clouds {
             });
           });
 
-          result.assign(vec4(scattered, float(1).sub(transmittance)));
+          // Aerial perspective: the deck has to dissolve into haze with distance
+          // or the slab reads as a hard ceiling with a cut-off edge. Kept gentle
+          // — too strong and full overcast stops reaching the horizon.
+          const distanceFade = exp(tEnter.mul(-0.000012));
+          result.assign(vec4(scattered, float(1).sub(transmittance).mul(distanceFade)));
         });
       });
 
-      // Fade the slab out at the horizon (where it would otherwise stretch to
-      // infinity) and dim it slightly with distance for aerial perspective.
-      const horizonFade = smoothstep(0.015, 0.13, up);
+      // Fade the slab out at the horizon, where it would otherwise stretch to
+      // infinity along a grazing ray.
+      const horizonFade = smoothstep(0.015, 0.075, up);
       const alpha = clamp(result.w.mul(horizonFade), 0.0, 1.0);
 
       return vec4(result.xyz, alpha);

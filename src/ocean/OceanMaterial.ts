@@ -53,6 +53,13 @@ export interface OceanMaterialInputs {
   displacementTextures: THREE.Texture[];
   derivativeTextures: THREE.Texture[];
   tileSizes: number[];
+  /**
+   * Optional: a node returning the seafloor's depth below y=0 at a world
+   * position. Supplying it switches the transmission term from a view-angle
+   * approximation to a real water-column thickness, which is what produces the
+   * turquoise-over-sand shallows and the hard read of a drop-off.
+   */
+  floorDepthNode?: ((worldPosition: any) => any) | null;
 }
 
 /**
@@ -149,6 +156,7 @@ export class OceanMaterial {
   private build(inputs: OceanMaterialInputs): void {
     const { displacementTextures, derivativeTextures, tileSizes } = inputs;
     const cascadeCount = displacementTextures.length;
+    const floorDepth = inputs.floorDepthNode ?? null;
 
     // ------------------------------------------------------------- vertex stage
     this.material.positionNode = Fn(() => {
@@ -213,9 +221,19 @@ export class OceanMaterial {
       const fresnel = f0.add(float(1).sub(f0).mul(fresnelPow)).clamp(0, 1).toVar();
 
       // --- transmitted colour -------------------------------------------------
-      // Grazing views look through more water, so the body darkens toward the
-      // horizon while steep views let the shallow tint through.
-      const pathLength = float(1).div(nDotV).mul(3.5).toVar();
+      // Path length through the water column. With a seafloor we can use the real
+      // thickness, refracted along the view ray, which is what makes shallows read
+      // as turquoise-over-sand and a drop-off read as a hard edge. Without one we
+      // fall back to a view-angle approximation: grazing views look through more
+      // water, so the body darkens toward the horizon.
+      const pathLength = (
+        floorDepth === null
+          ? float(1).div(nDotV).mul(3.5)
+          : // Snell-ish stretch: the ray bends toward vertical entering water, so
+            // the column is travelled at less than the naive 1/cos(theta).
+            floorDepth(worldPos).max(0).mul(float(1).div(nDotV.max(0.25)))
+      ).toVar();
+
       const absorption = this.uExtinction.mul(pathLength).negate().exp().toVar();
       const bodyColor = mix(this.uDeepColor, this.uShallowColor, absorption as never).toVar();
 

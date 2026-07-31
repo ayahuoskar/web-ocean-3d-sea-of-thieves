@@ -67,15 +67,36 @@ The gates the suite enforces:
 FPS is additionally asserted (> 55 and > 30 respectively) only when the browser
 is not throttling rAF.
 
-### Observed so far
+## Results
 
-| Configuration | Frame work | Delivered FPS | Note |
+Full scene — ocean, sky, volumetric clouds, seafloor, ship, island, buoys,
+barrels, wake and underwater pass — at 1600 × 900, DPR 1, WebGPU, in an
+instrumented interactive session.
+
+| Configuration | Median frame work | Max | Samples |
 |---|---|---|---|
-| WebGPU · High · 1600×900 | **0.8 ms** | 1.1 | rAF throttled; work is 5% of the 16.7 ms budget |
+| WebGPU · Low | 0.3 ms | 0.6 ms | 4 |
+| WebGPU · High | 1.1 ms | 4.6 ms | 5 |
+| WebGPU · Max | 0.8 ms | 0.9 ms | 5 |
 
-That single figure is from an instrumented interactive session, not a clean
-benchmark run — see the empty results table below, which is deliberately not
-filled with throttled numbers.
+**Read these with the caveats above, not as a clean benchmark.** Specifically:
+
+- The sample counts are 4–5 over a four-second window. That is the rAF throttle
+  again: the browser delivered roughly one frame per second, so these are a
+  handful of real measurements rather than a distribution.
+- `frameMs` is wall-clock around the render call, and WebGPU submits most work
+  asynchronously, so it **undercounts GPU time**. Max scoring lower than High is
+  not physically meaningful — it is noise at this sample size, and a reminder
+  that these numbers cannot resolve differences of under a millisecond.
+- A one-off **57.6 ms** frame was observed immediately after the ship and props
+  finished loading, which is pipeline compilation for the newly added materials,
+  not steady-state cost. It is the strongest argument for compiling scene
+  materials during the boot overlay rather than on first draw — see Known gaps.
+
+What these figures *do* support: CPU-side cost per frame is far below the 16.7 ms
+budget at every tier, and nothing in the scene produces a sustained stall. What
+they do **not** establish is the true GPU frame time, which needs timestamp
+queries and a browser that is not pacing rAF.
 
 ## Cost model
 
@@ -112,16 +133,15 @@ asserts the renderer's texture and geometry counts have not grown beyond a small
 allowance. Every tier change disposes the previous FFT targets, surface material
 and ocean geometry before allocating replacements.
 
-## Results
+## Known gaps
 
-> Populate from a clean run on the machine above.
-
-| Configuration | Median FPS | Median frame ms |
-|---|---|---|
-| WebGPU · Low | | |
-| WebGPU · Medium | | |
-| WebGPU · High | | |
-| WebGPU · Ultra | | |
-| WebGPU · Max | | |
-| WebGL2 · Low | | |
-| WebGL2 · High | | |
+- **No true GPU timings.** Needs timestamp queries; `frameMs` is a CPU-side upper
+  bound only.
+- **No clean benchmark run.** Every measurement so far was taken in a browser
+  that was throttling rAF. A headed, focused browser with vsync disabled would
+  give a real distribution.
+- **Material compilation is not prewarmed.** The 57.6 ms spike after asset load
+  should be removed by compiling scene materials behind the boot overlay
+  (`renderer.compileAsync`) instead of on first draw.
+- **WebGL2 tiers unmeasured.** The fallback renders correctly and is exercised by
+  the suite, but no frame-cost figures have been collected for it.
