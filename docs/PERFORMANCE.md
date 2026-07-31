@@ -12,9 +12,28 @@ All figures come from the assertions in `tests/ocean.spec.ts` and the helpers in
   mean by several FPS and tells you nothing about the steady state.
 - Playwright runs with `workers: 1`. Parallel WebGPU contexts contend for one
   device, which turns any frame-rate assertion into a coin flip.
-- Measurements must be taken with nothing else using the GPU. During development
-  of this project, concurrent headless browser sessions dropped the observed rate
-  from 60 to 1–3 FPS — a reading that says nothing about the renderer.
+### rAF throttling — read this before trusting any FPS number
+
+**Automated Chromium throttles `requestAnimationFrame` independently of load.**
+This project was measured at **1.1 FPS while spending 0.8 ms per frame** — work
+that corresponds to roughly 1250 FPS. The same ~1.00 fps appears with god rays
+off, particles off and submersion zero, which is the tell: the number does not
+respond to workload at all, so it is describing the harness, not the renderer.
+
+Consequently the suite asserts on **per-frame work (`frameMs`)**, not on
+delivered frame rate. `measureFrameRate` returns a `rafThrottled` flag, and the
+FPS assertion is only applied when that flag is false — so a genuine regression
+on an interactive run still fails the gate, while a throttled CI run does not
+produce a meaningless failure.
+
+Two further caveats on `frameMs`:
+
+- It measures the wall-clock cost of the render call. On WebGPU much of the GPU
+  work is submitted asynchronously, so this **undercounts true GPU time**. It is
+  a sound regression signal and an upper bound on CPU-side cost, not a GPU
+  profile. Real GPU timings need timestamp queries, which this project does not
+  yet implement.
+- Take measurements with nothing else using the GPU.
 
 Reproduce with:
 
@@ -42,8 +61,21 @@ The gates the suite enforces:
 
 | Configuration | Gate | Rationale |
 |---|---|---|
-| WebGPU, High | > 55 FPS | the target desktop experience |
-| WebGL2, Low | > 30 FPS | the fallback floor |
+| WebGPU, High | frame work < 16.7 ms | the 60 FPS target desktop budget |
+| WebGL2, Low | frame work < 33.3 ms | the 30 FPS fallback floor |
+
+FPS is additionally asserted (> 55 and > 30 respectively) only when the browser
+is not throttling rAF.
+
+### Observed so far
+
+| Configuration | Frame work | Delivered FPS | Note |
+|---|---|---|---|
+| WebGPU · High · 1600×900 | **0.8 ms** | 1.1 | rAF throttled; work is 5% of the 16.7 ms budget |
+
+That single figure is from an instrumented interactive session, not a clean
+benchmark run — see the empty results table below, which is deliberately not
+filled with throttled numbers.
 
 ## Cost model
 

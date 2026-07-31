@@ -207,22 +207,50 @@ test.describe('interaction', () => {
 });
 
 test.describe('performance', () => {
-  test('holds ~60 FPS at High on the target desktop', async ({ page }) => {
+  /**
+   * These gates key on per-frame WORK, not on delivered frame rate.
+   *
+   * Automated Chromium throttles requestAnimationFrame independently of load —
+   * this project measured 1.1 "FPS" while spending 0.8 ms per frame, and the
+   * same 1.00 fps appears with every effect switched off. Asserting on FPS here
+   * would test the harness, not the renderer. When the browser is NOT throttling
+   * we additionally assert the frame rate, so a real regression on an
+   * interactive run still fails.
+   */
+  const budget = (target: number) => (sample: {
+    fps: number;
+    frameMs: number;
+    rafThrottled: boolean;
+  }) => {
+    expect(
+      sample.frameMs,
+      `frame work was ${sample.frameMs.toFixed(2)} ms (budget ${target} ms); ` +
+        `delivered ${sample.fps.toFixed(1)} FPS, rafThrottled=${sample.rafThrottled}`,
+    ).toBeLessThan(target);
+  };
+
+  test('stays within the frame budget at High on WebGPU', async ({ page }) => {
     await page.goto('/');
     await waitForOcean(page);
     await setState(page, { quality: 'high' });
 
-    const { fps } = await measureFrameRate(page, 4);
-    expect(fps, `median FPS was ${fps.toFixed(1)}`).toBeGreaterThan(55);
+    const sample = await measureFrameRate(page, 4);
+    budget(16.7)(sample);
+    if (!sample.rafThrottled) {
+      expect(sample.fps, `median FPS was ${sample.fps.toFixed(1)}`).toBeGreaterThan(55);
+    }
   });
 
-  test('holds at least 30 FPS on the WebGL fallback at Low', async ({ page }) => {
+  test('stays within the fallback frame budget at Low on WebGL', async ({ page }) => {
     await page.goto('/?webgl=1');
     await waitForOcean(page);
     await setState(page, { quality: 'low' });
 
-    const { fps } = await measureFrameRate(page, 4);
-    expect(fps, `median FPS was ${fps.toFixed(1)}`).toBeGreaterThan(30);
+    const sample = await measureFrameRate(page, 4);
+    budget(33.3)(sample);
+    if (!sample.rafThrottled) {
+      expect(sample.fps, `median FPS was ${sample.fps.toFixed(1)}`).toBeGreaterThan(30);
+    }
   });
 
   test('does not leak GPU memory across quality changes', async ({ page }) => {

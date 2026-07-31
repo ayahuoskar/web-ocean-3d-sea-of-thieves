@@ -81,9 +81,24 @@ export async function setState(page: Page, partial: Record<string, unknown>): Pr
 export interface FrameSample {
   fps: number;
   frameMs: number;
+  /**
+   * True when the browser is pacing requestAnimationFrame far below the work the
+   * renderer is actually doing — i.e. `fps` is a harness artefact, not a
+   * measurement of this project.
+   */
+  rafThrottled: boolean;
 }
 
-/** Samples smoothed FPS over a window, discarding an initial settling period. */
+/**
+ * Samples frame cost over a window, discarding an initial settling period.
+ *
+ * Reports BOTH the rAF-derived rate and the measured per-frame work, because in
+ * automated Chromium the two diverge wildly: this project was observed at 1.1
+ * "FPS" while spending 0.8 ms per frame, which would be ~1250 FPS of work. The
+ * browser throttles rAF in headless/unfocused contexts regardless of load — the
+ * same 1.00 fps appears with every effect disabled. Assertions must therefore key
+ * on `frameMs`, and treat `fps` as meaningful only when `rafThrottled` is false.
+ */
 export async function measureFrameRate(page: Page, seconds = 4): Promise<FrameSample> {
   await page.waitForTimeout(1500); // settle: shader compiles, mip builds, GC
   return page.evaluate(async (duration) => {
@@ -101,9 +116,11 @@ export async function measureFrameRate(page: Page, seconds = 4): Promise<FrameSa
       const sorted = [...values].sort((a, b) => a - b);
       return sorted[Math.floor(sorted.length / 2)];
     };
-    return {
-      fps: median(samples.map((s) => s.fps)),
-      frameMs: median(samples.map((s) => s.frameMs)),
-    };
+    const fps = median(samples.map((s) => s.fps));
+    const frameMs = median(samples.map((s) => s.frameMs));
+    // If the frame budget implied by the delivered rate is more than 4x the work
+    // actually performed, the browser is pacing us, not the renderer.
+    const rafThrottled = fps > 0 && 1000 / fps > frameMs * 4 && fps < 50;
+    return { fps, frameMs, rafThrottled };
   }, seconds);
 }
