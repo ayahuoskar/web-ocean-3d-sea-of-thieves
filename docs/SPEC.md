@@ -134,3 +134,26 @@ viewer and cheap at the horizon, and avoids the seams and popping of discrete LO
 
 **GPU→CPU readback for buoyancy.** A small (64²) height slice is read back asynchronously
 each frame so ship physics stays on the CPU without stalling the pipeline.
+
+## 4. Measured behaviour
+
+Numbers read directly off the GPU rather than judged by eye. Reproduce them with the
+assertions in `tests/ocean.spec.ts`.
+
+| Quantity | Measured | Expected | Notes |
+|---|---|---|---|
+| Crest amplitude, cascade 0 | ±1.4 m | metres | 15 m/s wind, 47 m peak |
+| Surface RMS elevation | 0.433 / 0.322 / 0.066 m | decreasing per cascade | swell / chop / ripple |
+| Mean Jacobian | 0.86 / 0.95 / 0.98 | just under 1 | below 1 means net folding |
+| Folded area (J < 0) | 0.1 % | a fraction of a percent | was 8.8 % before the FFT fix |
+| Whitecap coverage | 4.6 % | few percent at 15 m/s | matches observed sea state |
+| Significant wave height | 2.17 m | see below | |
+
+**On significant wave height.** The Pierson–Moskowitz relation `Hs ≈ 0.22 U²/g` gives
+5.05 m at 15 m/s, which our 2.17 m appears to miss badly. It does not: PM describes a
+*fully developed* sea, whose spectral peak at 15 m/s sits near 190 m. The demo exposes
+peak wavelength as a control and defaults it to 47 m, which is a fetch-limited sea — a
+shorter, steeper, lower-amplitude state. A fetch-limited spectrum is *expected* to carry
+less variance than the fully developed one at the same wind speed, so the two figures
+are not comparable and the simulation is not under-energised. Comparing against PM is
+only valid with the peak wavelength set to the fully developed value for the chosen wind.
