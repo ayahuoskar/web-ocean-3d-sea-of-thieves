@@ -1,5 +1,7 @@
 import * as THREE from 'three/webgpu';
+import { pass } from 'three/tsl';
 import { createRenderer, clampPixelRatio, type Backend } from './core/Renderer';
+import { Caustics, UnderwaterParticles, UnderwaterPass } from './underwater';
 import { Loop } from './core/Loop';
 import { AdaptiveQuality, QUALITY_TIERS, type QualityTier } from './core/QualityManager';
 import { OceanSimulation } from './ocean/OceanSimulation';
@@ -51,6 +53,11 @@ class App {
   private atmosphere!: Atmosphere;
   private clouds!: Clouds;
   private weather!: Weather;
+
+  private post!: THREE.PostProcessing;
+  private underwater!: UnderwaterPass;
+  private particles!: UnderwaterParticles;
+  private caustics!: Caustics;
 
   private panel!: Panel;
   private hud!: Hud;
@@ -117,6 +124,28 @@ class App {
     this.weather = new Weather();
     this.scene.add(this.weather.object);
 
+    boot.set(0.8, 'Building underwater pass…');
+    this.underwater = new UnderwaterPass();
+    // Required, not optional: a post pass is drawn with the post-processor's own
+    // orthographic quad camera, so the built-in camera nodes resolve to that quad
+    // rather than the scene camera. Without this the depth buffer cannot be
+    // linearised and the sun cannot be projected to screen space.
+    this.underwater.setCamera(this.camera);
+
+    this.particles = new UnderwaterParticles(quality.underwaterParticles);
+    this.scene.add(this.particles.object);
+
+    this.caustics = new Caustics();
+
+    this.post = new THREE.PostProcessing(this.renderer);
+    const scenePass = pass(this.scene, this.camera);
+    this.post.outputNode = this.underwater.build(
+      scenePass.getTextureNode(),
+      // Must be the depth *texture* node: the pass re-samples it at offset
+      // coordinates to mask the shafts, which a view-z node cannot support.
+      scenePass.getTextureNode('depth'),
+    ) as THREE.Node;
+
     boot.set(0.85, 'Wiring controls…');
     this.director = new CameraDirector({
       camera: this.camera,
@@ -137,7 +166,7 @@ class App {
     window.addEventListener('resize', this.onResize);
 
     this.loop = new Loop(() => {
-      this.renderer.render(this.scene, this.camera);
+      this.post.render();
     });
     this.loop.add(this.update);
 
@@ -274,6 +303,33 @@ class App {
     this.oceanMesh.recenter(this.camera.position);
     this.water.setWorldOffset(this.oceanMesh.mesh.position.x, this.oceanMesh.mesh.position.z);
 
+    // --- underwater state -----------------------------------------------------
+    // `submersion` is a soft band around the surface rather than a boolean, so
+    // crossing the waterline cross-fades instead of popping.
+    const submersion = this.director.submersion();
+    const surface = this.sampler.height(this.camera.position.x, this.camera.position.z);
+    const preset = getPreset(this.state.preset);
+
+    this.underwater.setParams({
+      submersion,
+      cameraDepth: Math.max(0, surface - this.camera.position.y),
+      sunDirection: this.atmosphere.sunDirection,
+      sunColor: this.atmosphere.sunColor,
+      waterColor: preset.underwater.color,
+      extinction: preset.underwater.extinction,
+      visibility: preset.underwater.visibility,
+      godRayStrength: preset.underwater.godRayStrength,
+      godRaySteps: QUALITY_TIERS[this.state.quality].godRaySteps,
+    });
+    this.underwater.update(dt);
+
+    // Particles only cost anything while they can actually be seen.
+    this.particles.setVisible(submersion > 0.01);
+    if (submersion > 0.01) this.particles.update(dt, this.camera.position);
+
+    this.caustics.setSunDirection(this.atmosphere.sunDirection);
+    this.caustics.update(dt);
+
     this.hud.setFps(this.loop.stats.fps);
     this.adaptive.update(dt, this.loop.stats.fps, this.state.quality, elapsed);
   };
@@ -339,6 +395,9 @@ class App {
     this.atmosphere?.dispose();
     this.clouds?.dispose();
     this.weather?.dispose();
+    this.underwater?.dispose();
+    this.particles?.dispose();
+    this.caustics?.dispose();
     this.renderer?.dispose();
   }
 }
