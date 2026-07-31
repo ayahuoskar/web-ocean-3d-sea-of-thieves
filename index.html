@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#04101d" />
+    <title>Web Ocean 3D — Realtime WebGPU Ocean</title>
+    <meta
+      name="description"
+      content="A realtime spectral ocean rendered with Three.js, WebGPU and TSL: FFT waves, physically based water lighting, caustics, foam, buoyancy and underwater transitions."
+    />
+    <link rel="stylesheet" href="/src/ui/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="viewport" aria-label="Realtime ocean viewport"></canvas>
+      <div id="ui-root"></div>
+      <div id="boot" class="boot">
+        <div class="boot__inner">
+          <div class="boot__title">WEB <span>OCEAN</span> 3D</div>
+          <div class="boot__bar"><i id="boot-bar"></i></div>
+          <div class="boot__status" id="boot-status">Initialising renderer…</div>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

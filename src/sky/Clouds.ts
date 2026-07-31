@@ -1,0 +1,323 @@
+import * as THREE from 'three/webgpu';
+import {
+  Break,
+  Fn,
+  If,
+  Loop,
+  cameraPosition,
+  clamp,
+  dot,
+  exp,
+  float,
+  max,
+  min,
+  mx_fractal_noise_float,
+  normalize,
+  positionGeometry,
+  pow,
+  smoothstep,
+  uniform,
+  vec3,
+  vec4,
+} from 'three/tsl';
+
+/**
+ * Raymarched volumetric cloud layer.
+ *
+ * The layer is a horizontal slab of procedural FBM density between `altitude`
+ * and `altitude + thickness`. It is rendered on a camera-locked dome: the dome
+ * only supplies view rays, the march itself happens in world space, so the dome
+ * radius is unrelated to the cloud altitude.
+ *
+ * Density is entirely procedural (`mx_fractal_noise_float`) — there is no 3D
+ * noise texture to download and nothing to keep resident in VRAM.
+ *
+ * Lighting is single-scattering: a short secondary march toward the sun gives
+ * per-sample transmittance (bright tops, dark bases), combined with a
+ * Henyey–Greenstein lobe that produces the silver lining when looking near the
+ * sun. Compare ref-default.png (scattered cumulus) and ref-storm.png (overcast).
+ */
+
+export interface CloudParams {
+  coverage: number; // 0..1, wired to the demo's Cloud Coverage slider
+  density: number;
+  altitude: number; // metres
+  thickness: number;
+  windSpeed: number;
+  windDirection: number;
+  steps: number; // raymarch steps; 0 disables the layer entirely
+  color: THREE.Color;
+  shadowColor: THREE.Color;
+}
+
+export const DEFAULT_CLOUD_PARAMS: CloudParams = {
+  coverage: 0.32,
+  density: 1,
+  altitude: 1400,
+  thickness: 700,
+  windSpeed: 9,
+  windDirection: 2.6,
+  steps: 24,
+  color: new THREE.Color(1.0, 0.99, 0.96),
+  shadowColor: new THREE.Color(0.34, 0.38, 0.47),
+};
+
+/** Dome radius in metres — see Atmosphere for why this can be small. */
+const DOME_RADIUS = 100;
+
+/** Hard ceiling on the loop the shader is compiled with. */
+const MAX_STEPS = 96;
+/** Secondary samples taken toward the sun per march step. */
+const LIGHT_STEPS = 4;
+
+/** Longest slab crossing we will march, as a multiple of `thickness`. */
+const MAX_SPAN_FACTOR = 14;
+
+/** Feature scale of the base noise: 1 noise unit ~= 1/NOISE_SCALE metres. */
+const NOISE_SCALE = 0.00055;
+
+export class Clouds {
+  readonly mesh: THREE.Mesh;
+
+  private readonly params: CloudParams;
+  private readonly geometry: THREE.SphereGeometry;
+  private readonly material: THREE.MeshBasicNodeMaterial;
+
+  /** Integrated wind displacement, metres. Reused — never reallocated. */
+  private readonly windOffset = new THREE.Vector3();
+  private readonly windVector = new THREE.Vector3(1, 0, 0);
+
+  // --- uniforms -------------------------------------------------------------
+  private readonly uCoverage = uniform(0.32);
+  private readonly uDensity = uniform(1);
+  private readonly uAltitude = uniform(1400);
+  private readonly uThickness = uniform(700);
+  // Loosely typed on purpose — see the note in Atmosphere.ts. `uSteps` also has
+  // to be usable as a dynamic `Loop` bound, which the typings do not model.
+  private readonly uSteps: any = uniform(24, 'int');
+  private readonly uInvSteps = uniform(1 / 24);
+  private readonly uColor: any = uniform(new THREE.Color(1, 1, 1));
+  private readonly uShadowColor: any = uniform(new THREE.Color(0.34, 0.38, 0.47));
+  private readonly uSunDir = uniform(new THREE.Vector3(0, 1, 0));
+  private readonly uWindOffset = uniform(new THREE.Vector3());
+  /** Extinction per metre of unit density. */
+  private readonly uExtinction = uniform(0.006);
+  private readonly uLightStep = uniform(175);
+  private readonly uSunGain = uniform(1.5);
+  private readonly uAmbientGain = uniform(0.55);
+
+  constructor() {
+    this.params = {
+      ...DEFAULT_CLOUD_PARAMS,
+      color: DEFAULT_CLOUD_PARAMS.color.clone(),
+      shadowColor: DEFAULT_CLOUD_PARAMS.shadowColor.clone(),
+    };
+
+    this.geometry = new THREE.SphereGeometry(1, 40, 24);
+
+    this.material = new THREE.MeshBasicNodeMaterial();
+    this.material.side = THREE.BackSide;
+    this.material.depthWrite = false;
+    this.material.depthTest = false;
+    this.material.fog = false;
+    // Deliberately NOT `transparent`. Transparent materials are drawn after the
+    // whole opaque queue, which would put the clouds on top of the ocean and the
+    // ship. `CustomBlending` keeps the mesh in the opaque queue — where
+    // renderOrder still orders it right behind the sky — while still alpha
+    // blending. Both the WebGPU and the WebGL2 backend honour this.
+    this.material.transparent = false;
+    this.material.blending = THREE.CustomBlending;
+    this.material.blendEquation = THREE.AddEquation;
+    this.material.blendSrc = THREE.SrcAlphaFactor;
+    this.material.blendDst = THREE.OneMinusSrcAlphaFactor;
+    this.material.blendEquationAlpha = THREE.AddEquation;
+    this.material.blendSrcAlpha = THREE.OneFactor;
+    this.material.blendDstAlpha = THREE.OneMinusSrcAlphaFactor;
+
+    this.material.colorNode = this.buildCloudNode();
+    this.material.positionNode = positionGeometry.mul(DOME_RADIUS).add(cameraPosition);
+
+    this.mesh = new THREE.Mesh(this.geometry, this.material);
+    this.mesh.name = 'cloud-layer';
+    this.mesh.renderOrder = -900;
+    this.mesh.frustumCulled = false;
+    this.mesh.matrixAutoUpdate = false;
+
+    this.applyParams();
+  }
+
+  setParams(params: Partial<CloudParams>): void {
+    if (params.color !== undefined) this.params.color.copy(params.color);
+    if (params.shadowColor !== undefined) this.params.shadowColor.copy(params.shadowColor);
+    if (params.coverage !== undefined) this.params.coverage = params.coverage;
+    if (params.density !== undefined) this.params.density = params.density;
+    if (params.altitude !== undefined) this.params.altitude = params.altitude;
+    if (params.thickness !== undefined) this.params.thickness = params.thickness;
+    if (params.windSpeed !== undefined) this.params.windSpeed = params.windSpeed;
+    if (params.windDirection !== undefined) this.params.windDirection = params.windDirection;
+    if (params.steps !== undefined) this.params.steps = params.steps;
+    this.applyParams();
+  }
+
+  getParams(): Readonly<CloudParams> {
+    return this.params;
+  }
+
+  setSunDirection(dir: THREE.Vector3): void {
+    this.uSunDir.value.copy(dir).normalize();
+  }
+
+  update(dt: number): void {
+    if (!this.mesh.visible) return;
+    this.windOffset.addScaledVector(this.windVector, dt * this.params.windSpeed);
+    // Wrap on the noise period so the offset never grows large enough to eat
+    // float precision in a long-running session.
+    const period = 1 / NOISE_SCALE;
+    this.windOffset.x %= period;
+    this.windOffset.z %= period;
+    this.uWindOffset.value.copy(this.windOffset);
+  }
+
+  dispose(): void {
+    this.geometry.dispose();
+    this.material.dispose();
+  }
+
+  // -------------------------------------------------------------------------
+
+  private applyParams(): void {
+    const p = this.params;
+
+    this.uCoverage.value = Math.min(1, Math.max(0, p.coverage));
+    this.uDensity.value = Math.max(0, p.density);
+    this.uAltitude.value = p.altitude;
+    this.uThickness.value = Math.max(1, p.thickness);
+    this.uColor.value.copy(p.color);
+    this.uShadowColor.value.copy(p.shadowColor);
+
+    const steps = Math.max(0, Math.min(MAX_STEPS, Math.round(p.steps)));
+    // steps === 0 is the Low tier: the layer must cost literally nothing.
+    this.mesh.visible = steps > 0;
+    this.uSteps.value = Math.max(1, steps);
+    this.uInvSteps.value = 1 / Math.max(1, steps);
+
+    this.uLightStep.value = (p.thickness / LIGHT_STEPS) * 1.1;
+
+    this.windVector.set(Math.cos(p.windDirection), 0, Math.sin(p.windDirection));
+  }
+
+  /**
+   * Density at a world-space point. Written as a plain helper rather than a
+   * `Fn` with a declared layout so it inlines at both call sites (main march and
+   * light march) without needing an exact TSL signature.
+   */
+  private densityAt(p: any): any {
+    const h = p.y.sub(this.uAltitude).div(this.uThickness);
+
+    // Flat base, rounded top — the cumulus profile in ref-default.png.
+    const profile = smoothstep(0.0, 0.14, h).mul(smoothstep(1.0, 0.5, h));
+
+    const q = p.sub(this.uWindOffset).mul(NOISE_SCALE);
+    const base = mx_fractal_noise_float(q, 4, 2.0, 0.5, 1.0).mul(0.5).add(0.5);
+    // A second, higher-frequency field erodes the billow edges so the silhouette
+    // is not a smooth blob.
+    const detail = mx_fractal_noise_float(q.mul(4.3).add(vec3(7.3, 2.1, 5.7)), 3, 2.0, 0.5, 1.0)
+      .mul(0.5)
+      .add(0.5);
+
+    // Coverage remaps the threshold: 0 -> nothing survives, 1 -> everything does.
+    const threshold = float(1).sub(this.uCoverage);
+    const shaped = smoothstep(threshold, threshold.add(0.22), base.sub(detail.mul(0.17)));
+
+    return shaped.mul(profile).mul(this.uDensity);
+  }
+
+  private buildCloudNode(): any {
+    return Fn(() => {
+      const rd = normalize(positionGeometry).toVar('cloudRd');
+      const ro = cameraPosition.toVar('cloudRo');
+
+      const result = vec4(0, 0, 0, 0).toVar('cloudResult');
+      const up = rd.y.toVar('cloudUp');
+
+      If(up.greaterThan(0.015), () => {
+        const hBottom = this.uAltitude.sub(ro.y);
+        const hTop = this.uAltitude.add(this.uThickness).sub(ro.y);
+
+        const tEnter = max(hBottom.div(up), 0.0).toVar('tEnter');
+        const tExitRaw = max(hTop.div(up), 0.0);
+        // Grazing rays cross an enormous span; clamping keeps the step size —
+        // and therefore the banding — bounded near the horizon.
+        const tExit = min(tExitRaw, tEnter.add(this.uThickness.mul(MAX_SPAN_FACTOR))).toVar('tExit');
+
+        If(tExit.greaterThan(tEnter), () => {
+          const stepSize = tExit.sub(tEnter).mul(this.uInvSteps).toVar('cloudStep');
+          const t = tEnter.add(stepSize.mul(0.5)).toVar('cloudT');
+
+          const transmittance = float(1).toVar('cloudTr');
+          const scattered = vec3(0, 0, 0).toVar('cloudScatter');
+
+          const cosTheta = dot(rd, this.uSunDir).toVar('cloudCos');
+          // Strong forward lobe + a weak backward lobe: the forward term is what
+          // makes cloud edges glow when the sun is behind them.
+          const phase = hg(cosTheta, 0.76).mul(0.75).add(hg(cosTheta, -0.2).mul(0.25)).mul(12.566)
+            .toVar('cloudPhase');
+
+          Loop(this.uSteps, () => {
+            const p = ro.add(rd.mul(t));
+            const d = this.densityAt(p).toVar('cloudD');
+
+            If(d.greaterThan(0.002), () => {
+              // --- single-scattering: transmittance toward the sun ------------
+              const lightAcc = float(0).toVar('cloudLightAcc');
+              Loop(LIGHT_STEPS, ({ i }: any) => {
+                const lp = p.add(this.uSunDir.mul(this.uLightStep.mul(float(i).add(1.0))));
+                lightAcc.addAssign(this.densityAt(lp));
+              });
+              const lightT = exp(
+                lightAcc.mul(this.uLightStep).mul(this.uExtinction).negate(),
+              ).toVar('cloudLightT');
+
+              // Powder term — darkens the parts of the cloud facing the viewer
+              // that are optically thin, which reads as internal structure.
+              const powder = float(1).sub(exp(d.mul(-2.4)));
+
+              const sunTerm = lightT.mul(phase).mul(powder).mul(this.uSunGain);
+              const lum = this.uShadowColor
+                .mul(this.uAmbientGain)
+                .add(this.uColor.mul(sunTerm))
+                .toVar('cloudLum');
+
+              const sampleT = exp(d.mul(stepSize).mul(this.uExtinction).negate());
+              // Energy-conserving analytic integration over the step.
+              scattered.addAssign(lum.mul(float(1).sub(sampleT)).mul(transmittance));
+              transmittance.mulAssign(sampleT);
+            });
+
+            t.addAssign(stepSize);
+
+            If(transmittance.lessThan(0.01), () => {
+              Break();
+            });
+          });
+
+          result.assign(vec4(scattered, float(1).sub(transmittance)));
+        });
+      });
+
+      // Fade the slab out at the horizon (where it would otherwise stretch to
+      // infinity) and dim it slightly with distance for aerial perspective.
+      const horizonFade = smoothstep(0.015, 0.13, up);
+      const alpha = clamp(result.w.mul(horizonFade), 0.0, 1.0);
+
+      return vec4(result.xyz, alpha);
+    })();
+  }
+}
+
+/** Henyey–Greenstein phase, 1/(4*pi) normalised. */
+function hg(cosTheta: any, g: number): any {
+  const g2 = g * g;
+  const denom = pow(float(1 + g2).sub(cosTheta.mul(2 * g)), 1.5);
+  return float(1 - g2).div(max(denom, 1e-4)).mul(0.07957747154594767);
+}

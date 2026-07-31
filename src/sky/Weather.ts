@@ -1,0 +1,255 @@
+import * as THREE from 'three/webgpu';
+import {
+  attribute,
+  cos,
+  float,
+  mix,
+  mod,
+  pow,
+  sin,
+  smoothstep,
+  uniform,
+  uv,
+  vec2,
+  vec3,
+  vec4,
+} from 'three/tsl';
+
+/**
+ * Camera-following precipitation.
+ *
+ * Both effects are instanced camera-facing quads driven by `SpriteNodeMaterial`,
+ * which gives real world-space particle size on WebGPU (point primitives are
+ * clamped to one pixel there) and on WebGL2 alike.
+ *
+ * Particle motion is computed entirely in the vertex stage from a per-instance
+ * seed and a uniform clock, with a modulo wrap — the CPU never touches particle
+ * positions. `update` only moves the container object onto the viewer, which is
+ * a single transform per frame.
+ */
+
+export type WeatherKind = 'clear' | 'rain' | 'snow';
+
+/** Instances allocated once; the visible count is scaled by intensity. */
+const RAIN_COUNT = 9000;
+const SNOW_COUNT = 6000;
+
+/** Half-extent of the effect volume around the viewer, metres. */
+const RAIN_RADIUS = 34;
+const RAIN_HEIGHT = 46;
+const SNOW_RADIUS = 30;
+const SNOW_HEIGHT = 36;
+
+/** Clock wrap, seconds. Long enough to be invisible, short enough for float32. */
+const CLOCK_WRAP = 3600;
+
+export class Weather {
+  readonly object: THREE.Object3D;
+
+  private readonly rainGeometry: THREE.InstancedBufferGeometry;
+  private readonly snowGeometry: THREE.InstancedBufferGeometry;
+  private readonly rainMaterial: THREE.SpriteNodeMaterial;
+  private readonly snowMaterial: THREE.SpriteNodeMaterial;
+  private readonly rain: THREE.Mesh;
+  private readonly snow: THREE.Mesh;
+
+  private kind: WeatherKind = 'clear';
+  private intensity = 0;
+  private clock = 0;
+
+  private readonly uTime = uniform(0);
+  private readonly uRainOpacity = uniform(0);
+  private readonly uSnowOpacity = uniform(0);
+  private readonly uRainSpeed = uniform(24);
+  private readonly uSnowSpeed = uniform(1.1);
+  /** Horizontal metres of drift per metre of fall — the wind shear. */
+  private readonly uShear = uniform(new THREE.Vector2(0.16, 0.05));
+
+  constructor() {
+    this.object = new THREE.Object3D();
+    this.object.name = 'weather';
+    this.object.matrixAutoUpdate = true;
+    this.object.frustumCulled = false;
+    this.object.visible = false;
+
+    this.rainGeometry = buildParticleGeometry(RAIN_COUNT);
+    this.snowGeometry = buildParticleGeometry(SNOW_COUNT);
+
+    this.rainMaterial = this.buildRainMaterial();
+    this.snowMaterial = this.buildSnowMaterial();
+
+    this.rain = new THREE.Mesh(this.rainGeometry, this.rainMaterial);
+    this.rain.name = 'rain';
+    this.rain.frustumCulled = false;
+    this.rain.renderOrder = 120;
+    this.rain.visible = false;
+
+    this.snow = new THREE.Mesh(this.snowGeometry, this.snowMaterial);
+    this.snow.name = 'snow';
+    this.snow.frustumCulled = false;
+    this.snow.renderOrder = 120;
+    this.snow.visible = false;
+
+    this.object.add(this.rain, this.snow);
+  }
+
+  setKind(kind: WeatherKind): void {
+    if (this.kind === kind) return;
+    this.kind = kind;
+    this.applyVisibility();
+  }
+
+  getKind(): WeatherKind {
+    return this.kind;
+  }
+
+  setIntensity(v: number): void {
+    const clamped = Math.min(1, Math.max(0, v));
+    if (this.intensity === clamped) return;
+    this.intensity = clamped;
+    this.applyVisibility();
+  }
+
+  /** Keeps the effect volume centred on the viewer. */
+  update(dt: number, cameraPosition: THREE.Vector3): void {
+    if (!this.object.visible) return;
+    this.clock = (this.clock + dt) % CLOCK_WRAP;
+    this.uTime.value = this.clock;
+    this.object.position.copy(cameraPosition);
+  }
+
+  dispose(): void {
+    this.object.remove(this.rain, this.snow);
+    this.rainGeometry.dispose();
+    this.snowGeometry.dispose();
+    this.rainMaterial.dispose();
+    this.snowMaterial.dispose();
+  }
+
+  // -------------------------------------------------------------------------
+
+  private applyVisibility(): void {
+    const active = this.kind !== 'clear' && this.intensity > 0.001;
+    this.object.visible = active;
+    this.rain.visible = active && this.kind === 'rain';
+    this.snow.visible = active && this.kind === 'snow';
+
+    // Scaling the instance count rather than the alpha means light rain is
+    // genuinely cheaper, not just fainter.
+    const ramp = Math.pow(this.intensity, 0.75);
+    this.rainGeometry.instanceCount = Math.round(RAIN_COUNT * ramp);
+    this.snowGeometry.instanceCount = Math.round(SNOW_COUNT * ramp);
+
+    this.uRainOpacity.value = 0.18 + 0.5 * this.intensity;
+    this.uSnowOpacity.value = 0.35 + 0.5 * this.intensity;
+    this.uRainSpeed.value = 18 + 12 * this.intensity;
+  }
+
+  private buildRainMaterial(): THREE.SpriteNodeMaterial {
+    const material = new THREE.SpriteNodeMaterial();
+    material.transparent = true;
+    material.depthWrite = false;
+    material.blending = THREE.AdditiveBlending;
+    material.sizeAttenuation = true;
+    material.fog = false;
+
+    const seed = attribute('seed', 'vec4');
+
+    // Per-drop fall speed varies so the curtain never looks like a rigid sheet.
+    const speed = this.uRainSpeed.mul(seed.w.mul(0.45).add(0.8));
+    const y = mod(seed.z.mul(RAIN_HEIGHT).sub(this.uTime.mul(speed)), RAIN_HEIGHT).sub(
+      RAIN_HEIGHT * 0.35,
+    );
+
+    const shear = this.uShear;
+    const x = seed.x.sub(0.5).mul(RAIN_RADIUS * 2).add(y.mul(shear.x));
+    const z = seed.y.sub(0.5).mul(RAIN_RADIUS * 2).add(y.mul(shear.y));
+
+    material.positionNode = vec3(x, y, z);
+    // Thin and long: streaks in ref-storm.png are barely a pixel wide.
+    material.scaleNode = vec2(0.022, float(0.9).add(seed.w.mul(0.7)));
+    // Tilt the streak to match the shear so it lies along its own motion.
+    material.rotationNode = float(-Math.atan(0.16));
+
+    const coord = uv();
+    const across = float(1).sub(coord.x.sub(0.5).abs().mul(2.0));
+    const along = sin(coord.y.mul(Math.PI));
+    const alpha = pow(across, 3.0).mul(pow(along, 0.6)).mul(this.uRainOpacity);
+
+    material.colorNode = vec4(vec3(0.72, 0.8, 0.92), alpha);
+    return material;
+  }
+
+  private buildSnowMaterial(): THREE.SpriteNodeMaterial {
+    const material = new THREE.SpriteNodeMaterial();
+    material.transparent = true;
+    material.depthWrite = false;
+    material.blending = THREE.NormalBlending;
+    material.sizeAttenuation = true;
+    material.fog = false;
+
+    const seed = attribute('seed', 'vec4');
+
+    const speed = this.uSnowSpeed.mul(seed.w.mul(0.7).add(0.65));
+    const y = mod(seed.z.mul(SNOW_HEIGHT).sub(this.uTime.mul(speed)), SNOW_HEIGHT).sub(
+      SNOW_HEIGHT * 0.4,
+    );
+
+    // Lateral wobble: two out-of-phase oscillators give a convincing tumble.
+    const phase = seed.w.mul(43.0);
+    const wobbleX = sin(this.uTime.mul(0.55).add(phase)).mul(0.55);
+    const wobbleZ = cos(this.uTime.mul(0.41).add(phase.mul(1.7))).mul(0.55);
+
+    const x = seed.x.sub(0.5).mul(SNOW_RADIUS * 2).add(wobbleX).add(y.mul(0.06));
+    const z = seed.y.sub(0.5).mul(SNOW_RADIUS * 2).add(wobbleZ);
+
+    material.positionNode = vec3(x, y, z);
+    const flake = mix(float(0.035), float(0.085), seed.w);
+    material.scaleNode = vec2(flake, flake);
+
+    const coord = uv();
+    const d = coord.sub(vec2(0.5, 0.5)).length();
+    const alpha = smoothstep(0.5, 0.06, d).mul(this.uSnowOpacity);
+
+    material.colorNode = vec4(vec3(0.95, 0.97, 1.0), alpha);
+    return material;
+  }
+}
+
+/**
+ * One camera-facing quad, instanced N times, plus a vec4 seed per instance.
+ * `SpriteNodeMaterial` reads the corner offsets straight from `position`, so the
+ * quad is authored in the -0.5..0.5 range it expects.
+ *
+ * A plain `InstancedBufferGeometry` is used rather than `InstancedMesh` on
+ * purpose: `InstancedMesh` would make the node material inject an instance
+ * matrix that the sprite path does not use.
+ */
+function buildParticleGeometry(count: number): THREE.InstancedBufferGeometry {
+  const geometry = new THREE.InstancedBufferGeometry();
+
+  geometry.setAttribute(
+    'position',
+    new THREE.Float32BufferAttribute(
+      [-0.5, -0.5, 0, 0.5, -0.5, 0, 0.5, 0.5, 0, -0.5, 0.5, 0],
+      3,
+    ),
+  );
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2));
+  geometry.setIndex([0, 1, 2, 0, 2, 3]);
+
+  const seeds = new Float32Array(count * 4);
+  for (let i = 0; i < count; i++) {
+    seeds[i * 4 + 0] = Math.random();
+    seeds[i * 4 + 1] = Math.random();
+    seeds[i * 4 + 2] = Math.random();
+    seeds[i * 4 + 3] = Math.random();
+  }
+  geometry.setAttribute('seed', new THREE.InstancedBufferAttribute(seeds, 4));
+
+  geometry.instanceCount = 0;
+  // The volume follows the camera, so a fixed bound is meaningless; culling off.
+  geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), Number.POSITIVE_INFINITY);
+
+  return geometry;
+}

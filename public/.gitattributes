@@ -1,0 +1,14 @@
+# The repo root sets `* text=auto`. These are binary assets — never line-ending
+# normalise them, or the .bin/.hdr/.jpg payloads will be corrupted on checkout.
+*.bin   -text -diff
+*.hdr   -text -diff
+*.jpg   -text -diff
+*.jpeg  -text -diff
+*.png   -text -diff
+*.glb   -text -diff
+*.ktx2  -text -diff
+*.exr   -text -diff
+
+# .gltf is JSON; keep it text but pin LF so the MD5 check in
+# scripts/fetch-assets.mjs stays reproducible across platforms.
+*.gltf  text eol=lf
