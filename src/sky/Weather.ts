@@ -153,7 +153,8 @@ export class Weather {
     material.sizeAttenuation = true;
     material.fog = false;
 
-    const seed = attribute('seed', 'vec4');
+    // `attribute()` is typed as an opaque node; swizzles need the loose view.
+    const seed: any = attribute('seed', 'vec4');
 
     // Per-drop fall speed varies so the curtain never looks like a rigid sheet.
     const speed = this.uRainSpeed.mul(seed.w.mul(0.45).add(0.8));
@@ -188,7 +189,8 @@ export class Weather {
     material.sizeAttenuation = true;
     material.fog = false;
 
-    const seed = attribute('seed', 'vec4');
+    // `attribute()` is typed as an opaque node; swizzles need the loose view.
+    const seed: any = attribute('seed', 'vec4');
 
     const speed = this.uSnowSpeed.mul(seed.w.mul(0.7).add(0.65));
     const y = mod(seed.z.mul(SNOW_HEIGHT).sub(this.uTime.mul(speed)), SNOW_HEIGHT).sub(

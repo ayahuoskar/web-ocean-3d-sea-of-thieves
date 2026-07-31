@@ -1,5 +1,6 @@
 import * as THREE from 'three/webgpu';
 import {
+  Fn,
   acos,
   cameraPosition,
   clamp,
@@ -410,63 +411,76 @@ export class Atmosphere {
   // Node graph
   // -------------------------------------------------------------------------
 
+  /**
+   * NOTE: the whole graph is built inside a `Fn` body. TSL only maintains an
+   * assignment stack while an `Fn` callback is executing, so `toVar()` and the
+   * `*Assign` operators throw if they are reached during plain construction.
+   */
   private buildSkyNode(): any {
-    const dir = normalize(positionGeometry).toVar('skyDir');
+    return Fn(() => {
+      const dir = normalize(positionGeometry).toVar('skyDir');
 
-    // --- Preetham daylight ---------------------------------------------------
-    const cosZenith = max(dir.y, 0.0);
-    const zenithAngle = acos(cosZenith);
-    const denom = cos(zenithAngle).add(
-      pow(float(93.885).sub(zenithAngle.mul(180 / Math.PI)), -1.253).mul(0.15),
-    );
-    const opticalInverse = float(1).div(denom);
-    const sR = opticalInverse.mul(RAYLEIGH_ZENITH_LENGTH);
-    const sM = opticalInverse.mul(MIE_ZENITH_LENGTH);
+      // --- Preetham daylight -------------------------------------------------
+      const cosZenith = max(dir.y, 0.0);
+      const zenithAngle = acos(cosZenith);
+      const denom = cos(zenithAngle).add(
+        pow(float(93.885).sub(zenithAngle.mul(180 / Math.PI)), -1.253).mul(0.15),
+      );
+      const opticalInverse = float(1).div(denom);
+      const sR = opticalInverse.mul(RAYLEIGH_ZENITH_LENGTH);
+      const sM = opticalInverse.mul(MIE_ZENITH_LENGTH);
 
-    const betaR = this.uBetaR;
-    const betaM = this.uBetaM;
-    const fex = exp(betaR.mul(sR).add(betaM.mul(sM)).negate()).toVar('skyFex');
+      const betaR = this.uBetaR;
+      const betaM = this.uBetaM;
+      const fex = exp(betaR.mul(sR).add(betaM.mul(sM)).negate()).toVar('skyFex');
 
-    const cosTheta = dot(dir, this.uSunDir).toVar('cosTheta');
+      const cosTheta = dot(dir, this.uSunDir).toVar('cosTheta');
 
-    // Rayleigh phase, Sky.js convention (argument pre-biased into 0..1).
-    const rArg = cosTheta.mul(0.5).add(0.5);
-    const rPhase = rArg.mul(rArg).add(1).mul(THREE_OVER_SIXTEEN_PI);
-    const mPhase = henyeyGreenstein(cosTheta, this.uMieG);
+      // Rayleigh phase, Sky.js convention (argument pre-biased into 0..1).
+      const rArg = cosTheta.mul(0.5).add(0.5);
+      const rPhase = rArg.mul(rArg).add(1).mul(THREE_OVER_SIXTEEN_PI);
+      const mPhase = henyeyGreenstein(cosTheta, this.uMieG);
 
-    const totalBeta = betaR.add(betaM);
-    const scatter = betaR.mul(rPhase).add(betaM.mul(mPhase)).div(totalBeta).toVar('scatter');
-    const sunE = this.uSunE;
+      const totalBeta = betaR.add(betaM);
+      const scatter = betaR.mul(rPhase).add(betaM.mul(mPhase)).div(totalBeta).toVar('scatter');
+      const sunE = this.uSunE;
 
-    const lin = pow(scatter.mul(sunE).mul(vec3(1, 1, 1).sub(fex)), vec3(1.5, 1.5, 1.5)).toVar('lin');
-    lin.mulAssign(
-      mix(
-        vec3(1, 1, 1),
-        pow(scatter.mul(sunE).mul(fex), vec3(0.5, 0.5, 0.5)),
-        clamp(pow(float(1).sub(this.uSunDir.y), 5.0), 0.0, 1.0),
-      ),
-    );
+      const lin = pow(
+        scatter.mul(sunE).mul(vec3(1, 1, 1).sub(fex)),
+        vec3(1.5, 1.5, 1.5),
+      ).toVar('lin');
+      lin.mulAssign(
+        mix(
+          vec3(1, 1, 1),
+          pow(scatter.mul(sunE).mul(fex), vec3(0.5, 0.5, 0.5)),
+          clamp(pow(float(1).sub(this.uSunDir.y), 5.0), 0.0, 1.0),
+        ),
+      );
 
-    const sunDisc = smoothstep(SUN_ANGULAR_DIAMETER_COS, SUN_ANGULAR_DIAMETER_COS + 0.00002, cosTheta)
-      .mul(this.uSunDiscVisible);
-    const l0 = fex.mul(0.1).add(fex.mul(sunE).mul(19000.0).mul(sunDisc));
+      const sunDisc = smoothstep(
+        SUN_ANGULAR_DIAMETER_COS,
+        SUN_ANGULAR_DIAMETER_COS + 0.00002,
+        cosTheta,
+      ).mul(this.uSunDiscVisible);
+      const l0 = fex.mul(0.1).add(fex.mul(sunE).mul(19000.0).mul(sunDisc));
 
-    const dayColor = lin.add(l0).mul(0.04).add(vec3(0.0, 0.0003, 0.00075)).toVar('dayColor');
+      const dayColor = lin.add(l0).mul(0.04).add(vec3(0.0, 0.0003, 0.00075)).toVar('dayColor');
 
-    // --- ground half ---------------------------------------------------------
-    // Below the horizon the dome shows a diffuse ground lit by the horizon sky.
-    // It is mostly seen by the environment capture; the ocean hides it in view.
-    const groundColor = this.uGround.mul(dayColor.mul(1.4).add(0.004));
-    const belowness = smoothstep(0.0, -0.045, dir.y);
-    const daySky = mix(dayColor, groundColor, belowness).toVar('daySky');
+      // --- ground half -------------------------------------------------------
+      // Below the horizon the dome shows a diffuse ground lit by the horizon sky.
+      // It is mostly seen by the environment capture; the ocean hides it in view.
+      const groundColor = this.uGround.mul(dayColor.mul(1.4).add(0.004));
+      const belowness = smoothstep(0.0, -0.045, dir.y);
+      const daySky = mix(dayColor, groundColor, belowness).toVar('daySky');
 
-    // --- night ---------------------------------------------------------------
-    const nightSky = this.buildNightNode(dir).toVar('nightSky');
+      // --- night -------------------------------------------------------------
+      const nightSky = this.buildNightNode(dir).toVar('nightSky');
 
-    const night = this.uNight;
-    const color = daySky.mul(mix(float(1), float(0.05), night)).add(nightSky.mul(night));
+      const night = this.uNight;
+      const color = daySky.mul(mix(float(1), float(0.05), night)).add(nightSky.mul(night));
 
-    return vec4(color.mul(this.uExposure).max(vec3(0, 0, 0)), 1.0);
+      return vec4(color.mul(this.uExposure).max(vec3(0, 0, 0)), 1.0);
+    })();
   }
 
   private buildNightNode(d: any): any {

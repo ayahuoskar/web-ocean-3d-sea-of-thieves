@@ -96,6 +96,11 @@ export class OceanSimulation {
     return this.cascades.map((c) => c.derivatives.texture);
   }
 
+  /** Render targets themselves, for CPU readback by the buoyancy sampler. */
+  get displacementTargets(): THREE.RenderTarget[] {
+    return this.cascades.map((c) => c.displacement);
+  }
+
   get tileSizes(): number[] {
     return this.cascades.map((c) => c.config.tileSize);
   }

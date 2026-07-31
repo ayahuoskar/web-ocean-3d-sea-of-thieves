@@ -83,14 +83,16 @@ const QUALITY_LABELS: Record<QualityTier, string> = {
   max: 'Max',
 };
 
+// Neutral, descriptive names. The preset *ids* are stable API; the labels
+// describe the look rather than borrowing product or game titles.
 const PRESET_LABELS: Record<PresetId, string> = {
-  skyPro: 'Three.js Sky Pro',
+  skyPro: 'Clear Day',
   arctic: 'Arctic',
-  blackFlag: 'Black Flag',
+  blackFlag: 'High Seas',
   dusk: 'Dusk',
   foggy: 'Foggy',
   moonlit: 'Moonlit',
-  seaOfThieves: 'Sea of Thieves',
+  seaOfThieves: 'Tropical',
   storm: 'Storm',
   sunset: 'Sunset',
 };
