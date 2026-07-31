@@ -42,8 +42,11 @@ export const DEFAULT_APPEARANCE: WaterAppearance = {
   extinction: new THREE.Vector3(0.34, 0.11, 0.07),
   scatterStrength: 1.0,
   roughness: 0.075,
-  foamThreshold: 0.42,
-  foamSoftness: 0.5,
+  // Deeper folding required than the naive "J < 1" test: the swell cascade marks
+  // broad areas as mildly folded, and treating all of that as whitecap covers a
+  // fifth of the sea in white.
+  foamThreshold: 0.24,
+  foamSoftness: 0.55,
 };
 
 export interface OceanMaterialInputs {
@@ -248,10 +251,45 @@ export class OceanMaterial {
       // --- foam --------------------------------------------------------------------
       // The Jacobian is 1 on unstretched water and drops below 0 where the surface
       // folds onto itself; that fold region is physically where whitecaps break.
-      const foamMask = fold
+      const coverage = fold
         .smoothstep(this.uFoamThreshold, this.uFoamThreshold.sub(this.uFoamSoftness))
         .clamp(0, 1)
         .toVar();
+
+      // Whitecaps break at crests, not in troughs. The Jacobian alone is a
+      // low-frequency field and marks broad patches, so bias it by local
+      // elevation: the same amount of folding produces foam on a crest and
+      // almost none a metre lower down. This is what turns smooth blobs into
+      // streaks that follow the wave tops.
+      const crestBias = worldPos.y.smoothstep(-0.6, 1.8).clamp(0, 1).toVar();
+      const biased = coverage.mul(crestBias.mul(0.75).add(0.25)).toVar();
+
+      // Break the mask up with world-space noise at roughly the scale of real
+      // foam clumps (sub-metre), so the edge dissolves into bubbles rather than
+      // ending on a clean contour.
+      const foamUv = worldPos.xz.mul(1.4).toVar();
+      const breakup = float(0).toVar();
+      let amplitude = 0.5;
+      let frequency = 1;
+      for (let octave = 0; octave < 4; octave++) {
+        breakup.addAssign(
+          valueNoise(foamUv.mul(frequency).add(vec2(octave * 17.3, octave * 9.1))).mul(amplitude),
+        );
+        amplitude *= 0.5;
+        frequency *= 2.07;
+      }
+      // Centre the noise on zero so it perturbs the mask both ways instead of
+      // only ever eating into it.
+      const perturb = breakup.sub(0.5).toVar();
+
+      // A wide smoothstep keeps the boundary soft; the noise decides *where* that
+      // boundary falls, which reads as texture rather than as a fading blob.
+      const foamMask = biased
+        .add(perturb.mul(0.45))
+        .smoothstep(0.12, 0.78)
+        .clamp(0, 1)
+        .toVar();
+
       const withFoam = mix(surface, this.uFoamColor, foamMask).toVar();
 
       // --- aerial perspective --------------------------------------------------------
@@ -281,6 +319,32 @@ export class OceanMaterial {
  * by design — the module's public API stays strongly typed.
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
+
+/**
+ * Hash-based 2D value noise, bilinearly interpolated with a quintic fade.
+ *
+ * Procedural rather than a sampled texture so there is nothing extra to
+ * download, and so the foam breakup is scale-free — it stays crisp no matter how
+ * close the camera gets.
+ */
+const hash2 = /*@__PURE__*/ Fn(([p]: [any]) => {
+  const h = vec2(p.dot(vec2(127.1, 311.7)), p.dot(vec2(269.5, 183.3))).toVar();
+  return h.sin().mul(43758.5453).fract();
+});
+
+const valueNoise = /*@__PURE__*/ Fn(([p]: [any]) => {
+  const i = p.floor().toVar();
+  const f = p.fract().toVar();
+  // Quintic fade — a linear blend leaves visible grid creases in the derivative.
+  const u = f.mul(f).mul(f.mul(f.mul(6).sub(15)).add(10)).toVar();
+
+  const a = hash2(i).x.toVar();
+  const b = hash2(i.add(vec2(1, 0))).x.toVar();
+  const c = hash2(i.add(vec2(0, 1))).x.toVar();
+  const d = hash2(i.add(vec2(1, 1))).x.toVar();
+
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+});
 
 /**
  * Geometry and shading need *different* LOD curves, and conflating them is what
