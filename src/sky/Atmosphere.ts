@@ -317,24 +317,60 @@ export class Atmosphere {
     return this._moonDirection;
   }
 
+  /**
+   * Written out field by field rather than looping `Object.keys` so that an app
+   * animating the sun every frame does not allocate a key array per call, and so
+   * that the environment map is only invalidated when a value really moved.
+   */
   setParams(params: Partial<AtmosphereParams>): void {
+    const p = this.params;
     let changed = false;
-    for (const key of Object.keys(params) as (keyof AtmosphereParams)[]) {
-      const next = params[key];
-      if (next === undefined) continue;
-      if (key === 'groundColor') {
-        const color = next as THREE.Color;
-        if (!this.params.groundColor.equals(color)) {
-          this.params.groundColor.copy(color);
-          changed = true;
-        }
-        continue;
-      }
-      if (this.params[key] !== next) {
-        (this.params[key] as number) = next as number;
-        changed = true;
-      }
+
+    if (params.sunElevation !== undefined && params.sunElevation !== p.sunElevation) {
+      p.sunElevation = params.sunElevation;
+      changed = true;
     }
+    if (params.sunAzimuth !== undefined && params.sunAzimuth !== p.sunAzimuth) {
+      p.sunAzimuth = params.sunAzimuth;
+      changed = true;
+    }
+    if (params.turbidity !== undefined && params.turbidity !== p.turbidity) {
+      p.turbidity = params.turbidity;
+      changed = true;
+    }
+    if (params.rayleigh !== undefined && params.rayleigh !== p.rayleigh) {
+      p.rayleigh = params.rayleigh;
+      changed = true;
+    }
+    if (params.mieCoefficient !== undefined && params.mieCoefficient !== p.mieCoefficient) {
+      p.mieCoefficient = params.mieCoefficient;
+      changed = true;
+    }
+    if (params.mieDirectionalG !== undefined && params.mieDirectionalG !== p.mieDirectionalG) {
+      p.mieDirectionalG = params.mieDirectionalG;
+      changed = true;
+    }
+    if (params.exposure !== undefined && params.exposure !== p.exposure) {
+      p.exposure = params.exposure;
+      changed = true;
+    }
+    if (params.nightIntensity !== undefined && params.nightIntensity !== p.nightIntensity) {
+      p.nightIntensity = params.nightIntensity;
+      changed = true;
+    }
+    if (params.moonElevation !== undefined && params.moonElevation !== p.moonElevation) {
+      p.moonElevation = params.moonElevation;
+      changed = true;
+    }
+    if (params.moonAzimuth !== undefined && params.moonAzimuth !== p.moonAzimuth) {
+      p.moonAzimuth = params.moonAzimuth;
+      changed = true;
+    }
+    if (params.groundColor !== undefined && !p.groundColor.equals(params.groundColor)) {
+      p.groundColor.copy(params.groundColor);
+      changed = true;
+    }
+
     if (!changed) return;
     this.applyParams();
     this.envDirty = true;
