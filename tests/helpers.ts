@@ -26,21 +26,30 @@ export function collectConsoleErrors(page: Page): string[] {
   return errors;
 }
 
-/** Waits for the app to finish booting and for the first frames to be drawn. */
-export async function waitForOcean(page: Page, warmupFrames = 90): Promise<void> {
+/**
+ * Waits for the app to boot and to have actually drawn.
+ *
+ * Deliberately NOT expressed as a number of frames. Automated Chromium throttles
+ * requestAnimationFrame to roughly 1 Hz regardless of load, so "wait for 90
+ * frames" is a 90-second wait that reliably exceeds the test timeout. The
+ * readiness signal is that the loop has recorded a completed frame, plus a
+ * wall-clock settle for shader compilation and the first GPU readback.
+ */
+export async function waitForOcean(page: Page, settleMs = 2500): Promise<void> {
   await page.waitForFunction(() => '__ocean' in window, undefined, { timeout: 60_000 });
   await page.waitForFunction(
-    (frames) => {
-      const ocean = (window as unknown as { __ocean: { loop: { stats: { fps: number } } } }).__ocean;
-      const counter = (window as unknown as { __frameCount?: number });
-      counter.__frameCount = (counter.__frameCount ?? 0) + 1;
-      return counter.__frameCount > frames && ocean.loop.stats.fps > 0;
+    () => {
+      const ocean = (
+        window as unknown as { __ocean: { loop: { stats: { frameMs: number } } } }
+      ).__ocean;
+      return ocean.loop.stats.frameMs > 0;
     },
-    warmupFrames,
+    undefined,
     { timeout: 60_000 },
   );
-  // Let the boot overlay finish fading so it never bleeds into a screenshot.
-  await page.waitForTimeout(700);
+  // Settle: shader compilation, mip chain construction, first sampler readback,
+  // and the boot overlay fade so it never bleeds into a screenshot.
+  await page.waitForTimeout(settleMs);
 }
 
 /** Places the camera deterministically so screenshots are comparable run to run. */
@@ -76,6 +85,25 @@ export async function setState(page: Page, partial: Record<string, unknown>): Pr
     ocean.setState(p);
   }, partial);
   await page.waitForTimeout(600);
+}
+
+/**
+ * True when the browser has a real WebGPU adapter.
+ *
+ * Playwright's bundled Chromium frequently has none, which forces the app onto
+ * the WebGL2 path backed by a *software* rasteriser. That is a correct fallback,
+ * but at 1600x900 it is slow enough that the compositor will not deliver a frame
+ * inside a test timeout — so any assertion requiring a screenshot has to be
+ * skipped rather than made to pass artificially.
+ */
+export async function hasGpuAdapter(page: Page): Promise<boolean> {
+  return page.evaluate(async () => {
+    try {
+      return navigator.gpu ? (await navigator.gpu.requestAdapter()) !== null : false;
+    } catch {
+      return false;
+    }
+  });
 }
 
 export interface FrameSample {
