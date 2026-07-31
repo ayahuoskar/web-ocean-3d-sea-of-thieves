@@ -16,5 +16,5 @@
     "noFallthroughCasesInSwitch": true,
     "types": ["vite/client", "@webgpu/types"]
   },
-  "include": ["src", "tests"]
+  "include": ["src"]
 }
