@@ -34,6 +34,9 @@ import type { OceanSampler } from '../ocean/Sampler';
 
 const GRAVITY = 9.81;
 
+/** Shared scratch for the heading accessor; reading a pose must not allocate. */
+const _scratchForward = /*@__PURE__*/ new THREE.Vector3();
+
 /** Physics substep. 120 Hz keeps the integrator well inside stability. */
 const FIXED_STEP = 1 / 120;
 
@@ -62,6 +65,16 @@ export interface BuoyantBodyOptions {
   probeDepth?: number;
   /** Horizontal drag coefficient, per second. Keeps the hull from sliding. */
   horizontalDrag?: number;
+  /**
+   * Fraction of the probe damping that acts horizontally, 0..1.
+   *
+   * 1 for a buoy or a barrel, which are as blunt sideways as they are vertically
+   * and should be dragged along by the water. Much lower for a hull, which is
+   * shaped precisely so that it does not resist moving forward — see the note in
+   * `substep`. A driven body wants a small value here and its own, direction-aware
+   * resistance applied externally.
+   */
+  horizontalDamping?: number;
   /** Ceiling on |velocity|, m/s. */
   maxSpeed?: number;
   /** Ceiling on |angular velocity|, rad/s. */
@@ -86,6 +99,23 @@ export class BuoyantBody {
   private readonly homePosition = new THREE.Vector3();
   private readonly homeQuaternion = new THREE.Quaternion();
 
+  /**
+   * Continuous force and torque from outside the solver — propulsion, steering,
+   * hull resistance.
+   *
+   * Applied inside the substep alongside buoyancy and gravity rather than added
+   * to the pose afterwards. That ordering is the whole point: thrust that is
+   * integrated with the wave response produces a hull that climbs a swell and
+   * loses way doing it, while a position nudged after the fact produces one that
+   * slides through the water as if the waves were painted on.
+   *
+   * These persist between frames because they model sustained forces; a
+   * controller sets them once per frame and the solver sees them in every
+   * substep.
+   */
+  readonly externalForce = new THREE.Vector3();
+  readonly externalTorque = new THREE.Vector3();
+
   private readonly mass: number;
   private readonly buoyancyStrength: number;
   private readonly probeDepth: number;
@@ -94,6 +124,7 @@ export class BuoyantBody {
   private readonly linearDampingRatio: number;
   private readonly angularDampingRatio: number;
   private readonly horizontalDrag: number;
+  private readonly horizontalDamping: number;
   private readonly maxSpeed: number;
   private readonly maxAngularSpeed: number;
   /** Diagonal inertia in body space, derived from the probe layout. */
@@ -142,6 +173,7 @@ export class BuoyantBody {
     this.linearDampingRatio = options.linearDamping ?? 0.38;
     this.angularDampingRatio = options.angularDamping ?? 0.5;
     this.horizontalDrag = options.horizontalDrag ?? 0.55;
+    this.horizontalDamping = clamp(options.horizontalDamping ?? 1, 0, 1);
     this.maxSpeed = options.maxSpeed ?? 24;
     this.maxAngularSpeed = options.maxAngularSpeed ?? 2.5;
 
@@ -178,7 +210,20 @@ export class BuoyantBody {
    * irreproducibility in a scene full of floating objects.
    */
   resetToHome(): void {
+    this.externalForce.set(0, 0, 0);
+    this.externalTorque.set(0, 0, 0);
     this.reset(this.homePosition, this.homeQuaternion);
+  }
+
+  /** World-space forward direction of the body's local +X axis. */
+  forward(out: THREE.Vector3): THREE.Vector3 {
+    return out.set(1, 0, 0).applyQuaternion(this.quaternion);
+  }
+
+  /** Heading in radians, `atan2(forward.z, forward.x)` — the wake's convention. */
+  get heading(): number {
+    this.forward(_scratchForward);
+    return Math.atan2(_scratchForward.z, _scratchForward.x);
   }
 
   update(dt: number, sampler: OceanSampler): void {
@@ -210,6 +255,12 @@ export class BuoyantBody {
 
     this.force.set(0, -this.mass * GRAVITY, 0);
     this.torque.set(0, 0, 0);
+
+    // Propulsion, steering and hull resistance enter here, with gravity and
+    // before buoyancy — so they are integrated by the same solver rather than
+    // applied to the result of it.
+    this.force.add(this.externalForce);
+    this.torque.add(this.externalTorque);
 
     let submergedProbes = 0;
 
@@ -243,8 +294,23 @@ export class BuoyantBody {
       this.relative.y -= waterVelocityY;
 
       // Buoyancy, then damping proportional to how wet the probe is.
+      //
+      // The damping is anisotropic. It is derived from the vertical spring — it
+      // exists to stop the hull oscillating on the swell — and applying that same
+      // coefficient to horizontal motion makes the water behave like treacle: at
+      // the ship's mass and probe layout it worked out to roughly 180 kN per m/s
+      // of surge, four times the intended hull drag, which capped the ship at a
+      // third of its designed speed and brought a 90-tonne vessel to a dead stop
+      // in fifteen seconds of coasting. A hull is shaped to resist heave and to
+      // *not* resist surge, and `horizontalDamping` is where that asymmetry
+      // lives; the longitudinal and lateral resistance that should oppose surge
+      // is the controller's to apply, where it can be told about the hull's
+      // heading.
       this.tmp.set(0, perProbeMax * submersion, 0);
-      this.tmp.addScaledVector(this.relative, -damping * submersion);
+      const dampScale = -damping * submersion;
+      this.tmp.x += this.relative.x * dampScale * this.horizontalDamping;
+      this.tmp.y += this.relative.y * dampScale;
+      this.tmp.z += this.relative.z * dampScale * this.horizontalDamping;
 
       this.force.add(this.tmp);
       this.torque.add(this.tmp.cross(this.arm).negate());

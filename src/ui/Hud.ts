@@ -36,10 +36,14 @@ const HINTS: Record<CameraMode, readonly Hint[]> = {
     { action: 'Look', key: 'Mouse' },
     { action: 'Boost', key: 'Shift' },
   ],
+  // `Camera / Mouse` used to be listed here and was never implemented — the
+  // chase rig derives its pose from the hull and ignores the mouse entirely.
+  // Reverse is real, though: S astern of a stop backs the ship, and the rudder
+  // reverses with it.
   boat: [
-    { action: 'Steer', key: 'A D' },
     { action: 'Throttle', key: 'W S' },
-    { action: 'Camera', key: 'Mouse' },
+    { action: 'Steer', key: 'A D' },
+    { action: 'Reverse', key: 'S' },
   ],
 };
 

@@ -351,6 +351,123 @@ test.describe('interaction', () => {
     ).toBeGreaterThan(0.4);
   });
 
+  /**
+   * Boat mode has to select the *ship*, not just a camera.
+   *
+   * The HUD advertised W/S throttle and A/D steering from the beginning while
+   * `Ship.update` only billowed the sails, so these assertions are the ones that
+   * would have caught the gap: signed speed responds to throttle, heading
+   * responds to rudder, and neither happens in Orbit.
+   */
+  test.describe('ship control', () => {
+    const drive = async (
+      page: import('@playwright/test').Page,
+      throttle: number,
+      rudder: number,
+      seconds: number,
+    ) =>
+      page.evaluate(
+        async ({ t, r, s }) => {
+          window.__ocean.setShipInput(t, r);
+          await window.__ocean.step(1 / 60, Math.round(s * 60));
+          return window.__ocean.shipState();
+        },
+        { t: throttle, r: rudder, s: seconds },
+      );
+
+    const boot = async (page: import('@playwright/test').Page) => {
+      await page.goto('/');
+      await waitForOcean(page);
+      await page.waitForFunction(() => window.__ocean.shipState() !== null, undefined, {
+        timeout: 60_000,
+      });
+      await setState(page, { preset: 'seaOfThieves', quality: 'high', cameraMode: 'boat' });
+      await page.evaluate(() => window.__ocean.resetDeterministic(10, 60));
+    };
+
+    test('W drives the ship forward and S drives it astern', async ({ page }) => {
+      await boot(page);
+
+      const ahead = await drive(page, 1, 0, 20);
+      expect(ahead!.forwardSpeed, 'full throttle produced no headway').toBeGreaterThan(2);
+
+      // From rest, not from ahead — otherwise this only measures deceleration.
+      await page.evaluate(() => window.__ocean.resetDeterministic(10, 60));
+      const astern = await drive(page, -1, 0, 20);
+      expect(astern!.forwardSpeed, 'reverse throttle produced no sternway').toBeLessThan(-0.5);
+    });
+
+    test('A and D steer, and the turn needs way on', async ({ page }) => {
+      await boot(page);
+
+      const before = await page.evaluate(() => window.__ocean.shipState());
+      // A rudder is a foil: hard over from a standstill should do almost nothing.
+      const stopped = await drive(page, 0, 1, 6);
+      const stoppedTurn = Math.abs(stopped!.heading - before!.heading);
+      expect(stoppedTurn, 'the ship turned on the spot with no way on').toBeLessThan(0.2);
+
+      await page.evaluate(() => window.__ocean.resetDeterministic(10, 60));
+      const straight = await drive(page, 1, 0, 12);
+      const starboard = await drive(page, 1, 1, 10);
+      const port = await page.evaluate(async () => {
+        await window.__ocean.resetDeterministic(10, 60);
+        window.__ocean.setShipInput(1, 0);
+        await window.__ocean.step(1 / 60, 720);
+        window.__ocean.setShipInput(1, -1);
+        await window.__ocean.step(1 / 60, 600);
+        return window.__ocean.shipState();
+      });
+
+      const delta = (a: number, b: number) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
+      const toStarboard = delta(starboard!.heading, straight!.heading);
+      const toPort = delta(port!.heading, straight!.heading);
+
+      expect(Math.abs(toStarboard), 'rudder to starboard did not change heading').toBeGreaterThan(0.3);
+      expect(Math.abs(toPort), 'rudder to port did not change heading').toBeGreaterThan(0.3);
+      expect(
+        Math.sign(toStarboard),
+        `A and D turned the same way (starboard ${toStarboard.toFixed(2)}, port ${toPort.toFixed(2)})`,
+      ).not.toBe(Math.sign(toPort));
+    });
+
+    test('other camera modes do not steer the ship', async ({ page }) => {
+      await boot(page);
+      await setState(page, { cameraMode: 'orbit' });
+
+      const enabled = await page.evaluate(() => window.__ocean.shipControlsEnabled());
+      expect(enabled, 'ship input is still live outside Boat mode').toBe(false);
+
+      const before = await page.evaluate(() => window.__ocean.shipState());
+      const after = await drive(page, 1, 1, 12);
+
+      expect(
+        Math.abs(after!.forwardSpeed),
+        'the ship accelerated while the camera was in Orbit',
+      ).toBeLessThan(Math.abs(before!.forwardSpeed) + 0.5);
+    });
+
+    test('the hull stays finite and afloat while driven through a storm', async ({ page }) => {
+      await boot(page);
+      await setState(page, { preset: 'storm' });
+      await page.evaluate(() => window.__ocean.resetDeterministic(10, 90));
+
+      // Driven hard, turning, in the heaviest sea state the presets offer.
+      const state = await drive(page, 1, 0.8, 30);
+      const pose = await page.evaluate(() => {
+        const ship = window.__ocean.scene.getObjectByName('ship') as unknown as {
+          position: { x: number; y: number; z: number };
+        };
+        return { x: ship.position.x, y: ship.position.y, z: ship.position.z };
+      });
+
+      for (const [name, value] of Object.entries({ ...pose, ...state! })) {
+        expect(Number.isFinite(value), `${name} went non-finite under load`).toBe(true);
+      }
+      // Riding the swell, not launched out of it or sunk under it.
+      expect(Math.abs(pose.y), `hull settled at y = ${pose.y}`).toBeLessThan(20);
+    });
+  });
+
   test('camera modes switch via keyboard', async ({ page }) => {
     await page.goto('/');
     await waitForOcean(page);

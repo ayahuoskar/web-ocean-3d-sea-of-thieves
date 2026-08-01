@@ -37,8 +37,17 @@ const MAX_EMITTERS = 4;
 /** Exponential decay time constant. Foam is ~5% of peak after 5 s. */
 const DECAY_TAU = 1.7;
 
-/** Foam deposited per second at reference speed. */
-const DEPOSIT_RATE = 1.9;
+/**
+ * Foam deposited per second at reference speed.
+ *
+ * As with the breaking-crest rate, what matters is `DEPOSIT_RATE * DECAY_TAU`,
+ * the coverage a continuously-emitting hull settles at. At 1.9 that product was
+ * 3.2 before the intensity multiplier and the stern term were even applied, so
+ * the whole wedge clamped to solid white and the wake read as a sheet of paper
+ * being dragged behind the ship. 0.4 leaves the turbulent band astern near white
+ * and lets the arms fall away from it.
+ */
+const DEPOSIT_RATE = 0.4;
 
 /** Speed, in m/s, at which foam generation saturates. */
 const REFERENCE_SPEED = 7;

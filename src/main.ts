@@ -3,7 +3,14 @@ import { pass, positionWorld } from 'three/tsl';
 import { createRenderer, clampPixelRatio, type Backend } from './core/Renderer';
 import { Caustics, UnderwaterParticles, UnderwaterPass } from './underwater';
 import { AssetLoader, Props, Seafloor, Ship } from './scene';
-import { BuoyancySystem, BuoyantBody, Wake, createRadialProbes } from './physics';
+import {
+  BuoyancySystem,
+  BuoyantBody,
+  ShipController,
+  Wake,
+  createRadialProbes,
+  type ShipControlState,
+} from './physics';
 import { Loop } from './core/Loop';
 import { AdaptiveQuality, QUALITY_TIERS, type QualityTier } from './core/QualityManager';
 import { OceanSimulation } from './ocean/OceanSimulation';
@@ -75,6 +82,16 @@ class App {
   private buoyancy!: BuoyancySystem;
   private wake!: Wake;
   private shipBody: BuoyantBody | null = null;
+  private shipControls: ShipController | null = null;
+
+  /** Scratch for the exposed controller state; reading it must not allocate. */
+  private readonly shipStateOut: ShipControlState = {
+    throttle: 0,
+    rudder: 0,
+    speed: 0,
+    forwardSpeed: 0,
+    heading: 0,
+  };
 
   /** Scratch — the frame path must not allocate. */
   private readonly previousShipPosition = new THREE.Vector3();
@@ -393,8 +410,24 @@ class App {
         object: ship.object,
         probePoints: ship.probePoints,
         mass: 90_000,
+        // A hull, not a barrel: it resists heave and is shaped not to resist
+        // surge. Its longitudinal and lateral resistance comes from
+        // `ShipController`, which knows which way the bow is pointing and can
+        // make the two differ by the order of magnitude a keel actually does.
+        // Nearly none. What remains is the genuine coupling to the water's own
+        // orbital motion — a hull does get shoved about by a passing swell — but
+        // the resistance to being *driven* belongs to the controller. Even a
+        // tenth of the probe damping was around 83 kN at cruising speed, which is
+        // most of the engine.
+        horizontalDamping: 0.03,
+        horizontalDrag: 0,
       });
       this.buoyancy.add(this.shipBody);
+
+      // The controller exists from load but stays inert until Boat mode selects
+      // it, so W/S and A/D cannot steer a ship the viewer is not driving.
+      this.shipControls = new ShipController(this.shipBody);
+      this.shipControls.setEnabled(this.state.cameraMode === 'boat');
 
       ship.setDebugProbesVisible(this.state.buoyancyProbes);
       this.wake.setDebugVisible(this.state.wakeProbes);
@@ -464,6 +497,10 @@ class App {
       case 'cameraMode':
         this.director.setMode(this.state.cameraMode);
         this.hud.setCameraMode(this.state.cameraMode);
+        // Selecting Boat selects the *ship*, not just a camera. Any other mode
+        // releases it, so Orbit and Fly keep their own keys and a hull cannot be
+        // left under power while the viewer is somewhere else.
+        this.shipControls?.setEnabled(this.state.cameraMode === 'boat');
         break;
       case 'buoyancyProbes':
         this.ship?.setDebugProbesVisible(this.state.buoyancyProbes);
@@ -657,10 +694,19 @@ class App {
 
     const ship = this.ship;
     if (ship) {
+      // Before the solver: the controller resolves intent into the force the
+      // solver then integrates. Running it afterwards would apply this frame's
+      // thrust to next frame's pose.
+      this.shipControls?.update(dt);
       ship.update(dt);
 
       const position = ship.object.position;
-      const speed = this.previousShipPosition.distanceTo(position) / Math.max(dt, 1e-4);
+      // Speed along the bow, from the body, rather than frame-to-frame distance.
+      // Distance travelled cannot tell ahead from astern and counts the hull's
+      // heave on a swell as forward motion, so a ship sitting still in a seaway
+      // laid down a wake.
+      const state = this.shipControls?.getState(this.shipStateOut) ?? null;
+      const speed = state ? Math.abs(state.forwardSpeed) : 0;
       this.previousShipPosition.copy(position);
 
       this.wake.emit(position.x, position.z, ship.heading, speed, ship.hullBeam);
@@ -783,6 +829,7 @@ class App {
           // returning them to their spawn poses is what stops a capture from
           // inheriting wherever the hull happened to have drifted.
           this.buoyancy?.resetToHome();
+          this.shipControls?.setInput(0, 0);
           this.ship?.resetClock(start);
           this.previousShipPosition.copy(this.ship?.object.position ?? this.previousShipPosition);
 
@@ -798,6 +845,13 @@ class App {
         },
 
         shadersReady: () => this.shadersReady,
+        /** Live ship controller state — throttle, rudder, speed, heading. */
+        shipState: () =>
+          this.shipControls ? { ...this.shipControls.getState(this.shipStateOut) } : null,
+        shipControlsEnabled: () => this.shipControls?.isEnabled ?? false,
+        /** Direct throttle/rudder input, bypassing the keyboard. */
+        setShipInput: (throttle: number, rudder: number) =>
+          this.shipControls?.setInput(throttle, rudder),
         /** Exact-pixel frame capture; see `App.capturePixels`. */
         capturePixels: () => this.capturePixels(),
         dispose: () => this.dispose(),
@@ -823,6 +877,7 @@ class App {
     this.underwater?.dispose();
     this.particles?.dispose();
     this.caustics?.dispose();
+    this.shipControls?.dispose();
     this.buoyancy?.dispose();
     this.wake?.dispose();
     this.ship?.dispose();

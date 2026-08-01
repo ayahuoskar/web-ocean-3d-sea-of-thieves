@@ -46,6 +46,15 @@ interface OceanHooks {
   resetDeterministic(time?: number, settleSteps?: number): Promise<void>;
   step(dt: number, steps?: number): Promise<void>;
   capturePixels(): Promise<CapturedPixels>;
+  setShipInput(throttle: number, rudder: number): void;
+  shipControlsEnabled(): boolean;
+  shipState(): {
+    throttle: number;
+    rudder: number;
+    speed: number;
+    forwardSpeed: number;
+    heading: number;
+  } | null;
 }
 
 declare global {
