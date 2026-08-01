@@ -114,8 +114,16 @@ export class UnderwaterPass {
   private readonly uWaterColor = uniform(new THREE.Color(DEFAULT_UNDERWATER_PARAMS.waterColor));
   /** Total extinction per metre per channel: absorption + the visibility floor. */
   private readonly uSigma = uniform(new THREE.Vector3(0.2, 0.09, 0.08));
-  /** Brightness of light scattered back out of the medium toward the viewer. */
-  private readonly uAmbient = uniform(0.95);
+  /**
+   * Brightness of light scattered back out of the medium toward the viewer.
+   *
+   * 0.55, down from 0.95. The inscatter term replaces the scene in proportion to
+   * how much the water absorbed, so a bright medium does not just tint the view
+   * — it *is* the view at any distance, and at 0.95 the submerged scene was a
+   * flat teal wash with the seafloor eleven metres away completely invisible.
+   * Real water darkens as it thickens; it does not converge on a bright fog.
+   */
+  private readonly uAmbient = uniform(0.55);
   private readonly uCameraDepth = uniform(4);
 
   // --- volumetric shafts ---------------------------------------------------
@@ -257,7 +265,22 @@ export class UnderwaterPass {
 
         If(this.uGodRayStrength.greaterThan(0.0001), () => {
           // Rebuild the world-space view ray for this pixel.
-          const ndc = suv.mul(2).sub(1).toVar('uwNdc');
+          // NDC from the screen uv. **y is flipped, and that is not cosmetic.**
+        //
+        // Screen uv runs top-down on the WebGPU backend and is explicitly flipped
+        // to run top-down on the WebGL one, while NDC y runs bottom-up on both —
+        // the same asymmetry `clipToScreenUV` in `ScreenSpaceReflection` exists to
+        // absorb. Taking `suv.y * 2 - 1` therefore builds a ray pointing *down*
+        // wherever the pixel looks up.
+        //
+        // It did not read as a broken ray, which is why it survived. It read as
+        // fog: the sky was handed a downward ray into an exponential layer that
+        // only thickens downward, so it integrated the whole column and every
+        // preset rendered as a white-out, while the water was handed an upward
+        // ray, left the layer immediately and got no fog at all. The give-away
+        // was that the result did not respond to density — a 175x sweep produced
+        // the same white, because both ends of it were saturated.
+        const ndc = vec2(suv.x.mul(2).sub(1), suv.y.mul(-2).add(1)).toVar('uwNdc');
           const viewH = this.uInvProjection.mul(vec4(ndc.x, ndc.y, -1, 1)).toVar('uwViewH');
           const viewDir = normalize(viewH.xyz.div(viewH.w)).toVar('uwViewDir');
           const worldDir = normalize(

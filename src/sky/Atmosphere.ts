@@ -23,6 +23,7 @@ import {
   vec3,
   vec4,
 } from 'three/tsl';
+import { smoothstepDown } from '../core/tslMath';
 
 /**
  * Analytic sky dome.
@@ -249,7 +250,17 @@ export class Atmosphere {
    */
   private readonly uOvercastTint: any = uniform(new THREE.Color(0.92, 0.96, 1.04));
   /** Multiplier applied to the flattened sky. Overcast is darker than clear. */
-  private readonly uOvercastDarken = uniform(0.78);
+  /**
+   * How much darker a fully overcast sky is than the clear one it replaces.
+   *
+   * 0.78 was far too generous. A thick overcast transmits a small fraction of
+   * the light a clear sky at the same sun elevation does — the usual figure is
+   * a quarter to a tenth — and at 22% off, the storm preset rendered a bright
+   * cream sky, which the ocean then reflected back as a cream sea. 0.34 puts it
+   * where a storm belongs: the sun is still a diffuse bright patch through the
+   * deck, and everything under it is grey.
+   */
+  private readonly uOvercastDarken = uniform(0.34);
   /**
    * Day and night are scaled separately, folded on the CPU. They must not share
    * a multiplier: the twilight gain exists to rescue a *sunlit* sky near the
@@ -341,8 +352,17 @@ export class Atmosphere {
 
     this.sunLight.castShadow = enabled;
     if (enabled && this.sunLight.shadow.mapSize.x !== side) {
+      // Set the size and stop there. Three's `ShadowNode.renderShadow` calls
+      // `shadowMap.setSize(shadow.mapSize.width, ...)` every frame, so the
+      // target follows `mapSize` on its own.
+      //
+      // The `shadow.dispose()` that used to follow was not just redundant, it
+      // was a crash: it nulls the node's `shadowMap`, and the planar reflector
+      // renders the scene from its own `updateBefore` — so on the frame after a
+      // tier change the reflection pass reached `updateShadow` first and read
+      // `depthTexture` off null. It only showed up when cycling tiers, because
+      // that is the only thing that changes the resolution.
       this.sunLight.shadow.mapSize.set(side, side);
-      this.sunLight.shadow.dispose();
     }
   }
 
@@ -514,7 +534,18 @@ export class Atmosphere {
     this.uSunDir.value.copy(this._sunDirection);
     this.uMoonDir.value.copy(this._moonDirection);
     this.uMieG.value = Math.min(0.99, Math.max(0, p.mieDirectionalG));
-    this.uOvercast.value = Math.min(1, Math.max(0, p.overcast ?? 0));
+    const overcast = Math.min(1, Math.max(0, p.overcast ?? 0));
+    this.uOvercast.value = overcast;
+
+    // A thick deck hides the sun's disc.
+    //
+    // The overcast term flattens the sky's *gradient* but the disc is added
+    // afterwards at 19000x the sky radiance, so it punched straight through: the
+    // storm preset rendered a hard bright patch of sun in the middle of a solid
+    // cloud layer, and that one feature was most of why the frame read as a hazy
+    // morning rather than as weather. What survives a real overcast is a diffuse
+    // brightening around the sun's bearing, which the Mie term already supplies.
+    this.uSunDiscVisible.value = 1 - overcast;
 
     this.nightAmount = Math.min(1, Math.max(0, p.nightIntensity));
     const night = this.nightAmount;
@@ -574,11 +605,20 @@ export class Atmosphere {
   private updateLights(): void {
     const p = this.params;
     const sunUp = smoothstepScalar(-0.06, 0.1, this._sunDirection.y);
+    const overcastAmount = Math.min(1, Math.max(0, p.overcast ?? 0));
 
     if (sunUp > 0.001) {
       this.sunLight.position.copy(this._sunDirection).multiplyScalar(SUN_LIGHT_DISTANCE);
       this.sunLight.color.copy(this._sunColor);
-      this.sunLight.intensity = 3.4 * sunUp;
+      // Cloud attenuates the key light, and it was not doing so at all.
+      //
+      // `overcast` reached the sky dome and the ambient fill's *colour*, but the
+      // directional light kept its full clear-day 3.4 — so under a 0.88 deck the
+      // storm was lit as if the sun were out: hard specular on every wave, a lit
+      // hull, and a scene that read as bright haze rather than as weather. The
+      // 0.74 factor matches the dome's own overcast darkening, so the key and the
+      // sky it is supposed to come from agree.
+      this.sunLight.intensity = 3.4 * sunUp * (1 - 0.74 * overcastAmount);
     } else {
       // Below the horizon the moon becomes the only shadow-casting source, so
       // the same light is retargeted rather than adding a second one. The switch
@@ -598,7 +638,7 @@ export class Atmosphere {
     _skyTint.lerp(NIGHT_SKY_TINT, night);
     // Overcast desaturates the fill along with the dome it stands in for, or a
     // grey sky would keep casting blue light into the shadows.
-    const overcast = Math.min(1, Math.max(0, p.overcast ?? 0));
+    const overcast = overcastAmount;
     if (overcast > 0) {
       const grey = _skyTint.r * 0.2126 + _skyTint.g * 0.7152 + _skyTint.b * 0.0722;
       _skyTint.lerp(_overcastFill.setRGB(grey * 0.92, grey * 0.96, grey * 1.04), overcast);
@@ -622,7 +662,12 @@ export class Atmosphere {
     // 0.16 reads shape without washing the darkness out, and the ground term
     // lifts with it so the underside of the hull picks up the water instead of
     // falling into a void.
-    this.ambientLight.intensity = (0.15 + 0.85 * day) * (1 - 0.86 * night) + 0.16 * night;
+    // Overcast moves light out of the key and into the fill rather than removing
+    // it: under a deck the whole sky is the source, which is why an overcast day
+    // has soft shadows rather than dark ones. Without this the storm simply went
+    // dim once the key was attenuated above.
+    this.ambientLight.intensity =
+      (0.15 + 0.85 * day) * (1 + 0.55 * overcastAmount) * (1 - 0.86 * night) + 0.16 * night;
     if (night > 0.001) {
       // Cool and dim — the colour moonlight actually fills shadows with. Blended
       // rather than assigned, so dusk hands over gradually.
@@ -717,7 +762,7 @@ export class Atmosphere {
       // Below the horizon the dome shows a diffuse ground lit by the horizon sky.
       // It is mostly seen by the environment capture; the ocean hides it in view.
       const groundColor = this.uGround.mul(dayColor.mul(1.4).add(0.004));
-      const belowness = smoothstep(0.0, -0.045, dir.y);
+      const belowness = smoothstepDown(dir.y, -0.045, 0.0);
       const daySky = mix(dayColor, groundColor, belowness).toVar('daySky');
 
       // --- night -------------------------------------------------------------

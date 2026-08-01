@@ -19,6 +19,7 @@ import {
   viewportDepthTexture,
   viewportSharedTexture,
 } from 'three/tsl';
+import { smoothstepDownClamped } from '../core/tslMath';
 
 import type { QualityTier } from '../core/QualityManager';
 
@@ -836,7 +837,7 @@ export class ScreenSpaceReflection {
               .div(wB.sub(wA).abs().max(1e-3))
               .clamp(0, 1)
               .toVar('ssrTravelled');
-            const rangeFade = travelled.smoothstep(1, 0.72).clamp(0, 1).toVar('ssrRangeFade');
+            const rangeFade = smoothstepDownClamped(travelled, 0.72, 1).toVar('ssrRangeFade');
 
             const weight = gate
               .mul(edgeFade)

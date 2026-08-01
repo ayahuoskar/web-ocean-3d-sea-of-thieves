@@ -22,6 +22,7 @@ import {
   vec3,
   vec4,
 } from 'three/tsl';
+import { smoothstepDown } from '../core/tslMath';
 
 /**
  * Raymarched volumetric cloud layer.
@@ -308,7 +309,7 @@ export class Clouds {
     // the threshold toward the top and bottom of the slab (rather than only
     // scaling density) is what makes the puffs read as rounded volumes instead
     // of as a sheet with soft edges.
-    const profile = smoothstep(0.0, 0.12, h).mul(smoothstep(1.0, 0.42, h));
+    const profile = smoothstep(0.0, 0.12, h).mul(smoothstepDown(h, 0.42, 1.0));
 
     const q = p.sub(this.uWindOffset).mul(NOISE_SCALE);
     const base = mx_fractal_noise_float(q, 4, 2.0, 0.5, 1.0).mul(0.5).add(0.5);

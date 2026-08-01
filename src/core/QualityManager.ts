@@ -27,8 +27,15 @@ export interface QualitySettings {
   underwaterParticles: number;
   /**
    * How much of the water's transmitted colour is the real refracted scene, as
-   * opposed to the analytic depth-graded body colour. 0 disables the backdrop and
-   * depth-buffer reads entirely.
+   * opposed to the analytic depth-graded body colour.
+   *
+   * 0 mixes the refracted colour out; it does **not** skip the backdrop and
+   * depth-buffer reads, which are unconditional in the node graph. An earlier
+   * version of this comment claimed it did, which was simply false — an
+   * independent review traced the uniform to its single use and found no branch.
+   * The reads are cheap relative to the surface's fragment cost and both are
+   * already paid for by the reflection path, so the honest description is that
+   * this is a *visual* policy and not a cost one.
    */
   refraction: number;
   /**
@@ -64,6 +71,16 @@ export interface QualitySettings {
    * and chromatic dispersion. A clear frame costs one compare at any level.
    */
   lensRainQuality: number;
+  /**
+   * Strength of the ship wake's surface deformation, 0..1.
+   *
+   * Three taps of the wake buffer — one in the vertex stage, two in the fragment
+   * stage for the gradient — so unlike most of the knobs here 0 genuinely removes
+   * work rather than just hiding a result. Low turns it off because it is the
+   * tier that also has no refraction and no reflection: a wake it cannot light
+   * would read as a grey smear, not as water.
+   */
+  wakeDisplacement: number;
 }
 
 export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
@@ -83,6 +100,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     reflectionScale: 0.25,
     fogSteps: 0,
     lensRainQuality: 1,
+    wakeDisplacement: 0,
   },
   medium: {
     fftSize: 128,
@@ -100,6 +118,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     reflectionScale: 0.35,
     fogSteps: 12,
     lensRainQuality: 2,
+    wakeDisplacement: 0.75,
   },
   high: {
     fftSize: 256,
@@ -115,6 +134,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     reflectionScale: 0.5,
     fogSteps: 24,
     lensRainQuality: 3,
+    wakeDisplacement: 1,
   },
   ultra: {
     fftSize: 256,
@@ -130,6 +150,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     reflectionScale: 0.6,
     fogSteps: 40,
     lensRainQuality: 3,
+    wakeDisplacement: 1,
   },
   max: {
     fftSize: 512,
@@ -145,6 +166,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     reflectionScale: 0.75,
     fogSteps: 56,
     lensRainQuality: 3,
+    wakeDisplacement: 1,
   },
 };
 

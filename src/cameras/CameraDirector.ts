@@ -196,7 +196,6 @@ export class CameraDirector {
       this.camera.quaternion.slerpQuaternions(this.fromQuaternion, this.desiredQuaternion, t);
     }
 
-    this.avoidSurfacePenetration();
   }
 
   private updateOrbit(): void {
@@ -264,19 +263,24 @@ export class CameraDirector {
   }
 
   /**
-   * Keeps the camera from clipping through the surface from below, which would
-   * flip the underwater state on and off every frame at a crest.
+   * How submerged the camera is, 0..1, with a soft band around the surface.
+   *
+   * This ramp is the *only* thing standing between the camera and a hard cut at
+   * the waterline, and that is deliberate.
+   *
+   * There used to be an `avoidSurfacePenetration` step that teleported the camera
+   * out of a 0.35 m band either side of the surface, on the theory that it stopped
+   * the underwater state flickering at a crest. What it actually built was a wall:
+   * approaching the surface from above put the camera inside the band, which
+   * snapped it back to `surface + 0.35`, and since no plausible frame moves the
+   * camera 0.7 m at once there was no way through in either direction. Diving and
+   * surfacing — the headline feature the fly camera exists for — were impossible
+   * except by teleport.
+   *
+   * The flicker it guarded against is not real either. The state is not a boolean;
+   * it is this value, and it cross-fades over the whole 0.7 m band, so a crest
+   * passing the lens moves it smoothly rather than toggling anything.
    */
-  private avoidSurfacePenetration(): void {
-    const surface = this.surfaceHeight(this.camera.position.x, this.camera.position.z);
-    const margin = 0.35;
-    const distance = this.camera.position.y - surface;
-    if (Math.abs(distance) < margin) {
-      this.camera.position.y = surface + (distance >= 0 ? margin : -margin);
-    }
-  }
-
-  /** How submerged the camera is, 0..1, with a soft band around the surface. */
   submersion(): number {
     const surface = this.surfaceHeight(this.camera.position.x, this.camera.position.z);
     const depth = surface - this.camera.position.y;

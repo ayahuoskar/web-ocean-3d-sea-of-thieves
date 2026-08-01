@@ -14,6 +14,7 @@ import {
   vec3,
   vec4,
 } from 'three/tsl';
+import { smoothstepDown } from '../core/tslMath';
 import { SEEDS, fillRandom, mulberry32 } from '../core/random';
 
 /**
@@ -243,7 +244,7 @@ export class UnderwaterParticles {
     const coord = uv();
     const d = coord.sub(vec2(0.5, 0.5)).length();
     // A soft core with a wide skirt: hard-edged dots read as dead pixels.
-    const alpha = smoothstep(0.5, 0.04, d)
+    const alpha = smoothstepDown(d, 0.04, 0.5)
       .mul(mix(float(0.35), float(1.0), seed.w))
       .mul(this.uSnowOpacity);
 
@@ -296,8 +297,8 @@ export class UnderwaterParticles {
     const coord = uv();
     const d = coord.sub(vec2(0.5, 0.5)).length();
     // Bright rim plus a dimmer fill — a bubble is a lens, not a dot.
-    const rim = smoothstep(0.5, 0.4, d).mul(smoothstep(0.24, 0.36, d));
-    const fill = smoothstep(0.5, 0.05, d).mul(0.35);
+    const rim = smoothstepDown(d, 0.4, 0.5).mul(smoothstep(0.24, 0.36, d));
+    const fill = smoothstepDown(d, 0.05, 0.5).mul(0.35);
     const alpha = max(rim, fill)
       .mul(mix(float(0.5), float(1.0), seed.y))
       .mul(this.uBubbleOpacity);

@@ -31,6 +31,12 @@ const BARREL_COUNT = 6;
 const ROCK_COUNT = 34;
 const CLIFF_COUNT = 5;
 
+/** Reef outcrops on the seafloor. One instanced draw, so this can be generous. */
+const REEF_COUNT = 90;
+/** Clear of the spawn point, and inside the shallow plateau (radius 320 m). */
+const REEF_INNER = 26;
+const REEF_OUTER = 260;
+
 export interface Floater {
   object: THREE.Object3D;
   /** Effective flotation radius in metres, for buoyancy probe layout. */
@@ -59,6 +65,7 @@ export class Props {
 
     this.placeFloaters(sources.buoy, sources.barrel, random);
     this.placeIsland(sources.rock, sources.cliff, random);
+    this.placeReef(sources.rock, random);
   }
 
   static async load(loader: AssetLoader, options: PropsOptions = {}): Promise<Props> {
@@ -122,6 +129,57 @@ export class Props {
       this.object.add(object);
       this.floaters.push({ object, radius: 0.62 });
     }
+  }
+
+  /**
+   * Scatters a reef across the shallow plateau, so there is something down there
+   * to look at.
+   *
+   * The submerged view was empty water over flat sand: the god rays had nothing
+   * to fall across, the caustics had nothing to bend over, and there was no
+   * parallax to give the depth any scale. Rocks on the bottom fix all three at
+   * once, and they are the one thing that can — a fish shoal would move
+   * independently of the swell and read as decoration, while a reef is what
+   * makes the water *volume* legible.
+   *
+   * Reuses the island's rock, which is already loaded and instanced, so this
+   * costs one more draw call and no download. Scattered on an annulus that
+   * clears the spawn point but stays inside the plateau, where the water is
+   * shallow enough that light still reaches the bottom.
+   */
+  private placeReef(rock: THREE.Group, random: () => number): void {
+    const reefMesh = this.buildInstanced(rock, REEF_COUNT, 'reef-rocks');
+    if (!reefMesh) return;
+    // Never culled by its own bounds against the surface: the reef is read
+    // through refraction from above as well as directly from below.
+    reefMesh.castShadow = false;
+    this.object.add(reefMesh);
+
+    const matrix = new THREE.Matrix4();
+    const position = new THREE.Vector3();
+    const quaternion = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    const euler = new THREE.Euler();
+
+    for (let i = 0; i < REEF_COUNT; i++) {
+      const angle = random() * Math.PI * 2;
+      // Square-root radius keeps the scatter even in *area* rather than
+      // clustering everything at the inner edge.
+      const radius = REEF_INNER + Math.sqrt(random()) * (REEF_OUTER - REEF_INNER);
+      const x = Math.cos(angle) * radius;
+      const z = Math.sin(angle) * radius;
+      const s = 1.6 + random() * 7;
+
+      // Sunk into the floor by a fraction of their size, so they read as
+      // outcrops rather than as boulders resting on a plane.
+      position.set(x, seafloorHeight(x, z) - s * 0.28, z);
+      euler.set((random() - 0.5) * 0.7, random() * Math.PI * 2, (random() - 0.5) * 0.7);
+      quaternion.setFromEuler(euler);
+      scale.set(s, s * (0.5 + random() * 0.7), s);
+      reefMesh.setMatrixAt(i, matrix.compose(position, quaternion, scale));
+    }
+    reefMesh.instanceMatrix.needsUpdate = true;
+    reefMesh.computeBoundingSphere();
   }
 
   /**

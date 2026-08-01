@@ -1,6 +1,6 @@
 {
   "shot": "boat-chase",
-  "capturedAt": "2026-08-01T18:18:15.557Z",
+  "capturedAt": "2026-08-01T20:25:44.407Z",
   "width": 1280,
   "height": 720,
   "definition": {
@@ -14,7 +14,11 @@
     },
     "camera": null,
     "time": 55.5,
-    "settleSteps": 90
+    "settleSteps": 480,
+    "shipInput": {
+      "throttle": 1,
+      "rudder": 0
+    }
   },
   "stack": {
     "backend": "webgpu",

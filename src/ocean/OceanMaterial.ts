@@ -19,6 +19,7 @@ import {
   viewportSafeUV,
   viewportSharedTexture,
 } from 'three/tsl';
+import { smoothstepDownClamped } from '../core/tslMath';
 
 export interface WaterAppearance {
   /** Colour of light that survives deep transmission — the "body" of the water. */
@@ -75,7 +76,18 @@ export interface OceanMaterialInputs {
    * `setFoamCenter`; `extent` is the world size of the square it covers and is
    * fixed, so it is baked in as a constant rather than carried as a uniform.
    */
-  foam?: { texture: THREE.Texture; extent: number } | null;
+  foam?: {
+    texture: THREE.Texture;
+    extent: number;
+    /**
+     * Texels per side, so the surface can take finite differences of the
+     * elevation channel at the buffer's own sampling rate rather than at some
+     * guessed world distance. Sampling closer than a texel measures the bilinear
+     * filter; sampling much wider measures a smoothed version of the wake and
+     * loses the crest lines the whole channel exists for.
+     */
+    resolution: number;
+  } | null;
   /**
    * Planar reflection texture node, from `ocean/Reflections`.
    *
@@ -117,6 +129,19 @@ export interface OceanMaterialInputs {
  * two are asserted equal at construction.
  */
 const MAX_CASCADES = 3;
+
+/**
+ * Slope scale for the grazing-angle reflection masking, dimensionless.
+ *
+ * Cox & Munk's classic sun-glitter measurements give a wind-driven RMS surface
+ * slope of about 0.28 at 15 m/s. Using that value directly in the masking term
+ * removes almost the whole reflection at the horizon, which overshoots — the
+ * derivative fields still carry real slope at mid distances, so the correction
+ * would be applied twice there. 0.16 is the working value: the far field keeps
+ * roughly half its reflection and stops reading as a white sheet, and the near
+ * field, where the normals are genuine, is barely touched.
+ */
+const GRAZING_SLOPE_SIGMA = 0.16;
 
 export class OceanMaterial {
   readonly material: THREE.MeshBasicNodeMaterial;
@@ -178,6 +203,13 @@ export class OceanMaterial {
    * built for a WebGL2 path where the two must agree exactly.
    */
   private readonly uDepthRange = uniform(40000);
+  /**
+   * Camera forward, world space.
+   *
+   * Depth-buffer values are distances along this axis, and light travels along
+   * the pixel's own ray; converting between the two needs the angle between them.
+   */
+  private readonly uCameraForward = uniform(new THREE.Vector3(0, 0, -1));
 
   /** Rain rate, 0..1. Drives how many lattice cells are producing impacts. */
   private readonly uRainIntensity = uniform(0);
@@ -203,6 +235,26 @@ export class OceanMaterial {
   private readonly uFoamCenter = uniform(new THREE.Vector2());
   /** How strongly accumulated foam reads against the surface, 0..1. */
   private readonly uFoamStrength = uniform(1);
+  /**
+   * Multiplier on the wake's elevation channel, 0..1.
+   *
+   * A tier knob rather than an art knob: the wake displacement costs two extra
+   * texture taps in the fragment stage and one in the vertex stage, and the Low
+   * tier turns it off. Zero here does genuinely remove the work, because the
+   * displacement branch is behind a uniform compare.
+   */
+  private readonly uWakeDisplacement = uniform(1);
+
+  /**
+   * The wake buffer, bound once and shared by both stages.
+   *
+   * One node rather than two `texture()` calls, because the vertex stage
+   * displaces by the elevation channel and the fragment stage reads foam and the
+   * elevation *gradient* from the same texels. Two independent bindings of the
+   * same texture would compile to two samplers and — worse — make it possible to
+   * point one at a new target and forget the other.
+   */
+  private wakeNode: any = null;
 
   constructor(inputs: OceanMaterialInputs) {
     this.material = new THREE.MeshBasicNodeMaterial();
@@ -268,10 +320,11 @@ export class OceanMaterial {
    * Per-tier refraction policy.
    *
    * `amount` 0 drops the surface back to the analytic body colour without
-   * recompiling anything — the node graph still contains the backdrop sample, but
-   * its contribution is mixed out. That is the WebGL2 and Low-tier path: the
-   * depth-buffer read is the part that is least portable, and a tier that cannot
-   * afford it gets a coherent image rather than a broken one.
+   * recompiling anything. Note what that does and does not buy: the backdrop and
+   * depth reads are still executed — they are unconditional in the graph — and
+   * only their *contribution* is mixed out. So this is a visual policy, not a
+   * cost one, and the WebGL2 path takes it to get a coherent simpler image
+   * rather than to avoid the reads.
    */
   setRefraction(amount: number, strength = 0.22): void {
     this.uRefractionAmount.value = Math.max(0, Math.min(1, amount));
@@ -281,6 +334,11 @@ export class OceanMaterial {
   /** Camera far minus near, in metres. See `uDepthRange`. */
   setDepthRange(metres: number): void {
     this.uDepthRange.value = Math.max(1, metres);
+  }
+
+  /** Camera forward direction, world space. See `uCameraForward`. */
+  setCameraForward(direction: THREE.Vector3): void {
+    (this.uCameraForward.value as THREE.Vector3).copy(direction).normalize();
   }
 
   /**
@@ -327,6 +385,11 @@ export class OceanMaterial {
     this.uFoamStrength.value = value;
   }
 
+  /** Tier knob for the wake's surface deformation. 0 skips the taps entirely. */
+  setWakeDisplacement(value: number): void {
+    this.uWakeDisplacement.value = Math.max(0, Math.min(1, value));
+  }
+
   dispose(): void {
     this.material.dispose();
   }
@@ -369,6 +432,7 @@ export class OceanMaterial {
     const { displacementTextures, derivativeTextures, tileSizes } = inputs;
     const floorDepth = inputs.floorDepthNode ?? null;
     const foam = inputs.foam ?? null;
+    if (foam !== null) this.wakeNode = texture(foam.texture) as any;
     const planar = (inputs.reflectionNode ?? null) as any;
     const ssr = inputs.ssrNode ?? null;
 
@@ -410,6 +474,33 @@ export class OceanMaterial {
 
       displacement.mulAssign(this.uDisplacementScale);
 
+      // Wake displacement, in metres, from the world-anchored buffer.
+      //
+      // Deliberately *outside* `uDisplacementScale`: that scale is the sea-state
+      // knob, and a preset that flattens the swell should not also flatten the
+      // hole a ship pushes through it.
+      //
+      // Faded with distance from the camera on the same argument as the wave
+      // cascades — the divergent arms are metre-scale, so past a few hundred
+      // metres they are subpixel and displacing geometry by them only produces
+      // the speckle that the geometry/shading LOD split exists to avoid. The
+      // fragment stage keeps contributing them to the normal well past that.
+      if (foam !== null) {
+        If(this.uWakeDisplacement.greaterThan(0.001), () => {
+          const wakeUv = worldXZ.sub(this.uFoamCenter).div(foam.extent).add(0.5).toVar();
+          const edge = wakeUv.min(wakeUv.oneMinus()).toVar();
+          const inside = edge.x.min(edge.y).smoothstep(0, 0.02).clamp(0, 1).toVar();
+          const reach = smoothstepDownClamped(groundDistance, 220, 620);
+          displacement.y.addAssign(
+            this.wakeNode
+              .sample(wakeUv)
+              .g.mul(inside)
+              .mul(reach)
+              .mul(this.uWakeDisplacement),
+          );
+        });
+      }
+
       return vec3(local.x.add(displacement.x), displacement.y, local.z.add(displacement.z));
     })();
 
@@ -444,13 +535,47 @@ export class OceanMaterial {
       // contribute is aliasing — the same reason the finest wave cascade fades.
       // Behind a uniform branch, so every clear preset pays one compare.
       If(this.uRainIntensity.greaterThan(0.001), () => {
-        const nearness = viewDistance.smoothstep(38, 6).clamp(0, 1);
+        const nearness = smoothstepDownClamped(viewDistance, 6, 38);
         slope.addAssign(
           rainSlope(worldPos.xz, this.uRainTime, this.uRainIntensity)
             .mul(this.uRainSlope)
             .mul(nearness),
         );
       });
+
+      // Wake slope, from the gradient of the elevation channel.
+      //
+      // The vertex stage already displaces geometry by this field, but the ocean
+      // takes its normal entirely from the derivative textures and never from the
+      // mesh — so without this the hull would push a visible hole through the
+      // water that was shaded as if the water were flat. Adding the gradient here
+      // is not double-counting; it is the only thing that lights the wake at all.
+      //
+      // Finite differences over one texel of the buffer, which is 0.41 m at the
+      // default 420 m / 1024 configuration. Two extra taps, behind the same
+      // uniform compare as the vertex sample.
+      if (foam !== null) {
+        If(this.uWakeDisplacement.greaterThan(0.001), () => {
+          const wakeUv = worldPos.xz.sub(this.uFoamCenter).div(foam.extent).add(0.5).toVar();
+          const edge = wakeUv.min(wakeUv.oneMinus()).toVar();
+          const inside = edge.x.min(edge.y).smoothstep(0, 0.02).clamp(0, 1).toVar();
+
+          const texelUv = 1 / foam.resolution;
+          const texelMetres = foam.extent / foam.resolution;
+
+          const centre = this.wakeNode.sample(wakeUv).g.toVar();
+          const gradient = vec2(
+            this.wakeNode.sample(wakeUv.add(vec2(texelUv, 0))).g.sub(centre),
+            this.wakeNode.sample(wakeUv.add(vec2(0, texelUv))).g.sub(centre),
+          ).div(texelMetres);
+
+          // Held further out than the vertex displacement: a normal costs nothing
+          // in geometry and the wake stays legible as shading long after
+          // displacing vertices by it would only alias.
+          const reach = smoothstepDownClamped(viewDistance, 140, 520);
+          slope.addAssign(gradient.mul(inside).mul(reach).mul(this.uWakeDisplacement));
+        });
+      }
 
       const normal = normalize(vec3(slope.x.negate(), 1, slope.y.negate())).toVar();
 
@@ -468,6 +593,29 @@ export class OceanMaterial {
       const oneMinus = float(1).sub(nDotV).toVar();
       const fresnelPow = oneMinus.mul(oneMinus).mul(oneMinus).mul(oneMinus).mul(oneMinus).toVar();
       const fresnel = f0.add(float(1).sub(f0).mul(fresnelPow)).clamp(0, 1).toVar();
+
+      // Masking for the slope the normal no longer carries.
+      //
+      // Schlick's Fresnel describes one flat interface, and at a grazing angle it
+      // is very close to 1 — from 5 m up, water 400 m away is seen at under a
+      // degree, so a flat sea reflects 94% of the sky there. That is correct for
+      // a flat sea and wrong for this one. The surface has a slope distribution
+      // (Cox & Munk put the RMS slope near 0.28 at 15 m/s), and the mipmapped
+      // derivative fields plus the explicit distance flattening deliberately
+      // average that away — so the normal a distant pixel gets is the *mean*
+      // normal, which has none of the masking and shadowing the real facets do.
+      //
+      // The consequence was that everything past the near field went to a sheet
+      // of white sky, and it reads as foam even though the foam mask there is
+      // empty. This is the Smith G1 masking term's behaviour in a cheap form:
+      // full reflection head-on, roughly halved at the horizon, with the
+      // crossover set by the slope scale.
+      const maskedGrazing = nDotV
+        .div(nDotV.add(GRAZING_SLOPE_SIGMA))
+        .mul(0.55)
+        .add(0.45)
+        .toVar();
+      fresnel.mulAssign(maskedGrazing);
 
       // --- transmitted colour -------------------------------------------------
       //
@@ -510,12 +658,34 @@ export class OceanMaterial {
       // Column thickness. Two independent estimates, and the smaller wins: the
       // depth buffer knows about the hull and the props, the heightfield knows
       // about seafloor the depth buffer may never have rendered.
-      const bufferThickness: any = backdropZ.sub(surfaceZ).max(0).mul(this.uDepthRange).toVar();
+      //
+      // The depth difference is measured along the camera's *forward axis*, and
+      // light travels along the pixel's own ray — which is longer, by exactly the
+      // secant of the angle between them. Without that correction the water
+      // absorbs less toward the edges of the frame than at its centre, and the
+      // apparent density of the whole ocean changes with field of view. An
+      // independent review caught this; the volumetric fog had it right and this
+      // did not.
+      //
+      // `nDotV` is the wrong correction for it, incidentally, and was what the
+      // seafloor estimate used: that is incidence against the *wave* normal, so
+      // it made the water's density flicker with the ripples.
+      const axialToRay: any = float(1).div(viewDir.dot(this.uCameraForward).abs().max(0.15));
+      const bufferThickness: any = backdropZ
+        .sub(surfaceZ)
+        .max(0)
+        .mul(this.uDepthRange)
+        .mul(axialToRay)
+        .toVar();
       const pathLength: any = (
         floorDepth === null
           ? bufferThickness
           : bufferThickness.min(
-              floorDepth(worldPos).max(0).mul(float(1).div(nDotV.max(0.25))),
+              // Depth below the surface, stretched along the same ray. The ray
+              // bends toward vertical entering water, so this over-estimates a
+              // little at grazing angles; the buffer estimate normally wins there
+              // anyway.
+              floorDepth(worldPos).max(0).mul(axialToRay),
             )
       ).toVar();
 
@@ -631,15 +801,15 @@ export class OceanMaterial {
         .mul(ambientFloor)
         .add(scatter)
         .toVar();
-      const surface = mix(litBody, reflection, fresnel).add(specular).toVar();
 
       // --- foam --------------------------------------------------------------------
       // The Jacobian is 1 on unstretched water and drops below 0 where the surface
       // folds onto itself; that fold region is physically where whitecaps break.
-      const coverage = fold
-        .smoothstep(this.uFoamThreshold, this.uFoamThreshold.sub(this.uFoamSoftness))
-        .clamp(0, 1)
-        .toVar();
+      const coverage = smoothstepDownClamped(
+        fold,
+        this.uFoamThreshold.sub(this.uFoamSoftness),
+        this.uFoamThreshold,
+      ).toVar();
 
       // Whitecaps break at crests, not in troughs. The Jacobian alone is a
       // low-frequency field and marks broad patches, so bias it by local
@@ -687,6 +857,8 @@ export class OceanMaterial {
       // on earlier frames and has been decaying since, which is what lets a wake
       // trail behind a moving hull instead of being a decal under it.
       const accumulated = float(0).toVar();
+      /** How completely the accumulation buffer covers this fragment, 0..1. */
+      const buffered = float(0).toVar();
       if (foam !== null) {
         const foamUvw = worldPos.xz.sub(this.uFoamCenter).div(foam.extent).add(0.5).toVar();
 
@@ -695,9 +867,10 @@ export class OceanMaterial {
         // fade out just inside the edge instead.
         const edge = foamUvw.min(foamUvw.oneMinus()).toVar();
         const inside = edge.x.min(edge.y).smoothstep(0, 0.02).clamp(0, 1).toVar();
+        buffered.assign(inside);
 
         accumulated.assign(
-          texture(foam.texture, foamUvw).r.clamp(0, 1).mul(inside).mul(this.uFoamStrength),
+          this.wakeNode.sample(foamUvw).r.clamp(0, 1).mul(inside).mul(this.uFoamStrength),
         );
 
         // Broken up by the same noise as the crest foam so the two read as one
@@ -708,19 +881,66 @@ export class OceanMaterial {
         // unconditionally it is a signed term, so on empty water the positive
         // half of the noise alone clears the threshold and sprays foam across an
         // ocean that has none — the mask has to be able to return exactly zero.
+        // The breakup is deliberately strong. At 0.22 it was a faint dither on a
+        // smooth field: the buffer is 0.41 m per texel and bilinearly filtered,
+        // so what it hands over is inherently soft, and a weak perturbation
+        // leaves it looking airbrushed rather than bubbly. At 0.5 the noise is
+        // what decides the foam's edge, and the buffer only decides where the
+        // foam *region* is — which is the right division of labour, because the
+        // buffer cannot resolve a bubble and the noise is scale-free.
+        //
+        // The remap is also much wider than it was. `smoothstep(0.16, 0.72)`
+        // drove a half-strength deposit to four-fifths white, so foam that should
+        // have been thinning as it aged stayed opaque until it vanished.
         const present = accumulated.smoothstep(0.02, 0.2).toVar();
         accumulated.assign(
           accumulated
-            .add(perturb.mul(0.22).mul(present))
-            .smoothstep(0.16, 0.72)
+            .add(perturb.mul(0.5).mul(present))
+            .smoothstep(0.06, 0.68)
             .clamp(0, 1)
             .mul(present),
         );
       }
 
-      const foamMask = crestFoam.max(accumulated).toVar();
+      // Where the buffer reaches, the buffer *is* the whitecaps.
+      //
+      // These two are not two kinds of foam, they are two implementations of one
+      // kind, and for a long time both ran everywhere. That is why the near field
+      // was a sheet of white: every breaking crest was painted twice, once as a
+      // persistent deposit and once as an instantaneous mask over the top of it,
+      // and `max` of the two can only ever be the more generous.
+      //
+      // The buffer is the better answer wherever it has data — it carries
+      // persistence, so foam is left behind by a wave instead of travelling with
+      // it — but it only covers a 420 m square around the camera. Past that the
+      // instantaneous mask is all there is, so it is faded in exactly as the
+      // buffer's own edge fades out and the two never overlap.
+      const foamMask = accumulated.max(crestFoam.mul(buffered.oneMinus())).toVar();
 
-      const withFoam = mix(surface, this.uFoamColor, foamMask).toVar();
+      // Foam is lit, not painted.
+      //
+      // `mix(surface, foamColor, mask)` toward a constant near-white is what made
+      // it read as paint: it has no shading, no structure, and it survives into
+      // the night unchanged. Whitecaps are a few centimetres of bubbles — a dense
+      // scattering medium, so almost Lambertian, bright but still lit by the same
+      // sun as everything else, and shadowed on the side away from it.
+      const bubbles = breakup.mul(0.5).add(0.5).toVar();
+      const foamColor = this.uFoamColor
+        .mul(bubbles)
+        .mul(nDotL.mul(0.4).add(0.6))
+        .mul(ambientFloor)
+        .toVar();
+
+      // Foam kills the specular under it. Bubbles are a diffuse rough medium, so a
+      // mirror highlight sitting on top of a whitecap is the single most obvious
+      // tell that the foam is a decal — and at 15 m/s it happens across half the
+      // frame. Not driven fully to zero: the wet film between bubbles does still
+      // glint.
+      const surface = mix(litBody, reflection, fresnel)
+        .add(specular.mul(foamMask.mul(0.88).oneMinus()))
+        .toVar();
+
+      const withFoam = mix(surface, foamColor, foamMask).toVar();
 
       // --- aerial perspective --------------------------------------------------------
       const fogFactor = float(1)
@@ -791,6 +1011,22 @@ export class OceanMaterial {
  */
 const RAIN_CELL = 1.05;
 const RAIN_PERIOD = 0.95;
+/**
+ * Furthest a ring travels before its cell fires again, in cells.
+ *
+ * `RAIN_SPEED * RAIN_PERIOD` is 1.43 m against a 1.05 m cell, so a ring can
+ * reach 1.36 cells from where it landed and the 3x3 neighbourhood the loop walks
+ * does not contain every drop that can touch a given fragment. A review caught
+ * that; the visible consequence is a discontinuity as a fragment crosses a cell
+ * boundary and a ring pops in or out.
+ *
+ * Rather than widen the loop to 5x5 — which more than doubles the cost for
+ * contributions that are almost entirely faded — the ring's envelope is closed
+ * off before it can leave the neighbourhood. `exp(-1.6 r)` is already down to 4%
+ * of its peak at one cell, so bounding it here changes the image far less than
+ * the boundary artefact it removes.
+ */
+const RAIN_MAX_RADIUS = RAIN_CELL * 0.95;
 /** Metres per second the ring expands. */
 const RAIN_SPEED = 1.5;
 /** Radians per metre across the ring — how tight the wavefront reads. */
@@ -829,12 +1065,17 @@ const rainSlope = /*@__PURE__*/ Fn(([worldXZ, time, intensity]: [any, any, any])
       const x = r.sub(front).toVar();
 
       // A wave packet at the expanding front, dying with age and with distance.
+      // Closed off before the ring can leave the 3x3 neighbourhood — see
+      // `RAIN_MAX_RADIUS`. Without it a ring that outruns the window vanishes
+      // abruptly at a cell boundary instead of fading.
+      const reach = float(1).sub(r.div(RAIN_MAX_RADIUS)).clamp(0, 1).toVar();
       const envelope = x
         .mul(x)
         .mul(-9.0)
         .exp()
         .mul(float(1).sub(age.div(RAIN_PERIOD)))
         .mul(r.mul(-1.6).exp())
+        .mul(reach.mul(reach))
         .toVar();
 
       // d/dr of sin(x * F) * envelope, keeping the dominant term.

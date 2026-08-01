@@ -1,5 +1,6 @@
 import * as THREE from 'three/webgpu';
 import { Fn, float, mix, positionWorld, texture, uniform, vec2, vec3, vec4 } from 'three/tsl';
+import { smoothstepDown } from '../core/tslMath';
 import { SEEDS, mulberry32 } from '../core/random';
 
 /**
@@ -359,7 +360,7 @@ export class Seafloor {
       const deepSilt = vec3(0.14, 0.2, 0.22);
 
       const aboveWater = wp.y.smoothstep(-1.5, 6.0).toVar();
-      const submerged = mix(deepSilt, wetSand, depth.smoothstep(70, 4)).toVar();
+      const submerged = mix(deepSilt, wetSand, smoothstepDown(depth, 4, 70)).toVar();
       const exposed = mix(drySand, dryRock, wp.y.smoothstep(4, 26)).toVar();
 
       const base = mix(submerged, exposed, aboveWater).toVar();
@@ -373,7 +374,7 @@ export class Seafloor {
 
       // Caustics only exist under water, and fade out as the floor gets deep
       // enough that the surface pattern has diverged into ambient light.
-      const reach = depth.smoothstep(48, 2).mul(float(1).sub(aboveWater)).toVar();
+      const reach = smoothstepDown(depth, 2, 48).mul(float(1).sub(aboveWater)).toVar();
       const lit = mix(float(1), caustics, reach.mul(strength)).toVar();
       return vec4(mottled.mul(lit), 1);
     })();
@@ -453,12 +454,12 @@ function buildNoiseNodes(map: THREE.Texture): NoiseNodes {
     const dIsland = xz.sub(vec2(ISLAND.x, ISLAND.z)).length().toVar();
 
     const shallowOrigin = float(1).sub(rOrigin.smoothstep(PLATEAU_RADIUS, SHELF_RADIUS)).toVar();
-    const shallowIsland = dIsland.smoothstep(ISLAND.radius * 2.4, ISLAND.radius * 0.6).toVar();
+    const shallowIsland = smoothstepDown(dIsland, ISLAND.radius * 0.6, ISLAND.radius * 2.4).toVar();
     const shallowness = shallowOrigin.max(shallowIsland).toVar();
 
     const y = float(DEEP_Y).add(float(PLATEAU_Y - DEEP_Y).mul(shallowness)).toVar();
     y.addAssign(n.sub(0.5).mul(RELIEF).mul(shallowness.mul(0.65).add(0.35)));
-    y.addAssign(float(ISLAND.peak).mul(dIsland.smoothstep(ISLAND.radius, ISLAND.radius * 0.18)));
+    y.addAssign(float(ISLAND.peak).mul(smoothstepDown(dIsland, ISLAND.radius * 0.18, ISLAND.radius)));
     return y;
   });
 

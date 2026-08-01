@@ -60,6 +60,16 @@ export interface Shot {
   time: number;
   /** Steps of 1/60 s used to settle buoyancy, foam and the chase rig. */
   settleSteps: number;
+  /**
+   * Throttle and rudder held for the whole settle run, or omitted for a hull
+   * that is only floating.
+   *
+   * Applied *inside* the reset, before the settle steps, because the ship has a
+   * velocity time constant near 6.7 s: an input applied after the settle would
+   * photograph a stationary hull with the throttle open. Only meaningful when
+   * `state.cameraMode` is `boat` — the controller is disabled otherwise.
+   */
+  shipInput?: { throttle: number; rudder: number };
 }
 
 /**
@@ -158,8 +168,8 @@ export const SHOTS: readonly Shot[] = [
     id: 'boat-chase',
     title: 'Boat, chase camera',
     purpose:
-      'The chase rig framing and the hull in wave contact: buoyancy pose, ' +
-      'contact shadow, hull material response and the wake footprint.',
+      'The chase rig framing and the hull under way: buoyancy pose at speed, ' +
+      'contact shadow, hull material response and the trailing wake.',
     state: {
       // `boat`, and this is load-bearing. `snapToTarget()` returns immediately
       // unless the director is actually in chase mode, so with `orbit` here the
@@ -179,17 +189,26 @@ export const SHOTS: readonly Shot[] = [
      * calls `director.snapToTarget()` after the settle so the pose is exact
      * rather than however far the damping happened to converge.
      *
-     * The spec asks for this shot "while moving". There is no ship controller
-     * yet — Boat mode is a chase camera and W/S/A/D are not implemented — so
-     * what this captures today is the chase framing of a hull that is only
-     * bobbing on the swell. When the controller lands, this shot needs a ship
-     * input (throttle/rudder) applied before the settle and a longer settle so
-     * the hull is under way with a developed wake; nothing else about it
-     * changes, and the baseline is expected to be regenerated at that point.
+     * The spec asks for this shot "while moving", and it now is. Full ahead is
+     * held for the whole settle; 480 steps is 8 s, which against a ~6.7 s
+     * velocity time constant and a 9.6 m/s terminal speed leaves the hull at
+     * roughly 8 m/s having run about 38 m. That matters for what this shot can
+     * catch: the wake buffer decays with a 1.7 s time constant, so a stationary
+     * hull deposits a symmetric blob and nothing about the trailing wake, the
+     * bow contact or the chase rig's lead is exercised at all.
+     *
+     * Rudder is zero deliberately. A turn would exercise the wake's curvature
+     * too, but it also makes the pose depend on the yaw integral over 480 steps,
+     * which is a far longer error lever than a straight run. The rudder's
+     * behaviour — including its speed-dependent authority and its reversal when
+     * making sternway — is covered by the four controller tests in
+     * `tests/ocean.spec.ts`, where it can be asserted numerically instead of
+     * photographed.
      */
     camera: null,
     time: 55.5,
-    settleSteps: 90,
+    shipInput: { throttle: 1, rudder: 0 },
+    settleSteps: 480,
   },
   {
     id: 'waterline',

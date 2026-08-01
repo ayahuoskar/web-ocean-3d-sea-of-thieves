@@ -7,13 +7,13 @@ import {
   mod,
   pow,
   sin,
-  smoothstep,
   uniform,
   uv,
   vec2,
   vec3,
   vec4,
 } from 'three/tsl';
+import { smoothstepDown } from '../core/tslMath';
 import { SEEDS, fillRandom } from '../core/random';
 
 /**
@@ -266,7 +266,7 @@ export class Weather {
 
     const coord = uv();
     const d = coord.sub(vec2(0.5, 0.5)).length();
-    const alpha = smoothstep(0.5, 0.06, d).mul(this.uSnowOpacity);
+    const alpha = smoothstepDown(d, 0.06, 0.5).mul(this.uSnowOpacity);
 
     material.colorNode = vec4(vec3(0.95, 0.97, 1.0), alpha);
     return material;

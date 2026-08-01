@@ -33,6 +33,8 @@ interface OceanHooks {
   scene: { getObjectByName(name: string): { visible: boolean } | undefined };
   setRainOverride(intensity: number | null): void;
   director: { snapToTarget(): void; currentMode: string };
+  /** The surface material. Only the knobs a test drives are declared. */
+  water: { setWakeDisplacement(value: number): void };
   wake: {
     emit(x: number, z: number, heading: number, speed: number, width: number): void;
     setCenter(x: number, z: number): void;
@@ -44,7 +46,11 @@ interface OceanHooks {
   shadersReady(): boolean;
   setState(partial: Record<string, unknown>): void;
   setCamera(px: number, py: number, pz: number, tx: number, ty: number, tz: number): void;
-  resetDeterministic(time?: number, settleSteps?: number): Promise<void>;
+  resetDeterministic(
+    time?: number,
+    settleSteps?: number,
+    shipInput?: { throttle: number; rudder: number } | null,
+  ): Promise<void>;
   step(dt: number, steps?: number): Promise<void>;
   capturePixels(): Promise<CapturedPixels>;
   setShipInput(throttle: number, rudder: number): void;
@@ -115,8 +121,9 @@ export async function applyShot(page: Page, shot: Shot): Promise<void> {
   }
 
   await page.evaluate(
-    ({ time, settleSteps }) => window.__ocean.resetDeterministic(time, settleSteps),
-    { time: shot.time, settleSteps: shot.settleSteps },
+    ({ time, settleSteps, shipInput }) =>
+      window.__ocean.resetDeterministic(time, settleSteps, shipInput),
+    { time: shot.time, settleSteps: shot.settleSteps, shipInput: shot.shipInput ?? null },
   );
 
   if (!shot.camera) {

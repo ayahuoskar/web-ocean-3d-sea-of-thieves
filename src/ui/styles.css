@@ -155,6 +155,21 @@ body {
 
 .panel__body {
   padding: 16px 18px 18px;
+  /*
+   * `min-height: 0` is load-bearing, not defensive.
+   *
+   * A flex item defaults to `min-height: auto`, which refuses to shrink below its
+   * content. So on a short viewport this body kept its full natural height, grew
+   * past the panel's `max-height`, and `.panel { overflow: hidden }` quietly cut
+   * the bottom off — taking the Time of Day and Pixel Ratio sliders with it. The
+   * `overflow-y: auto` below could never engage, because the element was never
+   * smaller than its content.
+   *
+   * It also passed the responsive tests, which assert nothing *overflows* the
+   * viewport. Clipped content does not overflow.
+   */
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;

@@ -35,8 +35,24 @@ export interface Preset {
   /** Sea state. */
   sea: Pick<SpectrumParams, 'windSpeed' | 'windDirection' | 'peakWavelength' | 'gamma' | 'swell'>;
   water: Partial<WaterAppearance>;
-  /** Aerial perspective applied to the water surface. */
-  fog: { color: THREE.Color; density: number };
+  /**
+   * Aerial perspective applied to the water surface (`density`), and the
+   * extinction of the *volumetric* fog pass (`volumetric`). Both are per metre.
+   *
+   * Two numbers rather than one because they are two different media doing two
+   * different jobs. `density` is the distance haze baked into the water shader:
+   * flat, cheap, and the thing that makes the horizon recede. `volumetric` is
+   * the marched pass, which is what gives light shafts and lets the fog have
+   * structure — and being a real integral along the view ray, it stacks on top
+   * of the first rather than replacing it.
+   *
+   * `volumetric` is per preset for the same reason `density` is. It was a single
+   * global constant of 0.0074/m, which is roughly 400 m of visibility — sixty
+   * times Sea of Thieves' aerial perspective and four times Foggy's — so every
+   * preset, including the clear ones, rendered as a white-out. Anything that
+   * describes the medium belongs to the place, not to the renderer.
+   */
+  fog: { color: THREE.Color; density: number; volumetric: number };
   /** Underwater medium. */
   underwater: {
     color: THREE.Color;
@@ -98,7 +114,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       roughness: 0.07,
       foamThreshold: 0.42,
     },
-    fog: { color: color(0xbfd8ee), density: 0.00016 },
+    fog: { color: color(0xbfd8ee), density: 0.00016, volumetric: 0.00012 },
     underwater: {
       color: color(0x1d6f96),
       extinction: vec(0.28, 0.09, 0.055),
@@ -147,7 +163,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       roughness: 0.09,
       foamThreshold: 0.5,
     },
-    fog: { color: color(0xd8e6f2), density: 0.00034 },
+    fog: { color: color(0xd8e6f2), density: 0.00034, volumetric: 0.00028 },
     underwater: {
       color: color(0x14526e),
       extinction: vec(0.34, 0.13, 0.08),
@@ -196,7 +212,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       roughness: 0.06,
       foamThreshold: 0.44,
     },
-    fog: { color: color(0xc8e0ee), density: 0.00014 },
+    fog: { color: color(0xc8e0ee), density: 0.00014, volumetric: 0.0001 },
     underwater: {
       color: color(0x1c7f92),
       extinction: vec(0.24, 0.075, 0.045),
@@ -245,7 +261,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       roughness: 0.05,
       foamThreshold: 0.46,
     },
-    fog: { color: color(0x9a8ea6), density: 0.00026 },
+    fog: { color: color(0x9a8ea6), density: 0.00026, volumetric: 0.00022 },
     underwater: {
       color: color(0x11364f),
       extinction: vec(0.36, 0.14, 0.09),
@@ -297,7 +313,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       roughness: 0.1,
       foamThreshold: 0.5,
     },
-    fog: { color: color(0xccd6da), density: 0.0016 },
+    fog: { color: color(0xccd6da), density: 0.0016, volumetric: 0.0028 },
     underwater: {
       color: color(0x2a5560),
       extinction: vec(0.46, 0.24, 0.17),
@@ -346,7 +362,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       roughness: 0.045,
       foamThreshold: 0.48,
     },
-    fog: { color: color(0x0d1926), density: 0.0003 },
+    fog: { color: color(0x0d1926), density: 0.0003, volumetric: 0.00024 },
     underwater: {
       color: color(0x07202e),
       extinction: vec(0.38, 0.16, 0.1),
@@ -395,7 +411,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       roughness: 0.055,
       foamThreshold: 0.42,
     },
-    fog: { color: color(0xcfeaf4), density: 0.00012 },
+    fog: { color: color(0xcfeaf4), density: 0.00012, volumetric: 9e-05 },
     underwater: {
       color: color(0x1fa0ab),
       extinction: vec(0.18, 0.05, 0.03),
@@ -450,7 +466,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       roughness: 0.12,
       foamThreshold: 0.55,
     },
-    fog: { color: color(0x6f7a86), density: 0.0007 },
+    fog: { color: color(0x6f7a86), density: 0.0007, volumetric: 0.00075 },
     underwater: {
       color: color(0x16323f),
       extinction: vec(0.44, 0.2, 0.14),
@@ -499,7 +515,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       roughness: 0.04,
       foamThreshold: 0.52,
     },
-    fog: { color: color(0xd0aa9c), density: 0.00022 },
+    fog: { color: color(0xd0aa9c), density: 0.00022, volumetric: 0.00018 },
     underwater: {
       color: color(0x14455c),
       extinction: vec(0.32, 0.12, 0.08),

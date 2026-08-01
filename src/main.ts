@@ -15,7 +15,7 @@ import { Loop } from './core/Loop';
 import { AdaptiveQuality, QUALITY_TIERS, type QualityTier } from './core/QualityManager';
 import { OceanSimulation } from './ocean/OceanSimulation';
 import { OceanMesh } from './ocean/OceanMesh';
-import { OceanMaterial } from './ocean/OceanMaterial';
+import { DEFAULT_APPEARANCE, OceanMaterial } from './ocean/OceanMaterial';
 import { Reflections } from './ocean/Reflections';
 import { DEFAULT_SSR_STEPS, ScreenSpaceReflection } from './ocean/ScreenSpaceReflection';
 import { OceanSampler } from './ocean/Sampler';
@@ -34,6 +34,8 @@ const _pinPosition = new THREE.Vector3();
 const _pinTarget = new THREE.Vector3();
 /** Scratch for the water's key-light direction, read every frame. */
 const _keyDirection = new THREE.Vector3();
+/** Scratch for the camera forward axis, read every frame. */
+const _keyDirection2 = new THREE.Vector3();
 
 const boot = {
   root: document.getElementById('boot'),
@@ -589,7 +591,11 @@ class App {
       derivativeTextures: this.simulation.derivativeTextures,
       tileSizes: this.simulation.tileSizes,
       floorDepthNode: (worldPosition) => this.seafloor.depthNode(worldPosition),
-      foam: { texture: this.wake.texture, extent: this.wake.extent },
+      foam: {
+        texture: this.wake.texture,
+        extent: this.wake.extent,
+        resolution: this.wake.resolution,
+      },
       reflectionNode: this.reflections?.node ?? null,
       ssrNode: this.ssr
         ? (worldPosition, worldNormal, fallback) =>
@@ -655,6 +661,7 @@ class App {
     // WebGL2 gets the two-lattice floor whatever the tier, matching the rest of
     // the fallback policy.
     this.lensRain.setQuality(this.backend === 'webgl' ? 1 : quality.lensRainQuality);
+    this.water.setWakeDisplacement(quality.wakeDisplacement);
 
     this.applyPreset();
   }
@@ -742,6 +749,52 @@ class App {
     });
 
     this.water.setAppearance(preset.water);
+
+    // --- whitecaps ----------------------------------------------------------
+    //
+    // Neither of these was called at all, which meant the accumulation buffer
+    // ran at one fixed threshold and one fixed rate for every preset and every
+    // wind speed: a glassy dusk foamed exactly as hard as a 21 m/s storm. The
+    // preset's `foamThreshold` reached only the surface's instantaneous mask,
+    // which since the near field went over to the buffer is the one place it no
+    // longer decides anything.
+    //
+    // Coverage against wind follows Monahan & O'Muircheartaigh's fit to ship
+    // observations, W = 3.84e-6 * U^3.41 — a very steep law, and the reason a
+    // linear wind response never looks right. It gives 3.9% at 15 m/s, which is
+    // what the sea state assertions measure, 0.2% at 6 m/s and 12% at 21 m/s.
+    // Normalising by the 15 m/s value turns it into a multiplier on how strongly
+    // the deposit reads, with the clamp keeping a calm sea faintly streaked
+    // rather than surgically clean.
+    const whitecapAt = (u: number) => 3.84e-6 * Math.pow(Math.max(0, u), 3.41);
+    const foamThreshold = preset.water.foamThreshold ?? DEFAULT_APPEARANCE.foamThreshold;
+    // The buffer's threshold is far tighter than the surface mask's. It has to
+    // be: the mask asks "is this water folding *now*", which it answers for
+    // every frame the crest is overhead, while the buffer asks "did it break
+    // here", and then keeps the answer for a time constant afterwards. Measured
+    // on cascade 0 at 15 m/s, fold < 0.14 covers 5.5% of the surface and fold < 0
+    // covers 3.8%, so the buffer sees only genuinely folded water and the trail
+    // it leaves supplies the rest of the coverage.
+    this.wake.setBreaking(foamThreshold * 0.34, 0.55);
+
+    // The surface's own mask is re-scaled from the same number.
+    //
+    // The preset values (0.42 to 0.55) were authored when that mask painted the
+    // whole ocean, and against the measured fold distribution they select about
+    // 18% of the surface — which is what a 15 m/s clear day was rendering, and it
+    // reads as a gale. Now that the near field belongs to the buffer, the mask's
+    // only job is the far field beyond the buffer's 420 m square, so it is scaled
+    // to select roughly what the buffer does and the two meet without a seam.
+    //
+    // Derived here rather than by editing the nine presets so the two thresholds
+    // cannot drift apart: they describe one physical property of one sea.
+    this.water.setAppearance({
+      foamThreshold: foamThreshold * 0.62,
+      foamSoftness: 0.42,
+    });
+    this.water.setFoamStrength(
+      Math.max(0.08, Math.min(1.5, whitecapAt(this.state.windSpeed) / whitecapAt(15))),
+    );
     // Sky and horizon come from the atmosphere, not from preset constants.
     //
     // The first argument used to be the *sun* colour, which is not the sky by
@@ -820,6 +873,9 @@ class App {
     this.oceanMesh.recenter(this.camera.position);
     this.water.setWorldOffset(this.oceanMesh.mesh.position.x, this.oceanMesh.mesh.position.z);
     this.water.setFoamCenter(this.wake.centerX, this.wake.centerZ);
+    // Depth-buffer distances are measured along this axis; the surface needs it
+    // to convert them into distance along each pixel's own ray.
+    this.water.setCameraForward(this.camera.getWorldDirection(_keyDirection2));
 
     // --- underwater state -----------------------------------------------------
     // `submersion` is a soft band around the surface rather than a boolean, so
@@ -846,6 +902,19 @@ class App {
     // been resolved against the surface — the effect suppresses itself as the
     // viewer goes under, since there is no lens above water to bead on.
     this.lensRain.setSubmersion(submersion);
+    // Screen-space "down" for the droplets, leaned by the wind.
+    //
+    // **+y is down here.** The quad's uv runs top-down, the same way screen uv
+    // does everywhere else in this project — it is NDC that runs bottom-up, which
+    // is the asymmetry `clipToScreenUV` in `ScreenSpaceReflection` documents and
+    // that the fog and underwater passes had to be corrected for. This was set to
+    // -1 on the opposite assumption and the beads ran *up* the screen.
+    //
+    // Set explicitly rather than left to the effect's own default, because which
+    // way rain runs down a lens is exactly the kind of thing that is obvious to a
+    // viewer and invisible to every test we have.
+    const lean = Math.min(0.5, this.state.windSpeed * 0.018);
+    this.lensRain.setGravity(Math.sin(preset.sea.windDirection) * lean, 1, 1 + lean);
     this.lensRain.update(dt);
 
     // Volumetric fog follows the key light, and fades out as the camera goes
@@ -856,12 +925,21 @@ class App {
       sunDirection: _keyDirection,
       sunColor: this.atmosphere.sunLight.color,
       sunIntensity: Math.max(0.05, this.atmosphere.sunLight.intensity / 3.4),
-      // The slider is 0..1; `density` is extinction per metre. 0.021 at the top
-      // of the range is visibility of roughly fifty metres — thick sea fog, and
-      // about as far as this should go before the scene stops being visible at
-      // all. Feeding the slider value in raw made it a hundred times too dense
-      // and rendered a black frame.
-      density: this.state.fogDensity * 0.021 * (1 - submersion),
+      // Extinction per metre, from the preset, scaled by the slider.
+      //
+      // The slider's default of 0.35 is the *neutral* point — it means "as thick
+      // as this place is" — and it scales to about 2.9x at the top. That is what
+      // a fog control should do: a clear day made foggy is still a clear day's
+      // light, and Foggy at the same slider position is still much thicker than
+      // Sea of Thieves at it.
+      //
+      // This used to be `slider * 0.021` with no preset term at all, which put
+      // 0.0074/m under every preset — around 400 m of visibility — and rendered
+      // even Clear Day as a white-out. The preset numbers now carry the medium;
+      // see `Preset.fog.volumetric`.
+      density:
+        preset.fog.volumetric * (this.state.fogDensity / DEFAULT_UI_STATE.fogDensity) *
+        (1 - submersion),
       windDirection: preset.sea.windDirection,
       windSpeed: 0.4 + this.state.windSpeed * 0.06,
     });
@@ -896,16 +974,23 @@ class App {
 
   /** Physics, wake and chase camera. No-ops cleanly until the models land. */
   private updateSceneContent(dt: number): void {
+    // The controller runs *before* the solver, so this frame's throttle and
+    // rudder are integrated by this frame's substeps.
+    //
+    // It used to sit inside the `ship` branch below, which is after
+    // `buoyancy.update` — and the comment there claimed the opposite of what the
+    // code did. The external force persists between frames, so the ship still
+    // sailed and no test could see it; every input was simply acted on one frame
+    // late. An independent review caught it by reading the call order rather
+    // than the comment.
+    this.shipControls?.update(dt);
+
     // Safe before the sampler's first readback resolves: it reports height 0 and
     // bodies simply settle to flat water rather than producing NaN.
     this.buoyancy.update(dt, this.sampler);
 
     const ship = this.ship;
     if (ship) {
-      // Before the solver: the controller resolves intent into the force the
-      // solver then integrates. Running it afterwards would apply this frame's
-      // thrust to next frame's pose.
-      this.shipControls?.update(dt);
       ship.update(dt);
 
       const position = ship.object.position;
@@ -1014,7 +1099,11 @@ class App {
          * cleared, so two calls with the same arguments produce the same frame
          * regardless of what the session did in between.
          */
-        resetDeterministic: async (time = 0, settleSteps = 90) => {
+        resetDeterministic: async (
+          time = 0,
+          settleSteps = 90,
+          shipInput: { throttle: number; rudder: number } | null = null,
+        ) => {
           const settleDt = 1 / 60;
           this.loop.setPaused(true);
 
@@ -1039,7 +1128,14 @@ class App {
           // returning them to their spawn poses is what stops a capture from
           // inheriting wherever the hull happened to have drifted.
           this.buoyancy?.resetToHome();
+          // Zero first, then re-apply, so a caller that passes no input always
+          // gets a stationary hull regardless of what the previous shot left on
+          // the throttle. A caller that *does* pass one gets it applied before
+          // the settle rather than after, which is the whole point: the ship has
+          // a ~6.7 s velocity time constant, so an input applied after settling
+          // would photograph a hull that has not begun to move.
           this.shipControls?.setInput(0, 0);
+          if (shipInput) this.shipControls?.setInput(shipInput.throttle, shipInput.rudder);
           this.ship?.resetClock(start);
           this.previousShipPosition.copy(this.ship?.object.position ?? this.previousShipPosition);
 

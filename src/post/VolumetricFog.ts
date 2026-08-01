@@ -401,7 +401,22 @@ export class VolumetricFog {
       // and a copy.
       If(this.uEnabled.greaterThan(0.5), () => {
         // --- the view ray, in world space ------------------------------------
-        const ndc = suv.mul(2).sub(1).toVar('fogNdc');
+        // NDC from the screen uv. **y is flipped, and that is not cosmetic.**
+        //
+        // Screen uv runs top-down on the WebGPU backend and is explicitly flipped
+        // to run top-down on the WebGL one, while NDC y runs bottom-up on both —
+        // the same asymmetry `clipToScreenUV` in `ScreenSpaceReflection` exists to
+        // absorb. Taking `suv.y * 2 - 1` therefore builds a ray pointing *down*
+        // wherever the pixel looks up.
+        //
+        // It did not read as a broken ray, which is why it survived. It read as
+        // fog: the sky was handed a downward ray into an exponential layer that
+        // only thickens downward, so it integrated the whole column and every
+        // preset rendered as a white-out, while the water was handed an upward
+        // ray, left the layer immediately and got no fog at all. The give-away
+        // was that the result did not respond to density — a 175x sweep produced
+        // the same white, because both ends of it were saturated.
+        const ndc = vec2(suv.x.mul(2).sub(1), suv.y.mul(-2).add(1)).toVar('fogNdc');
         const viewH = this.uInvProjection.mul(vec4(ndc.x, ndc.y, -1, 1)).toVar('fogViewH');
         const viewDir = normalize(viewH.xyz.div(viewH.w)).toVar('fogViewDir');
         const rd = normalize(this.uCameraWorld.mul(vec4(viewDir, 0)).xyz).toVar('fogRd');

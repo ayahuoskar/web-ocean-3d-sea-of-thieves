@@ -286,6 +286,65 @@ test.describe('interaction', () => {
   });
 
   /**
+   * The wake must *deform* the water, not only foam it.
+   *
+   * The test above cannot tell those apart: it compares clean water against
+   * wake-covered water, and a working foam mask alone satisfies it. So this one
+   * holds the wake buffer completely fixed — same deposit, same decay state, no
+   * simulation steps between the two captures — and toggles only the surface's
+   * elevation term. The foam is bit-identical across the pair by construction,
+   * which leaves the Kelvin displacement as the one thing that can move the
+   * number.
+   *
+   * A low camera on purpose. Wake elevation shows up as a change in surface
+   * *normal*, and a normal only changes what you see through Fresnel and the
+   * specular lobe — both of which flatten out toward a top-down view. Looking
+   * down at 40 m, the same displacement moves mean ΔE by a fraction of what it
+   * does from near the waterline.
+   */
+  test('the wake displaces the surface, not just its foam', async ({ page }) => {
+    await page.goto('/');
+    await waitForOcean(page);
+
+    test.skip(
+      !(await hasGpuAdapter(page)),
+      'no GPU adapter: the software path cannot render these frames in time',
+    );
+
+    await setState(page, { preset: 'seaOfThieves', quality: 'high' });
+    await page.evaluate(() => window.__ocean.resetDeterministic(20, 60));
+
+    // Lay a trail running toward +x, then look back down it from low and astern.
+    await page.evaluate(async () => {
+      const ocean = window.__ocean;
+      for (let i = 0; i < 120; i++) {
+        const x = -70 + i * (9 / 60);
+        ocean.wake.emit(x, 0, 0, 9, 7);
+        await ocean.step(1 / 60, 1);
+      }
+    });
+    await setCamera(page, [-90, 6, 26], [-48, 0.5, 0]);
+
+    const withDisplacement = await capture(page);
+    await page.evaluate(() => window.__ocean.water.setWakeDisplacement(0));
+    const flat = await capture(page);
+    // Leave the app as the tier says it should be, so a later test in the same
+    // page context is not silently running with the effect off.
+    await page.evaluate(() => window.__ocean.water.setWakeDisplacement(1));
+
+    const score = compareImages(flat, withDisplacement);
+
+    // Well above the measured run-to-run noise floor (mean ΔE ~0.04) and well
+    // below what the wedge produces, so this fails on the elevation channel
+    // being dropped rather than on the wake being retuned.
+    expect(
+      score.meanDeltaE,
+      `enabling wake displacement changed the water by mean ΔE ${score.meanDeltaE.toFixed(3)}; ` +
+        'near zero means the surface is not reading the wake buffer\'s elevation channel',
+    ).toBeGreaterThan(0.3);
+  });
+
+  /**
    * The water must reflect the *scene*, not just a sky gradient.
    *
    * `SPEC.md` has claimed scene reflection as a P0 feature throughout, while the

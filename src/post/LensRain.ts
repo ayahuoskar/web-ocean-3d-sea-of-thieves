@@ -1,5 +1,6 @@
 import * as THREE from 'three/webgpu';
 import { Fn, If, float, mix, pow, screenSize, uniform, uv, vec2, vec3, vec4 } from 'three/tsl';
+import { smoothstepDown } from '../core/tslMath';
 
 /**
  * Rain on the lens, as a post-processing node graph.
@@ -136,9 +137,14 @@ interface LayerConfig {
  * would cap every streak at one cell width.
  */
 const LAYERS: LayerConfig[] = [
-  { grid: [7, 2.6], size: [0.016, 0.05], density: 0.72, speed: 0.14, trail: 1, seed: 0 },
+  // Trail strength halved from 1. The runners' streaks read as smeared glass
+  // rather than as water: a real trail is a thread of small residual beads, and
+  // at full strength this one refracted enough of the image along its length to
+  // look like a wipe. The drops themselves are untouched — it is only the tail
+  // they leave that is quieter.
+  { grid: [7, 2.6], size: [0.016, 0.05], density: 0.72, speed: 0.14, trail: 0.5, seed: 0 },
   { grid: [19, 19], size: [0.004, 0.013], density: 0.95, speed: 0.03, trail: 0, seed: 37.4 },
-  { grid: [11, 7], size: [0.007, 0.026], density: 0.8, speed: 0.09, trail: 0.75, seed: 91.7 },
+  { grid: [11, 7], size: [0.007, 0.026], density: 0.8, speed: 0.09, trail: 0.35, seed: 91.7 },
   { grid: [34, 34], size: [0.0022, 0.006], density: 1, speed: 0.02, trail: 0, seed: 143.1 },
 ];
 
@@ -317,7 +323,7 @@ export class LensRain {
       // which is simply leaving the bottom of its cell.
       const env = life
         .smoothstep(0, 0.05)
-        .mul(life.smoothstep(1, rolls.mul(0.2).add(0.7)))
+        .mul(smoothstepDown(life, rolls.mul(0.2).add(0.7), 1))
         .toVar();
 
       const radius = rBase.mul(env).mul(act).toVar();
@@ -326,7 +332,7 @@ export class LensRain {
       const delta = local.sub(vec2(cx, cy)).mul(cellSize).toVar();
       const dist = delta.length().toVar();
       const dn = dist.div(radius.max(1e-5)).toVar();
-      const cover = dn.smoothstep(1, float(1).sub(RIM_SOFT)).toVar();
+      const cover = smoothstepDown(dn, float(1).sub(RIM_SOFT), 1).toVar();
 
       // Spherical cap: the lateral component of the normal is the normalised
       // distance from the centre times the sine of the contact angle, so it runs
@@ -362,10 +368,9 @@ export class LensRain {
       const halfWidth = radius.mul(taper).mul(bead).toVar();
       const lateral = px.x.sub(dropX).sub(wobble).toVar();
       const tn = lateral.abs().div(halfWidth.max(1e-5)).toVar();
-      const trailCover = tn
-        .smoothstep(1, 0.55)
+      const trailCover = smoothstepDown(tn, 0.55, 1)
         .mul(behind.smoothstep(0, radius.mul(0.3)))
-        .mul(behind.smoothstep(span, span.mul(0.5)))
+        .mul(smoothstepDown(behind, span.mul(0.5), span))
         .mul(env)
         .mul(rolls)
         .mul(tune.z)
