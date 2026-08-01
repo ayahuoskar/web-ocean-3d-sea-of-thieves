@@ -29,6 +29,8 @@ import { DEFAULT_UI_STATE, type UiState } from './ui/types';
 /** Scratch for the test-hook camera pin; the hook must not allocate either. */
 const _pinPosition = new THREE.Vector3();
 const _pinTarget = new THREE.Vector3();
+/** Scratch for the water's key-light direction, read every frame. */
+const _keyDirection = new THREE.Vector3();
 
 const boot = {
   root: document.getElementById('boot'),
@@ -490,6 +492,12 @@ class App {
       case 'cloudCoverage':
         this.clouds.setParams({ coverage: this.state.cloudCoverage });
         break;
+      case 'timeOfDay':
+        // Through `applyPreset`, not straight to the atmosphere: moving the sun
+        // changes the environment capture, the ambient fill and the water's sky
+        // colours, and routing it through one place is what keeps those in step.
+        this.applyPreset();
+        break;
       case 'pixelRatio':
         this.renderer.setPixelRatio(
           clampPixelRatio(window.devicePixelRatio * this.state.pixelRatio),
@@ -593,14 +601,70 @@ class App {
     this.applyPreset();
   }
 
+  /**
+   * Sun elevation, azimuth and night blend for a clock time.
+   *
+   * A simple diurnal arc rather than a real ephemeris: no latitude, no season,
+   * no equation of time. Those would change where the sun is by degrees, and
+   * what this control exists for is to let someone drag from dawn to dusk and
+   * watch the water follow — a model that answers that convincingly is worth
+   * more here than one that is astronomically correct and looks the same.
+   *
+   * Elevation peaks at noon and goes negative at night; azimuth sweeps a full
+   * turn so the light comes from the east in the morning and the west in the
+   * evening. `nightIntensity` ramps once the sun is below the horizon, which is
+   * what brings up the stars and the moon.
+   */
+  private sunFromClock(hours: number): {
+    sunElevation: number;
+    sunAzimuth: number;
+    nightIntensity: number;
+    moonElevation: number;
+    moonAzimuth: number;
+  } {
+    // Noon at its highest, midnight at its lowest.
+    const dayPhase = ((hours - 6) / 24) * Math.PI * 2;
+    const elevation = Math.sin(dayPhase) * 1.32;
+    // Civil twilight is roughly the first six degrees below the horizon; the
+    // night blend follows it rather than snapping at zero, so dusk is a gradual
+    // handover to the moon rather than a light switch.
+    const night = THREE.MathUtils.clamp(-elevation / 0.22 + 0.15, 0, 1);
+    const azimuth = ((hours - 6) / 24) * Math.PI * 2 + Math.PI;
+
+    // The moon rides opposite the sun, so dragging into night finds it already
+    // up. Without this the clock inherits whatever moon the preset declared —
+    // and most declare none, so night was simply black, which is a poor answer
+    // for a control whose whole purpose is to be dragged into it.
+    return {
+      sunElevation: elevation,
+      sunAzimuth: azimuth,
+      nightIntensity: night,
+      moonElevation: -elevation * 0.82,
+      moonAzimuth: azimuth + Math.PI,
+    };
+  }
+
   private applyPreset(): void {
     const preset = getPreset(this.state.preset);
 
-    this.atmosphere.setParams(preset.atmosphere);
+    // The preset owns the sun until the viewer takes it, and then the clock
+    // does. Spread over the preset rather than replacing it, so a preset's
+    // turbidity, Mie and overcast — the things that make it *that place* —
+    // survive being re-timed.
+    const clock = this.state.timeOfDay;
+    this.atmosphere.setParams(
+      clock === null ? preset.atmosphere : { ...preset.atmosphere, ...this.sunFromClock(clock) },
+    );
     this.clouds.setParams({
       ...preset.clouds,
       coverage: this.state.cloudCoverage,
       steps: QUALITY_TIERS[this.state.quality].cloudSteps,
+      // Driven by the same wind that raises the sea, so a storm's clouds scud
+      // and its swell runs the same way. Evolution scales with it too: a squall
+      // boils, a calm day drifts.
+      windDirection: preset.sea.windDirection,
+      windSpeed: 6 + this.state.windSpeed * 1.6,
+      evolutionRate: 0.006 + this.state.windSpeed * 0.0022,
     });
     this.weather.setKind(preset.weather.kind);
     this.weather.setIntensity(preset.weather.intensity);
@@ -648,7 +712,18 @@ class App {
     this.clouds.update(dt);
     this.weather.update(dt, this.camera.position);
 
-    this.water.setSun(this.atmosphere.sunDirection, this.atmosphere.sunColor, 6);
+    // The key light, whichever body is providing it, at its actual strength.
+    //
+    // This used to be the sun direction, the sun colour and a hardcoded
+    // intensity of 6 — so the water was lit as though by a noon sun at every
+    // hour, and its subsurface scattering glowed green under the hull at half
+    // past nine at night. It also went on taking its direction from a sun that
+    // was below the horizon while the moon was the only thing actually casting.
+    const key = this.atmosphere.sunLight;
+    _keyDirection.copy(key.position).normalize();
+    // 3.4 is the sun's full-daylight intensity in `Atmosphere`, so this is
+    // "how close to full daylight is it" rather than an arbitrary scale.
+    this.water.setSun(_keyDirection, key.color, key.intensity * 1.8, key.intensity / 3.4);
     // The sun moves and the sky follows it, so these have to be refreshed every
     // frame rather than only when a preset is applied.
     this.water.setSky(

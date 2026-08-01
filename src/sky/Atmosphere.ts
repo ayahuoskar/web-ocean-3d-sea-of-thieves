@@ -610,7 +610,25 @@ export class Atmosphere {
     this._zenithColor.copy(_skyTint);
     this._horizonColor.copy(_skyTint).lerp(WHITE, 0.42 * (1 - night));
     this.ambientLight.groundColor.copy(p.groundColor);
-    this.ambientLight.intensity = (0.15 + 0.85 * day) * (1 - 0.86 * night) + 0.03 * night;
+
+    // Night keeps a real fill, not a token one.
+    //
+    // At 0.03 the hemisphere contributed essentially nothing, and the moon is a
+    // single weak directional — so anything facing away from it went to black
+    // and the hull was reduced to a flat silhouette with no form. Night does not
+    // look like that: the sky is still a hemisphere of sources, moonlight
+    // scatters through the whole atmosphere, and the sea throws light back up.
+    //
+    // 0.16 reads shape without washing the darkness out, and the ground term
+    // lifts with it so the underside of the hull picks up the water instead of
+    // falling into a void.
+    this.ambientLight.intensity = (0.15 + 0.85 * day) * (1 - 0.86 * night) + 0.16 * night;
+    if (night > 0.001) {
+      // Cool and dim — the colour moonlight actually fills shadows with. Blended
+      // rather than assigned, so dusk hands over gradually.
+      this.ambientLight.color.lerp(MOON_FILL_COLOR, night * 0.85);
+      this.ambientLight.groundColor.lerp(MOON_GROUND_COLOR, night * 0.7);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -773,6 +791,10 @@ export class Atmosphere {
 
 const WHITE = /*@__PURE__*/ new THREE.Color(1, 1, 1);
 const NIGHT_SKY_TINT = /*@__PURE__*/ new THREE.Color(0.12, 0.2, 0.42);
+/** Colour moonlight fills shadows with — cool, and never quite neutral. */
+const MOON_FILL_COLOR = /*@__PURE__*/ new THREE.Color(0.42, 0.55, 0.86);
+/** Light coming back up off the sea at night. */
+const MOON_GROUND_COLOR = /*@__PURE__*/ new THREE.Color(0.08, 0.13, 0.22);
 const _skyTint = /*@__PURE__*/ new THREE.Color();
 const _overcastFill = /*@__PURE__*/ new THREE.Color();
 

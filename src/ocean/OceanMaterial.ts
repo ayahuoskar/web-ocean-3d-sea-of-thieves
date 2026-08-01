@@ -133,6 +133,13 @@ export class OceanMaterial {
   private readonly uSunDirection = uniform(new THREE.Vector3(0.4, 0.5, 0.3).normalize());
   private readonly uSunColor = uniform(new THREE.Color(1.0, 0.94, 0.84));
   private readonly uSunIntensity = uniform(4.0);
+  /**
+   * How lit the scene is, 0..1, independent of the key light's colour.
+   *
+   * Terms that represent transmitted or scattered daylight — as opposed to
+   * authored body colour — are scaled by this so they go out after dark.
+   */
+  private readonly uLightLevel = uniform(1);
   private readonly uSkyColor = uniform(new THREE.Color(0x5793d0));
   private readonly uHorizonColor = uniform(new THREE.Color(0xbdd6ec));
   private readonly uFogColor = uniform(new THREE.Color(0xb9d2e8));
@@ -201,10 +208,20 @@ export class OceanMaterial {
 
   // ---------------------------------------------------------------- accessors
 
-  setSun(direction: THREE.Vector3, color: THREE.Color, intensity: number): void {
+  /**
+   * The key light: whichever body is actually casting, at its real strength.
+   *
+   * `lightLevel` is separate from `intensity` because the two do different jobs.
+   * `intensity` scales the specular highlight, which is a reflection of the light
+   * source and so follows its brightness directly. `lightLevel` scales terms that
+   * represent daylight having passed *through* the water, which have to go out
+   * after dark but should not track a bright low sun the way a highlight does.
+   */
+  setSun(direction: THREE.Vector3, color: THREE.Color, intensity: number, lightLevel = 1): void {
     (this.uSunDirection.value as THREE.Vector3).copy(direction).normalize();
     (this.uSunColor.value as THREE.Color).copy(color);
     this.uSunIntensity.value = intensity;
+    this.uLightLevel.value = Math.max(0, Math.min(1, lightLevel));
   }
 
   setSky(sky: THREE.Color, horizon: THREE.Color, fog: THREE.Color, fogDensity: number): void {
@@ -505,8 +522,14 @@ export class OceanMaterial {
       const back = viewDir.negate().dot(sunDir).clamp(0, 1).toVar();
       const backlight = back.mul(back).mul(back).toVar();
       const crest = worldPos.y.mul(0.28).clamp(0, 1).toVar();
+      // Scaled by how much light there actually is.
+      //
+      // Subsurface scattering is transmitted *sunlight*: it cannot be brighter
+      // than what is illuminating the water. The scatter colour is authored, so
+      // without this it kept its full daytime value after dark, and the water
+      // around the submerged hull glowed green at half past nine at night.
       const scatter = this.uScatterColor
-        .mul(backlight.mul(crest).mul(this.uScatterStrength))
+        .mul(backlight.mul(crest).mul(this.uScatterStrength).mul(this.uLightLevel))
         .toVar();
 
       // --- reflection ----------------------------------------------------------
@@ -561,7 +584,18 @@ export class OceanMaterial {
       const specular = this.uSunColor.mul(ggx.mul(nDotL).mul(this.uSunIntensity)).toVar();
 
       // --- combine ---------------------------------------------------------------
-      const litBody = bodyColor.mul(nDotL.mul(0.55).add(0.45)).add(scatter).toVar();
+      // The body colour is authored for *daylight*. Its diffuse term bottomed out
+      // at 0.45, which is a floor on how dark lit water can get — so at night the
+      // shallow-water tint kept glowing at nearly half strength and the water
+      // around the submerged hull read as a green lamp. It now falls with the
+      // light, to a small floor rather than to zero: a night sea is dark, but it
+      // is not black, because the whole sky is still faintly lighting it.
+      const ambientFloor = mix(float(0.1), float(1), this.uLightLevel).toVar();
+      const litBody = bodyColor
+        .mul(nDotL.mul(0.55).add(0.45))
+        .mul(ambientFloor)
+        .add(scatter)
+        .toVar();
       const surface = mix(litBody, reflection, fresnel).add(specular).toVar();
 
       // --- foam --------------------------------------------------------------------
@@ -709,10 +743,19 @@ export class OceanMaterial {
  * evaluating this three times per fragment instead of once.
  */
 
-/** Metres per lattice cell. One impact per cell per cycle. */
-const RAIN_CELL = 2.6;
-/** Seconds between a cell's impacts. */
-const RAIN_PERIOD = 1.35;
+/**
+ * Metres per lattice cell, and seconds between a cell's impacts.
+ *
+ * These two set the impact rate — one strike per cell per period, so at full
+ * intensity the surface takes `1 / (RAIN_CELL² × RAIN_PERIOD)` hits per square
+ * metre per second. That has to agree with how much rain is visibly falling, or
+ * the scene shows a downpour landing as a drizzle. `Weather` renders 9000
+ * streaks through a 68 m box; matching the two by eye at full intensity puts the
+ * cell near a metre and the period near a second, not the 2.6 m and 1.35 s this
+ * started with — which was roughly seven times too few impacts.
+ */
+const RAIN_CELL = 1.05;
+const RAIN_PERIOD = 0.95;
 /** Metres per second the ring expands. */
 const RAIN_SPEED = 1.5;
 /** Radians per metre across the ring — how tight the wavefront reads. */

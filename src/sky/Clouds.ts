@@ -47,6 +47,15 @@ export interface CloudParams {
   thickness: number;
   windSpeed: number;
   windDirection: number;
+  /**
+   * Rate at which billows grow and erode in place, in noise units per second.
+   *
+   * Distinct from `windSpeed`, which only translates the layer. At the
+   * kilometre feature scale this noise runs at, translation is imperceptible on
+   * the timescale anyone looks at a demo for — evolution is what makes the sky
+   * read as moving.
+   */
+  evolutionRate: number;
   steps: number; // raymarch steps; 0 disables the layer entirely
   color: THREE.Color;
   shadowColor: THREE.Color;
@@ -59,6 +68,7 @@ export const DEFAULT_CLOUD_PARAMS: CloudParams = {
   thickness: 700,
   windSpeed: 9,
   windDirection: 2.6,
+  evolutionRate: 0.012,
   steps: 24,
   color: new THREE.Color(1.0, 0.99, 0.96),
   shadowColor: new THREE.Color(0.34, 0.38, 0.47),
@@ -130,6 +140,9 @@ export class Clouds {
   /** Integrated wind displacement, metres. Reused — never reallocated. */
   private readonly windOffset = new THREE.Vector3();
   private readonly windVector = new THREE.Vector3(1, 0, 0);
+  /** Accumulated evolution phase; see `update`. */
+  private evolution = 0;
+  private readonly uEvolution: any = uniform(new THREE.Vector3());
 
   // --- uniforms -------------------------------------------------------------
   /** Noise threshold derived from `coverage` on the CPU — see COVERAGE_QUANTILES. */
@@ -200,6 +213,7 @@ export class Clouds {
     if (params.thickness !== undefined) this.params.thickness = params.thickness;
     if (params.windSpeed !== undefined) this.params.windSpeed = params.windSpeed;
     if (params.windDirection !== undefined) this.params.windDirection = params.windDirection;
+    if (params.evolutionRate !== undefined) this.params.evolutionRate = params.evolutionRate;
     if (params.steps !== undefined) this.params.steps = params.steps;
     this.applyParams();
   }
@@ -227,6 +241,8 @@ export class Clouds {
   resetWind(): void {
     this.windOffset.set(0, 0, 0);
     this.uWindOffset.value.copy(this.windOffset);
+    this.evolution = 0;
+    this.uEvolution.value.set(0, 0, 0);
   }
 
   update(dt: number): void {
@@ -238,6 +254,12 @@ export class Clouds {
     this.windOffset.x %= period;
     this.windOffset.z %= period;
     this.uWindOffset.value.copy(this.windOffset);
+
+    // Evolution runs across the wind, so growth is not just more translation
+    // wearing a different name.
+    this.evolution += dt * this.params.evolutionRate;
+    this.evolution %= 1000;
+    this.uEvolution.value.set(this.evolution * 0.31, this.evolution, this.evolution * -0.19);
   }
 
   dispose(): void {
@@ -290,15 +312,42 @@ export class Clouds {
 
     const q = p.sub(this.uWindOffset).mul(NOISE_SCALE);
     const base = mx_fractal_noise_float(q, 4, 2.0, 0.5, 1.0).mul(0.5).add(0.5);
+
     // A second, higher-frequency field erodes the billow edges so the silhouette
     // is not a smooth blob. Centred on zero so it breaks edges up without
     // shifting the overall coverage the threshold was calibrated for.
-    const detail = mx_fractal_noise_float(q.mul(4.3).add(vec3(7.3, 2.1, 5.7)), 3, 2.0, 0.5, 1.0)
-      .mul(0.5);
+    //
+    // It is also *evolved*, on its own clock, at right angles to the wind.
+    // Translation alone cannot make a cloud look alive: features here are
+    // kilometre-scale, so at any honest wind speed a puff takes minutes to cross
+    // its own width and the layer reads as a painted backdrop being slid past.
+    // What the eye actually reads as weather is the silhouette changing —
+    // billows growing and eroding in place — and that is a second offset through
+    // the noise field rather than a faster one along the wind.
+    const detail = mx_fractal_noise_float(
+      q.mul(4.3).add(vec3(7.3, 2.1, 5.7)).add(this.uEvolution),
+      3,
+      2.0,
+      0.5,
+      1.0,
+    ).mul(0.5);
 
     const edge = this.uThreshold.add(float(1).sub(profile).mul(0.22));
     const width = float(EDGE_WIDTH).add(softness.mul(0.4));
-    const shaped = smoothstep(edge, edge.add(width), base.add(detail.mul(0.3)));
+
+    // The erosion octave fades out as the march coarsens.
+    //
+    // `softness` already widened the edge with step size, which softens the
+    // silhouette but does nothing about the detail field itself — and that field
+    // runs at 4.3x the base frequency, so its features are a few hundred metres
+    // across. The storm preset marches a 1400 m slab in 24 steps, nearly 60 m a
+    // sample, and sampling a 400 m feature at 60 m intervals along a ray whose
+    // direction varies smoothly across the screen is exactly the recipe for
+    // moire — which is what the banding across the storm cloud deck was. Detail
+    // the march cannot resolve is not detail, it is noise, so it is faded rather
+    // than sampled. Same reasoning as the wave cascades' geometry fade.
+    const detailFade = float(1).sub(softness).clamp(0, 1);
+    const shaped = smoothstep(edge, edge.add(width), base.add(detail.mul(detailFade).mul(0.3)));
 
     return shaped.mul(profile).mul(this.uDensity);
   }

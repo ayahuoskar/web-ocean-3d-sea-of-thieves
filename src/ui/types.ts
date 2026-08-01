@@ -29,6 +29,14 @@ export interface UiState {
   peakWavelength: number;
   /** Volumetric cloud layer coverage, 0..1. */
   cloudCoverage: number;
+  /**
+   * Time of day, 0..24 hours. 12 is noon, 0 and 24 are midnight.
+   *
+   * Overrides the preset's own sun elevation once the viewer touches it — a
+   * preset describes a *look*, and the time of day is the one part of that look
+   * the viewer is being invited to drive. `null` means the preset still owns it.
+   */
+  timeOfDay: number | null;
   buoyancyProbes: boolean;
   wakeProbes: boolean;
   forceWebGL: boolean;
@@ -51,6 +59,7 @@ export const DEFAULT_UI_STATE: UiState = {
   windSpeed: 15,
   peakWavelength: 47,
   cloudCoverage: 0.32,
+  timeOfDay: null,
   buoyancyProbes: false,
   wakeProbes: false,
   forceWebGL: false,

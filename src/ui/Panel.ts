@@ -16,14 +16,10 @@ import {
   type UiState,
 } from './types.ts';
 
-/**
- * Panel call-to-action targets. Both buttons previously pointed at `#`, which
- * looks like a working link and does nothing.
- */
+/** Where "View Source" goes. It previously pointed at `#`. */
 const SOURCE_URL = 'https://github.com/2600th/web-ocean-3d';
-const DOCS_URL = 'https://github.com/2600th/web-ocean-3d/tree/main/docs';
 
-type SliderKey = 'windSpeed' | 'peakWavelength' | 'cloudCoverage' | 'pixelRatio';
+type SliderKey = 'windSpeed' | 'peakWavelength' | 'cloudCoverage' | 'timeOfDay' | 'pixelRatio';
 type ToggleKey = 'buoyancyProbes' | 'wakeProbes' | 'forceWebGL';
 
 interface SliderSpec {
@@ -65,6 +61,19 @@ const SLIDERS: readonly SliderSpec[] = [
     max: 1,
     step: 0.01,
     format: (v) => `${Math.round(v * 100)}%`,
+  },
+  {
+    key: 'timeOfDay',
+    label: 'Time of Day',
+    min: 0,
+    max: 24,
+    step: 0.1,
+    // Clock face rather than a bare number: "17.4" is not a time anyone reads.
+    format: (v) => {
+      const hours = Math.floor(v) % 24;
+      const minutes = Math.round((v - Math.floor(v)) * 60);
+      return `${String(hours).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+    },
   },
   {
     key: 'pixelRatio',
@@ -220,11 +229,7 @@ export class Panel {
     primary.href = SOURCE_URL;
     primary.rel = 'noopener';
     primary.target = '_blank';
-    const secondary = el('a', 'btn btn--ghost', 'Documentation');
-    secondary.href = DOCS_URL;
-    secondary.rel = 'noopener';
-    secondary.target = '_blank';
-    actions.append(primary, secondary);
+    actions.append(primary);
     body.append(actions);
 
     // ---- Mobile bottom-sheet trigger --------------------------------------
@@ -259,6 +264,10 @@ export class Panel {
     for (const [key, refs] of this.sliders) {
       const next = partial[key];
       if (next === undefined) continue;
+      // `timeOfDay` is nullable — null means the preset still owns the sun. The
+      // control has to show *something*, so it falls back to the preset's own
+      // elevation, which the app supplies alongside the null.
+      if (next === null) continue;
       const value = clamp(next, refs.spec.min, refs.spec.max);
       this.state[key] = value;
       refs.input.value = String(value);
