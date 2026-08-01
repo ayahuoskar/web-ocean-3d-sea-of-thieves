@@ -82,6 +82,7 @@ sample points the physics solves against.*
 | **Orbit** | LMB drag rotate · RMB drag pan · scroll zoom |
 | **Fly** | click to capture the mouse · WASD · Space/Ctrl up-down · Shift boost |
 | **Boat** | **W/S** throttle ahead and astern · **A/D** rudder · chase camera follows the hull |
+| **Touch** | Boat mode on a touch device gets an on-screen stick: forward for ahead, back for astern, left and right for rudder |
 
 Boat mode selects the ship, not just a camera. Leaving it releases ship input, so Orbit and
 Fly keep their own keys. The rudder is a foil: it has little authority until the ship has way
@@ -112,16 +113,24 @@ Drop the camera below the surface in any mode to trigger the underwater state.
 **World**
 - Steerable sailing ship: throttle and rudder resolved into forces the buoyancy solver
   integrates, so propulsion composes with heave, pitch and roll instead of overriding them
-- Trailing Kelvin wake driven by speed along the bow, curving with the turn and dissipating
+- Kelvin wake that *deforms* the water, not just foams it: the transverse and divergent wave
+  systems and a bow wave, with `k = g/V²` so the crests lengthen as the square of speed
+- Rain wets what it lands on — wood and canvas darken and gloss in a squall, and stay damp for
+  half a minute after it passes
 - Buoys and barrels floating independently
 - Procedural seafloor with animated caustics; island silhouette
 - Preetham-model sky with raymarched volumetric clouds, stars, moon, rain and snow
 
 **Underwater**
-- Extinction fog, god rays, drifting particulates and bubble columns
-- Continuous cross-fade across the waterline rather than a hard cut
+- Per-channel extinction, drifting particulates and bubble columns
+- God rays marched in *world* space against the caustics field, so the shafts and the pattern
+  they cast on the seafloor are one evaluation of one field rather than two effects tuned to
+  resemble each other
+- Continuous cross-fade across the waterline rather than a hard cut, and the camera crosses it
+  freely in either direction
 
 **Engineering**
+- Volumetric height fog with per-preset extinction and a live density control
 - Five quality tiers plus adaptive downgrade under sustained load
 - Live pixel-ratio control
 - Deterministic test hooks for automated verification
@@ -189,7 +198,8 @@ checks:
 | Quantity | Measured | Asserted by |
 |---|---|---|
 | Whitecap coverage at 15 m/s | **4.6%** | `produces a physically plausible sea state` |
-| Folded surface area | **0.1%** | same (gate: `< 8%`) |
+| Folded surface area (J < 0) | **3.8%** | same (gate: `< 8%`) |
+| Surface below the break threshold (J < 0.14) | **5.5%** | drives the deposit rate |
 | Crest amplitude, cascade 0 | **±1.4 m** | same (gate: `0.4 m … 12 m`) |
 
 > An earlier revision of this table also quoted a buoyancy/wave-slope correlation,
@@ -198,18 +208,29 @@ checks:
 > removed rather than left standing as unsourced numbers. See
 > [`docs/CLAIMS_AUDIT.md`](docs/CLAIMS_AUDIT.md).
 
-Two bugs were found by measuring rather than looking, and both were invisible to typecheck:
+Bugs found by measuring rather than looking, none of them visible to typecheck:
 
 1. The FFT butterfly twiddle exponent used the group width where it needed the half-span,
-   applying `W^(N/2) = -1` to every odd row at stage 0. Folding fell from 8.8% of the surface
-   to 0.1%.
+   applying `W^(N/2) = -1` to every odd row at stage 0.
 2. Geometry and shading shared one LOD curve, undersampling the wave field into speckle.
+3. The volumetric fog and underwater passes built their view ray with NDC y taken straight
+   from a top-down screen uv, so every ray's vertical component was inverted. It read as fog
+   rather than as a broken ray: the sky integrated the whole height-fog column and every
+   preset rendered as a white-out. The tell was that it did not respond to density — a 175×
+   sweep of the slider produced the same white, because both ends were saturated.
+4. The panel placed its sliders by array index, so inserting two controls pushed the last two
+   off the end. They were declared, had labels and formatters, and were never built.
+5. A helper introduced to *fix* undefined reversed-edge `smoothstep` had its own edges the
+   wrong way round and returned a constant zero. It was caught by a new test asserting the
+   effect was visible at all, which is the argument for having one per effect.
 
 ---
 
 ## Performance
 
-Frame work measures **0.3 / 1.1 / 0.8 ms** at Low / High / Max on WebGPU at 1600 × 900.
+Frame work measures **0.33 / 3.10 / 6.51 ms** GPU p50 at Low / High / Max on WebGPU at
+1600 × 900 DPR 1, against a 16.7 ms budget. WebGL2 Low measures **1.71 ms** against 33.3 ms.
+All seven benchmarked configurations pass.
 
 **Read that with care.** Automated Chromium throttles `requestAnimationFrame` independently
 of load — this project measured 1.1 "FPS" while spending 0.8 ms per frame, and the same
@@ -234,8 +255,11 @@ Full methodology, cost model and the honest list of what remains unmeasured:
   real water produces.
 - **Sun glitter is isotropic.** It should stretch toward the viewer rather than reading as a
   round highlight.
-- **The ship is not wetted by rain.** Rain reaches the water and the lens, but hull surfaces do
-  not darken or gloss under it.
+- **Rain wetting is uniform over an object.** The hull darkens and glosses in a squall and
+  dries out over the following half-minute, but a real hull wets from *above* — the deck soaks
+  while the underside of a beam stays dry, and water runs down and pools. Expressing that needs
+  the world normal per material, which means rebuilding materials the asset loader shares
+  between clones.
 - **`refraction: 0` is a visual policy, not a cost saving.** The backdrop and depth reads are
   unconditional in the node graph; a tier that sets it to zero still pays for them.
 - **One machine.** Every performance figure comes from a single RTX 5090; nothing here

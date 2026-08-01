@@ -175,8 +175,36 @@ with the commit that changed it:
 
 Still open, and now recorded in `README.md` as limitations: the waterline is a
 whole-frame cross-fade rather than a per-pixel split, there is no Snell window or
-total internal reflection, sun glitter is isotropic, and rain remains an
-uncoupled overlay.
+total internal reflection, sun glitter is isotropic, and rain wetting is uniform
+over an object rather than driven by the surface normal.
+
+Rain is no longer an uncoupled overlay. It disturbs the surface, aerates it into
+foam, beads on the lens and wets the hull, and each of those has a test that
+fails if the coupling is removed.
+
+## 9. Second pass
+
+A later audit, prompted by a viewer looking at the running app rather than at the
+code, found a further set of claims that were true of the design and false of the
+build. They are recorded here because the pattern is the point: every one of them
+was a feature that existed, was wired, had a test, and did not work.
+
+| Claim | What was true | Status |
+|---|---|---|
+| Volumetric fog | Both fog passes built their view ray with NDC y from a top-down screen uv, inverting every ray. Sky integrated the whole column; water got none. | **Fixed**, and the same flip in the underwater pass with it |
+| Underwater god rays | Same inverted ray — the shafts pointed away from the sun | **Fixed** |
+| Per-preset fog | One global extinction for all nine presets, sixty times Sea of Thieves' aerial perspective | **Fixed** — `Preset.fog.volumetric` |
+| Whitecaps respond to sea state | `setBreaking` and `setFoamStrength` were never called; one threshold and rate for every preset and wind speed | **Fixed** — coverage follows Monahan's U^3.41 |
+| Day/night slider | Declared with a label and a formatter; never built, because the panel placed sliders by index | **Fixed**, and construction now throws if a declared slider is unplaced |
+| "Diving is a headline feature" | The camera was teleported out of a 0.7 m band around the surface, which made crossing impossible in either direction | **Fixed** |
+| Lens rain | Droplets ran up the screen | **Fixed** |
+| Reversed-edge `smoothstep` | ~20 sites relying on behaviour both WGSL and GLSL leave undefined | **Fixed** — `core/tslMath` |
+| Shadow map size per tier | `shadow.dispose()` nulled the node's target; the planar reflector then read `depthTexture` off null on the next frame | **Fixed** |
+| Benchmark gates on GPU samples | Only the *CPU* sample count was checked; console errors never reached the verdict | **Fixed** |
+| Leak test | 8 transitions, 8 textures allowed — one per transition, which is exactly the leak it exists to catch | **Fixed** — measures a rate across two segments |
+| "WebGL2 still renders" | Asserted the backend string and an empty console; never read a frame | **Fixed** |
+| Reflection test covers SSR | Planar and SSR are composited and driven by one tier number, so the test passed on planar alone | **Fixed** — a second test turns planar off |
+| No per-frame allocation | The sampler readback allocated ~190 kB a frame decoding half-floats | **Fixed** — pooled per slice |
 
 Three defects were introduced during the work and caught by the harness rather
 than by review — a framebuffer feedback loop, a pooled-readback buffer read past
