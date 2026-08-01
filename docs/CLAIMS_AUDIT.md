@@ -187,6 +187,7 @@ described in the commits that fixed them.
 
 - **5 dead quality settings** removed.
 - **2 partially wired settings** (`shadowMapSize`, `underwaterParticles`) connected properly.
-- **5 defects** found, 3 of them invisible to the existing suite.
+- **6 defects** found (D1–D6), 3 of them invisible to the existing suite. This said "5" while
+  the table above listed six — corrected after an independent review caught the contradiction.
 - **9 documentation claims** removed or corrected as unimplemented; **4 "measured" numbers** had no measurement behind them.
-- **6 P0/P1 rendering features** are partial or absent and form the Phase 2–4 work: scene reflection, refraction, persistent foam, the wake binding, the underwater surface underside, and coupled weather.
+- **6 P0/P1 rendering features** were partial or absent at the time of the audit: scene reflection, refraction, persistent foam, the wake binding, the underwater surface underside, and coupled weather. All but the surface underside have since been implemented — see §7.

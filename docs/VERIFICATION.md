@@ -48,10 +48,20 @@ views.
 | `waterline` | skyPro | Grazing near-surface silhouette against sky, up-sun specular path to the horizon |
 | `underwater` | skyPro | Extinction with depth, god rays, particulate, hull underside, surface from below |
 
-**`boat-chase` is not "while moving".** The spec asks for the chase camera while
-under way; there is no ship controller yet (Boat mode is a chase camera, W/S and
-A/D are unimplemented), so the shot captures the chase framing of a hull that is
-only bobbing on the swell. When the controller lands, the shot needs a ship input
+**`boat-chase` is still not "while moving".** The spec asks for the chase camera
+while under way. The ship controller now exists — W/S and A/D drive throttle and
+rudder — but this shot does not yet apply any, so it captures the chase framing of
+a hull that is only bobbing on the swell. Making it a genuine under-way shot needs
+a throttle input before the settle and a longer settle so the wake develops, and
+its baseline regenerated. Until then it does not exercise the controller; the four
+behavioural tests in `tests/ocean.spec.ts` do. The paragraph below describes what
+that change requires and remains accurate.
+
+Historical note: this section previously stated that no controller existed at all.
+An independent review caught that, along with several other places where the docs
+had fallen behind the code.
+
+When the shot is updated, it needs a ship input
 applied before the settle and a longer settle so the wake has developed —
 nothing else about it changes, and its baseline is expected to be regenerated.
 
@@ -315,7 +325,8 @@ Nothing is loosened to make a shot pass on an unsuitable stack. The four
 `image pipeline` tests do not need a GPU and always run.
 
 Getting a WebGPU device out of Playwright's Chromium on this machine needed two
-launch flags beyond the existing ones, both in the `visual` project:
+launch flags beyond the existing ones. They were added to the `visual` project
+first and now sit in **both** projects:
 
 - `--enable-gpu`. Headless Chromium uses SwiftShader otherwise, and
   `navigator.gpu.requestAdapter()` returns null — the app falls back to WebGL2 on
@@ -326,10 +337,16 @@ launch flags beyond the existing ones, both in the `visual` project:
   compiler will not load here. Disabling the `use_dxc` Dawn feature falls back to
   FXC on the same D3D12 backend and the device comes up.
 
-The `chromium-webgpu` project does **not** carry these flags, so the functional
-suite still runs on SwiftShader and still skips its screenshot assertions. Adding
-them there would put it on hardware too; that is a change to the functional and
-performance suites and is deliberately left out of this one.
+The `chromium-webgpu` project carries them too — see `playwright.config.ts`. That
+was a later change and it is what makes the functional suite's frame-budget
+assertions worth anything: on SwiftShader the tier and leak sequences, which cycle
+quality six and eight times, simply timed out. An earlier revision of this section
+said the functional project deliberately went without the flags; it no longer does,
+and the sentence was corrected after an independent review flagged it.
+
+What this does **not** change: the runner-suitability gate still applies. A machine
+with no GPU falls back to a software rasteriser regardless of the flags, and the
+screenshot assertions still skip there rather than being loosened.
 
 ## Reference stack
 

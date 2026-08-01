@@ -308,8 +308,16 @@ move — a drifted tier is an UNVERIFIED result, not a quiet one.
 ## Memory
 
 The suite cycles Low↔High and asserts the renderer's texture and geometry counts
-have not grown beyond a small allowance. Every tier change disposes the previous
-FFT targets, surface material and ocean geometry before allocating replacements.
+have not grown beyond a small allowance. A tier change disposes the previous FFT
+targets and ocean geometry before allocating replacements.
+
+The surface **material** is deliberately not among them. It used to be rebuilt on
+every tier change, which both leaked node-graph textures across cycles and was the
+mechanism behind defect D1 (a rebuild dropped the seafloor depth node). Cascade
+count is now re-pointed in place through `OceanMaterial.setCascades()` against a
+fixed `MAX_CASCADES = 3` binding, so one material instance survives the whole
+session. An earlier revision of this section still claimed the material was
+disposed per tier; that was corrected after an independent review.
 
 The benchmark records `renderer.info.memory` per configuration, so the tier cost
 is visible directly: 273 MB of textures at Low, 323 MB at High and Ultra, 476 MB

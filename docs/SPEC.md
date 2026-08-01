@@ -31,7 +31,7 @@ Observed in the reference across the captures in `reference/shots/`.
 | F12 | Presets | 9: Three.js Sky Pro, Arctic, Black Flag, Dusk, Foggy, Moonlit, Sea of Thieves, Storm, Sunset. Each sets sun/sky, water colour, wind, wavelength, cloud coverage, weather FX. | P0 |
 | F13 | Camera modes | Orbit (LMB rotate / RMB pan / scroll zoom), Fly (WASD + mouse look), Boat (chase camera on the ship). Keys 1/2/3. | P0 |
 | F14 | Quality tiers | Low / Medium / High / Ultra / Max — scales cascade count, FFT resolution, mesh LOD, post FX, shadows. | P0 |
-| F15 | Renderer fallback | WebGPU by default with a "Force WebGL" toggle producing a visually equivalent WebGL2 path. | P0 |
+| F15 | Renderer fallback | WebGPU by default with a "Force WebGL" toggle producing a coherent — **not** visually equivalent — WebGL2 path. Refraction, planar reflection and SSR are absent there by policy; the surface falls back to analytic depth colour and an analytic sky reflection. | P0 |
 | F16 | Pixel ratio control | Live 0.5×–2× resolution scale slider. | P1 |
 | F17 | HUD | FPS counter (green→red by health), camera mode switcher, control hints. | P0 |
 | F18 | Control panel | Dark glass panel: quality, preset, wind speed, peak wavelength, cloud coverage, three toggles, pixel ratio, CTA buttons. | P0 |

@@ -172,8 +172,10 @@ invisible; a pipeline stall is not.
 
 ## Verification
 
-The suite asserts behaviour, not pixel-exact snapshots — the scene is GPU-driven and never
-frame-identical. Notable checks:
+Two suites. The functional one asserts behaviour; the visual one compares seven canonical shots
+against checked-in baselines with a CIE94 ΔE metric whose thresholds come from a *measured*
+run-to-run noise floor — not pixel-exact equality, which no GPU render can hold to. Notable
+checks:
 
 - Sea state read straight off the GPU: crest amplitude in metres, no non-finite values,
   whitecap coverage under 8%
@@ -223,10 +225,6 @@ Full methodology, cost model and the honest list of what remains unmeasured:
 
 ## Known limitations
 
-- **No clean benchmark run.** Every measurement so far came from a browser throttling rAF.
-  True GPU timings need timestamp queries, which are not implemented.
-- **Material compilation is not prewarmed** — a one-off ~57 ms frame occurs when the ship and
-  props finish loading.
 - **The waterline is not a true split.** `submersion` cross-fades the whole frame rather than
   masking it per pixel, so a camera sitting exactly at the surface does not show water below
   and air above in the same image. The canonical `waterline` shot is a grazing view, not a
@@ -236,8 +234,10 @@ Full methodology, cost model and the honest list of what remains unmeasured:
   real water produces.
 - **Sun glitter is isotropic.** It should stretch toward the viewer rather than reading as a
   round highlight.
-- **Rain is an uncoupled overlay.** It does not disturb the surface, wet the ship, or reach
-  the lens.
+- **The ship is not wetted by rain.** Rain reaches the water and the lens, but hull surfaces do
+  not darken or gloss under it.
+- **`refraction: 0` is a visual policy, not a cost saving.** The backdrop and depth reads are
+  unconditional in the node graph; a tier that sets it to zero still pays for them.
 - **One machine.** Every performance figure comes from a single RTX 5090; nothing here
   establishes where the quality tiers stop working.
 - Playwright's bundled Chromium exposes no WebGPU adapter, so it renders through a software
