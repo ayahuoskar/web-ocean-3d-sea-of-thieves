@@ -2,7 +2,7 @@ import * as THREE from 'three/webgpu';
 import { pass, positionWorld, rtt } from 'three/tsl';
 import { createRenderer, clampPixelRatio, type Backend } from './core/Renderer';
 import { Caustics, UnderwaterParticles, UnderwaterPass } from './underwater';
-import { AssetLoader, Props, Seafloor, Ship } from './scene';
+import { AssetLoader, Props, Seafloor, Ship, SurfaceWetness } from './scene';
 import {
   BuoyancySystem,
   BuoyantBody,
@@ -27,6 +27,7 @@ import { CameraDirector } from './cameras/CameraDirector';
 import { getPreset } from './presets';
 import { Panel } from './ui/Panel';
 import { Hud } from './ui/Hud';
+import { TouchControls } from './ui/TouchControls';
 import { DEFAULT_UI_STATE, type UiState } from './ui/types';
 
 /** Scratch for the test-hook camera pin; the hook must not allocate either. */
@@ -94,6 +95,8 @@ class App {
   private wake!: Wake;
   private shipBody: BuoyantBody | null = null;
   private shipControls: ShipController | null = null;
+  /** Rain wetting for the ship and the floating props. */
+  private readonly wetness = new SurfaceWetness();
 
   /** Scratch for the exposed controller state; reading it must not allocate. */
   private readonly shipStateOut: ShipControlState = {
@@ -110,6 +113,8 @@ class App {
 
   private panel!: Panel;
   private hud!: Hud;
+  /** On-screen throttle/rudder. Null on devices with a fine pointer. */
+  private touchControls: TouchControls | null = null;
   private loop!: Loop;
   private adaptive!: AdaptiveQuality;
 
@@ -459,6 +464,7 @@ class App {
       const ship = shipResult.value;
       this.ship = ship;
       this.scene.add(ship.object);
+      this.wetness.adopt(ship.object);
 
       this.shipBody = new BuoyantBody({
         object: ship.object,
@@ -494,6 +500,9 @@ class App {
       const props = propsResult.value;
       this.props = props;
       this.scene.add(props.object);
+      // Props share materials with the hull through the loader's cache;
+      // `adopt` de-duplicates, so this is a no-op for anything already tracked.
+      this.wetness.adopt(props.object);
 
       for (const floater of props.floaters) {
         this.buoyancy.add(
@@ -522,6 +531,17 @@ class App {
     this.panel = new Panel(this.uiRoot, this.state, callbacks);
     this.hud = new Hud(this.uiRoot, this.state.cameraMode, callbacks);
     this.hud.setBackend(this.backend);
+
+    // Built only where it will be used. A mouse user has better controls and a
+    // stick over the frame would only be in the way; constructing it anyway and
+    // hiding it would leave a pointer target on the canvas for every desktop
+    // viewer to discover by accident.
+    if (TouchControls.isTouchDevice()) {
+      this.touchControls = new TouchControls(this.uiRoot, {
+        onInput: (throttle, rudder) => this.shipControls?.setInput(throttle, rudder),
+      });
+      this.touchControls.setVisible(this.state.cameraMode === 'boat');
+    }
   }
 
   private onStateChange(key: keyof UiState): void {
@@ -561,6 +581,7 @@ class App {
         // releases it, so Orbit and Fly keep their own keys and a hull cannot be
         // left under power while the viewer is somewhere else.
         this.shipControls?.setEnabled(this.state.cameraMode === 'boat');
+        this.touchControls?.setVisible(this.state.cameraMode === 'boat');
         break;
       case 'buoyancyProbes':
         this.ship?.setDebugProbesVisible(this.state.buoyancyProbes);
@@ -862,6 +883,9 @@ class App {
     // Agitation: heavy rain whitens a sea surface on its own, independently of
     // whether the waves are steep enough to break.
     this.wake.setRainAgitation(raining);
+    // Wood and canvas darken and gloss in a squall, and stay damp well after it
+    // passes — see `SurfaceWetness` for the asymmetric time constants.
+    this.wetness.update(dt, raining);
 
     this.lensRain.setIntensity(raining);
 
@@ -1135,6 +1159,10 @@ class App {
           // a ~6.7 s velocity time constant, so an input applied after settling
           // would photograph a hull that has not begun to move.
           this.shipControls?.setInput(0, 0);
+          // Set, not settled. Wetness dries with a 26 s time constant, so a
+          // capture that inherited a storm's wet hull would still be visibly damp
+          // three hundred settle steps later.
+          this.wetness.setWetness(this.rainOverride ?? getPreset(this.state.preset).weather.intensity);
           if (shipInput) this.shipControls?.setInput(shipInput.throttle, shipInput.rudder);
           this.ship?.resetClock(start);
           this.previousShipPosition.copy(this.ship?.object.position ?? this.previousShipPosition);
@@ -1155,6 +1183,10 @@ class App {
         shipState: () =>
           this.shipControls ? { ...this.shipControls.getState(this.shipStateOut) } : null,
         shipControlsEnabled: () => this.shipControls?.isEnabled ?? false,
+        /** Whether the on-screen throttle/rudder is built and showing. */
+        touchControlsVisible: () => this.touchControls?.isVisible ?? false,
+        /** Current rain wetting of the hull and props, 0..1. */
+        surfaceWetness: () => this.wetness.value,
         /** Direct throttle/rudder input, bypassing the keyboard. */
         setShipInput: (throttle: number, rudder: number) =>
           this.shipControls?.setInput(throttle, rudder),
@@ -1181,6 +1213,7 @@ class App {
     this.loop?.stop();
     this.panel?.dispose();
     this.hud?.dispose();
+    this.touchControls?.dispose();
     this.director?.dispose();
     this.sampler?.dispose();
     this.simulation?.dispose();
@@ -1195,6 +1228,9 @@ class App {
     this.particles?.dispose();
     this.caustics?.dispose();
     this.shipControls?.dispose();
+    // Restores the dry roughness and colour on materials the loader's cache
+    // shares, so a re-created App does not inherit a permanently wet ship.
+    this.wetness.dispose();
     this.buoyancy?.dispose();
     this.wake?.dispose();
     this.ship?.dispose();

@@ -525,6 +525,170 @@ test.describe('interaction', () => {
       // Riding the swell, not launched out of it or sunk under it.
       expect(Math.abs(pose.y), `hull settled at y = ${pose.y}`).toBeLessThan(20);
     });
+
+    /**
+     * A phone has no W/S/A/D, so Boat mode needs an on-screen stick.
+     *
+     * Two things have to hold and they fail differently. The pad has to be
+     * *there* — built, and shown only in Boat mode on a coarse pointer — and
+     * dragging it has to reach the same `ShipController.setInput` the keyboard
+     * resolves to. Asserting only the first would pass on a decorative pad, which
+     * is the more likely failure of the two.
+     *
+     * Runs in its own touch-enabled context. `hasTouch` sets
+     * `navigator.maxTouchPoints`, which is what `TouchControls.isTouchDevice`
+     * reads; the default desktop context deliberately does not build the pad, and
+     * a test that forced it into existence would not be testing the gate.
+     */
+    test('touch devices get an on-screen throttle and rudder that drives the ship', async ({
+      browser,
+    }) => {
+      const context = await browser.newContext({
+        hasTouch: true,
+        viewport: { width: 900, height: 800 },
+      });
+      const page = await context.newPage();
+      try {
+        await boot(page);
+
+        // Orbit is the default: no pad, because a stick that steers a ship the
+        // viewer is not driving is worse than no stick.
+        await setState(page, { cameraMode: 'orbit' });
+        expect(
+          await page.evaluate(() => window.__ocean.touchControlsVisible()),
+          'the pad is showing in Orbit mode',
+        ).toBe(false);
+
+        await setState(page, { cameraMode: 'boat' });
+        expect(
+          await page.evaluate(() => window.__ocean.touchControlsVisible()),
+          'no on-screen controls on a touch device in Boat mode',
+        ).toBe(true);
+
+        const pad = page.locator('.touchpad');
+        await expect(pad).toBeVisible();
+        const box = (await pad.boundingBox())!;
+        const centreX = box.x + box.width / 2;
+        const centreY = box.y + box.height / 2;
+
+        // Push the stick forward and to the right: ahead, starboard rudder.
+        await page.mouse.move(centreX, centreY);
+        await page.mouse.down();
+        await page.mouse.move(centreX + box.width * 0.4, centreY - box.height * 0.4, { steps: 4 });
+
+        // `shipState().throttle` is the *smoothed* value the controller ramps
+        // toward the input, and under automation rAF is throttled to about 1 Hz,
+        // so the frame loop cannot be relied on to have advanced. Step the sim
+        // explicitly — this is testing that the input arrives, not how fast the
+        // ramp is.
+        await page.evaluate(() => window.__ocean.step(1 / 60, 20));
+        const held = await page.evaluate(() => window.__ocean.shipState());
+        expect(held, 'no ship controller').not.toBeNull();
+        expect(held!.throttle, 'dragging the pad forward did not open the throttle')
+          .toBeGreaterThan(0.2);
+        expect(held!.rudder, 'dragging the pad right did not put the rudder over')
+          .toBeGreaterThan(0.2);
+
+        // A stick springs back. Leaving the rudder latched hard over on release
+        // leaves the ship circling, which is exactly what a spring-centred
+        // control exists to prevent.
+        await page.mouse.up();
+        await page.evaluate(() => window.__ocean.step(1 / 60, 40));
+        const released = await page.evaluate(() => window.__ocean.shipState());
+        expect(Math.abs(released!.throttle), 'throttle stayed open after release')
+          .toBeLessThan(0.05);
+        expect(Math.abs(released!.rudder), 'rudder stayed over after release')
+          .toBeLessThan(0.05);
+      } finally {
+        await context.close();
+      }
+    });
+  });
+
+  /**
+   * Rain wets what it lands on.
+   *
+   * The hull was listed as a known limitation for exactly as long as rain has
+   * existed: it reached the water and the lens, but wood and canvas were as dry
+   * in a squall as at noon.
+   *
+   * The assertion is on the materials rather than on a pixel count, because the
+   * effect is a pair of scalar multipliers and a screenshot would mostly be
+   * measuring whatever else the storm preset changed. What it does check is the
+   * thing most likely to break: `SurfaceWetness` duck-types the materials it
+   * adopts, and the asset loader converts everything to
+   * `MeshPhysicalNodeMaterial` — a flag test against `isMeshStandardMaterial`
+   * adopts nothing at all and leaves the whole effect silently inert.
+   */
+  test('rain darkens and glosses the hull, and it dries afterwards', async ({ page }) => {
+    await page.goto('/');
+    await waitForOcean(page);
+
+    const sample = () =>
+      page.evaluate(() => {
+        const ocean = window.__ocean as unknown as {
+          surfaceWetness(): number;
+          scene: { getObjectByName(n: string): unknown };
+        };
+        const ship = ocean.scene.getObjectByName('ship') as unknown as {
+          traverse(fn: (o: unknown) => void): void;
+        } | undefined;
+        let roughness = 0;
+        let luminance = 0;
+        let count = 0;
+        ship?.traverse((node) => {
+          const mesh = node as { isMesh?: boolean; material?: unknown };
+          if (!mesh.isMesh) return;
+          const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          for (const m of materials as Array<{
+            roughness?: number;
+            color?: { r: number; g: number; b: number };
+          }>) {
+            if (typeof m.roughness !== 'number' || !m.color) continue;
+            roughness += m.roughness;
+            luminance += 0.2126 * m.color.r + 0.7152 * m.color.g + 0.0722 * m.color.b;
+            count++;
+          }
+        });
+        return { wetness: ocean.surfaceWetness(), roughness, luminance, count };
+      });
+
+    await setState(page, { preset: 'skyPro' });
+    await page.evaluate(() => window.__ocean.resetDeterministic(10, 30));
+    const dry = await sample();
+
+    expect(
+      dry.count,
+      'no standard materials found on the ship, so this test proves nothing — ' +
+        'SurfaceWetness is probably adopting nothing either',
+    ).toBeGreaterThan(0);
+    expect(dry.wetness, 'the hull is wet under a clear sky').toBeLessThan(0.05);
+
+    await setState(page, { preset: 'storm' });
+    await page.evaluate(() => window.__ocean.resetDeterministic(10, 30));
+    const wet = await sample();
+
+    expect(wet.wetness, 'the storm did not wet the hull').toBeGreaterThan(0.5);
+    expect(
+      wet.roughness,
+      `wet roughness ${wet.roughness.toFixed(3)} is not below dry ${dry.roughness.toFixed(3)}; ` +
+        'a water film fills the microfacets, so wet surfaces are glossier',
+    ).toBeLessThan(dry.roughness);
+    expect(
+      wet.luminance,
+      `wet albedo ${wet.luminance.toFixed(3)} is not below dry ${dry.luminance.toFixed(3)}`,
+    ).toBeLessThan(dry.luminance);
+
+    // Back to clear, and stepped long enough to dry. The time constant is 26 s,
+    // so this is a partial recovery on purpose — asserting it returns exactly to
+    // dry would be asserting the wrong physics.
+    await setState(page, { preset: 'skyPro' });
+    await page.evaluate(() => window.__ocean.step(1 / 30, 900));
+    const drying = await sample();
+    expect(
+      drying.wetness,
+      `wetness stayed at ${drying.wetness.toFixed(3)} after 30 s of clear weather`,
+    ).toBeLessThan(wet.wetness - 0.15);
   });
 
   /**

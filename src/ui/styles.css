@@ -861,6 +861,79 @@ body {
 }
 
 /* --------------------------------------------------------------------------
+   Touch controls (Boat mode, coarse pointers)
+   -------------------------------------------------------------------------- */
+
+/*
+ * Bottom-left, away from the panel on the right and the panel toggle. Sized in
+ * `min()` against the viewport so it stays a thumb's reach on a phone and does
+ * not become a dinner plate on a tablet.
+ */
+.touchpad {
+  position: absolute;
+  left: max(var(--gutter), env(safe-area-inset-left));
+  bottom: max(var(--gutter), env(safe-area-inset-bottom));
+  width: min(38vw, 168px);
+  height: min(38vw, 168px);
+  display: grid;
+  place-items: center;
+  /* The pad owns its gestures; without this a drag also pans the canvas. */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  z-index: 3;
+}
+
+.touchpad[hidden] {
+  display: none;
+}
+
+.touchpad__ring {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  border: 1px solid var(--hairline);
+  background: rgba(10, 20, 32, 0.34);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: inset 0 0 26px rgba(90, 150, 210, 0.12);
+}
+
+.touchpad__knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 34%;
+  height: 34%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: rgba(150, 200, 240, 0.28);
+  border: 1px solid rgba(160, 210, 245, 0.5);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  transition: background 120ms ease;
+}
+
+.touchpad__label {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 8px;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: var(--muted-dim);
+  pointer-events: none;
+}
+
+.touchpad__label--ahead {
+  top: 6px;
+}
+
+.touchpad__label--astern {
+  bottom: 6px;
+}
+
+/* --------------------------------------------------------------------------
    Motion preferences
    -------------------------------------------------------------------------- */
 

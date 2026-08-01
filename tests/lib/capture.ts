@@ -55,6 +55,8 @@ interface OceanHooks {
   capturePixels(): Promise<CapturedPixels>;
   setShipInput(throttle: number, rudder: number): void;
   shipControlsEnabled(): boolean;
+  touchControlsVisible(): boolean;
+  surfaceWetness(): number;
   shipState(): {
     throttle: number;
     rudder: number;
