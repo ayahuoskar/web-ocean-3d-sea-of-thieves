@@ -285,6 +285,72 @@ test.describe('interaction', () => {
     ).toBeGreaterThan(0.5);
   });
 
+  /**
+   * The water must reflect the *scene*, not just a sky gradient.
+   *
+   * `SPEC.md` has claimed scene reflection as a P0 feature throughout, while the
+   * surface reflected `mix(horizonColor, skyColor, reflectDir.y)` — an analytic
+   * ramp containing no geometry at all. Asserting that a reflection node exists
+   * would not have caught that; what distinguishes the two is whether hiding the
+   * ship changes the water underneath it.
+   *
+   * The camera is placed low and close so the hull's reflection occupies a real
+   * part of the frame, and the comparison is restricted to the lower half, below
+   * the horizon — otherwise hiding the ship would trivially change the image by
+   * removing the ship itself.
+   */
+  test('the water reflects nearby scene geometry', async ({ page }) => {
+    await page.goto('/');
+    await waitForOcean(page);
+
+    test.skip(
+      !(await hasGpuAdapter(page)),
+      'no GPU adapter: the software path cannot render these frames in time',
+    );
+
+    const backend = await page.evaluate(() => window.__ocean.backend);
+    test.skip(
+      backend !== 'webgpu',
+      'planar reflection is a WebGPU-only path; WebGL2 keeps the analytic sky by design',
+    );
+
+    await setState(page, { preset: 'seaOfThieves', quality: 'high' });
+
+    const look = async () => {
+      await page.evaluate(() => window.__ocean.resetDeterministic(28, 90));
+      await setCamera(page, [28, 4.5, 22], [0, 3, 0]);
+      return capture(page);
+    };
+
+    const withShip = await look();
+    await page.evaluate(() => {
+      const ship = window.__ocean.scene.getObjectByName('ship');
+      if (ship) ship.visible = false;
+    });
+    const withoutShip = await look();
+    await page.evaluate(() => {
+      const ship = window.__ocean.scene.getObjectByName('ship');
+      if (ship) ship.visible = true;
+    });
+
+    // Water only: the bottom half of the frame, which at this camera is entirely
+    // below the horizon.
+    const half = Math.floor(withShip.height / 2);
+    const crop = (image: RgbaImage): RgbaImage => ({
+      width: image.width,
+      height: image.height - half,
+      data: image.data.slice(half * image.width * 4),
+    });
+
+    const score = compareImages(crop(withShip), crop(withoutShip));
+
+    expect(
+      score.meanDeltaE,
+      `hiding the ship changed the water by mean ΔE ${score.meanDeltaE.toFixed(3)}; ` +
+        'a value near zero means the surface is reflecting a sky gradient, not the scene',
+    ).toBeGreaterThan(0.4);
+  });
+
   test('camera modes switch via keyboard', async ({ page }) => {
     await page.goto('/');
     await waitForOcean(page);

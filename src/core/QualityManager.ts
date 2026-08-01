@@ -31,6 +31,24 @@ export interface QualitySettings {
    * depth-buffer reads entirely.
    */
   refraction: number;
+  /**
+   * How strongly the planar reflection of the scene shows in the water, 0..1.
+   * 0 leaves the analytic sky gradient alone.
+   *
+   * Note what this does *not* do: whether the reflection is rendered at all is a
+   * build-time property of the surface's node graph, decided once from the
+   * backend, so a WebGPU tier with `reflection: 0` still pays for the mirrored
+   * view and simply does not show it. Measured at 0.26 ms on the reference GPU —
+   * accepted because the genuine low-end path is WebGL2, which has no reflector
+   * in its graph at all.
+   */
+  reflection: number;
+  /**
+   * Resolution of the reflection render relative to the canvas. This is the real
+   * cost lever — the reflection is sampled through a normal being perturbed by
+   * every ripple, so it is never seen sharp.
+   */
+  reflectionScale: number;
 }
 
 export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
@@ -46,6 +64,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     // No backdrop or depth-buffer read at all. This is the WebGL2 floor, where
     // the analytic body colour has to carry the water on its own.
     refraction: 0,
+    reflection: 0,
+    reflectionScale: 0.25,
   },
   medium: {
     fftSize: 128,
@@ -59,6 +79,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     // Partial: the scene shows through, but the analytic body still carries most
     // of the colour, which hides the coarser depth resolution at this tier.
     refraction: 0.6,
+    reflection: 0.6,
+    reflectionScale: 0.35,
   },
   high: {
     fftSize: 256,
@@ -70,6 +92,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     godRaySteps: 24,
     underwaterParticles: 2400,
     refraction: 1,
+    reflection: 0.85,
+    reflectionScale: 0.5,
   },
   ultra: {
     fftSize: 256,
@@ -81,6 +105,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     godRaySteps: 40,
     underwaterParticles: 4000,
     refraction: 1,
+    reflection: 1,
+    reflectionScale: 0.6,
   },
   max: {
     fftSize: 512,
@@ -92,6 +118,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     godRaySteps: 56,
     underwaterParticles: 6000,
     refraction: 1,
+    reflection: 1,
+    reflectionScale: 0.75,
   },
 };
 

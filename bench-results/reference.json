@@ -1,13 +1,10 @@
 {
   "schema": "web-ocean-3d/bench@1",
-  "startedAt": "2026-08-01T13:35:58.319Z",
-  "finishedAt": "2026-08-01T13:37:08.829Z",
-  "durationMs": 70510,
+  "startedAt": "2026-08-01T13:46:13.259Z",
+  "finishedAt": "2026-08-01T13:50:08.451Z",
+  "durationMs": 235192,
   "command": "npm run bench",
-  "argv": [
-    "--only",
-    "webgpu-high,webgl-low"
-  ],
+  "argv": [],
   "host": {
     "platform": "win32",
     "release": "10.0.26200",
@@ -58,6 +55,386 @@
   },
   "minSamples": 200,
   "configurations": [
+    {
+      "id": "webgpu-low",
+      "gate": false,
+      "requestedBackend": "webgpu",
+      "backend": "webgpu",
+      "tier": "low",
+      "preset": "skyPro",
+      "camera": {
+        "position": [
+          0,
+          14,
+          48
+        ],
+        "target": [
+          0,
+          2,
+          0
+        ]
+      },
+      "resolution": {
+        "width": 1600,
+        "height": 900,
+        "dpr": 1
+      },
+      "drawingBuffer": {
+        "width": 1600,
+        "height": 900,
+        "pixelRatio": 1
+      },
+      "adapter": {
+        "vendor": "nvidia",
+        "architecture": "blackwell",
+        "device": "",
+        "description": "",
+        "isFallbackAdapter": false,
+        "features": [
+          "bgra8unorm-storage",
+          "chromium-experimental-multi-draw-indirect",
+          "chromium-experimental-timestamp-query-inside-passes",
+          "clip-distances",
+          "core-features-and-limits",
+          "depth-clip-control",
+          "depth32float-stencil8",
+          "dual-source-blending",
+          "float32-blendable",
+          "float32-filterable",
+          "indirect-first-instance",
+          "primitive-index",
+          "rg11b10ufloat-renderable",
+          "shader-f16",
+          "subgroup-size-control",
+          "subgroups",
+          "texture-component-swizzle",
+          "texture-compression-bc",
+          "texture-compression-bc-sliced-3d",
+          "texture-formats-tier1",
+          "texture-formats-tier2",
+          "timestamp-query"
+        ],
+        "hasTimestampQuery": true
+      },
+      "gl": {
+        "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+        "vendor": "Google Inc. (NVIDIA)",
+        "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 5090 (0x00002B85) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+        "hasDisjointTimerQuery": true
+      },
+      "focus": {
+        "hasFocus": true,
+        "visibility": "visible"
+      },
+      "gpuTiming": {
+        "rendererPropertyExists": false,
+        "backendPropertyExists": true,
+        "enabledAtConstruction": false,
+        "deviceHasFeature": true,
+        "enabled": true,
+        "method": "WebGPU timestamp-query, summed over the frame (THREE.TimestampQuery.RENDER)",
+        "error": null
+      },
+      "pacing": {
+        "classification": "unthrottled",
+        "deliveredFps": 555.556,
+        "referenceFrameMs": 1.3,
+        "intervalMs": {
+          "samples": 1462,
+          "min": 0.6,
+          "p50": 1.8,
+          "p90": 3.1,
+          "p95": 3.7,
+          "p99": 5,
+          "max": 17,
+          "mean": 2.053
+        },
+        "appLoopFrameMs": {
+          "samples": 1462,
+          "min": 0,
+          "p50": 0.3,
+          "p90": 0.5,
+          "p95": 0.7,
+          "p99": 1.1,
+          "max": 3.1,
+          "mean": 0.341
+        }
+      },
+      "sampling": {
+        "warmupFrames": 150,
+        "requestedFrames": 600,
+        "samples": 600,
+        "gpuSamples": 600,
+        "gpuMisses": 0,
+        "truncated": false,
+        "stepSeconds": 0.016666666666666666,
+        "deterministicReset": {
+          "applied": true,
+          "time": 0,
+          "settleSteps": 90,
+          "error": null
+        },
+        "simulationTimeAtEnd": 12.5
+      },
+      "cpuFrameMs": {
+        "samples": 600,
+        "min": 0.9,
+        "p50": 1.3,
+        "p90": 2.6,
+        "p95": 3,
+        "p99": 3.2,
+        "max": 3.6,
+        "mean": 1.556
+      },
+      "gpuFrameMs": {
+        "samples": 600,
+        "min": 0.295,
+        "p50": 0.559,
+        "p90": 0.616,
+        "p95": 1.067,
+        "p99": 1.224,
+        "max": 1.725,
+        "mean": 0.496
+      },
+      "fps": {
+        "deliveredP50": 555.556,
+        "impliedByGpuP50": 1788.909,
+        "impliedByCpuP50": 769.231
+      },
+      "render": {
+        "drawCalls": 60,
+        "triangles": 565888,
+        "frameCalls": 38
+      },
+      "memory": {
+        "attributes": 55,
+        "attributesSize": 4937144,
+        "geometries": 20,
+        "indexAttributes": 9,
+        "indexAttributesSize": 3217284,
+        "indirectStorageAttributes": 0,
+        "indirectStorageAttributesSize": 0,
+        "programs": 49,
+        "programsSize": 549887,
+        "readbackBuffers": 0,
+        "readbackBuffersSize": 0,
+        "renderTargets": 16,
+        "storageAttributes": 0,
+        "storageAttributesSize": 0,
+        "textures": 67,
+        "texturesSize": 405036174,
+        "uniformBuffers": 121,
+        "uniformBuffersSize": 31568,
+        "total": 413772057
+      },
+      "sceneContent": {
+        "hasShip": true,
+        "binariesServedFromDisk": [
+          "/models/ocean_buoy/ocean_buoy.bin",
+          "/models/dutch_ship_medium/dutch_ship_medium.bin",
+          "/models/barrel_03/barrel_03.bin",
+          "/models/rock_07/rock_07.bin",
+          "/models/namaqualand_cliff_01/namaqualand_cliff_01.bin"
+        ]
+      },
+      "budget": {
+        "frameMs": 16.7,
+        "fps": 60
+      },
+      "verdict": "PASS",
+      "reasons": [],
+      "consoleErrors": []
+    },
+    {
+      "id": "webgpu-medium",
+      "gate": false,
+      "requestedBackend": "webgpu",
+      "backend": "webgpu",
+      "tier": "medium",
+      "preset": "skyPro",
+      "camera": {
+        "position": [
+          0,
+          14,
+          48
+        ],
+        "target": [
+          0,
+          2,
+          0
+        ]
+      },
+      "resolution": {
+        "width": 1600,
+        "height": 900,
+        "dpr": 1
+      },
+      "drawingBuffer": {
+        "width": 1600,
+        "height": 900,
+        "pixelRatio": 1
+      },
+      "adapter": {
+        "vendor": "nvidia",
+        "architecture": "blackwell",
+        "device": "",
+        "description": "",
+        "isFallbackAdapter": false,
+        "features": [
+          "bgra8unorm-storage",
+          "chromium-experimental-multi-draw-indirect",
+          "chromium-experimental-timestamp-query-inside-passes",
+          "clip-distances",
+          "core-features-and-limits",
+          "depth-clip-control",
+          "depth32float-stencil8",
+          "dual-source-blending",
+          "float32-blendable",
+          "float32-filterable",
+          "indirect-first-instance",
+          "primitive-index",
+          "rg11b10ufloat-renderable",
+          "shader-f16",
+          "subgroup-size-control",
+          "subgroups",
+          "texture-component-swizzle",
+          "texture-compression-bc",
+          "texture-compression-bc-sliced-3d",
+          "texture-formats-tier1",
+          "texture-formats-tier2",
+          "timestamp-query"
+        ],
+        "hasTimestampQuery": true
+      },
+      "gl": {
+        "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+        "vendor": "Google Inc. (NVIDIA)",
+        "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 5090 (0x00002B85) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+        "hasDisjointTimerQuery": true
+      },
+      "focus": {
+        "hasFocus": true,
+        "visibility": "visible"
+      },
+      "gpuTiming": {
+        "rendererPropertyExists": false,
+        "backendPropertyExists": true,
+        "enabledAtConstruction": false,
+        "deviceHasFeature": true,
+        "enabled": true,
+        "method": "WebGPU timestamp-query, summed over the frame (THREE.TimestampQuery.RENDER)",
+        "error": null
+      },
+      "pacing": {
+        "classification": "unthrottled",
+        "deliveredFps": 208.333,
+        "referenceFrameMs": 2.2,
+        "intervalMs": {
+          "samples": 595,
+          "min": 1.6,
+          "p50": 4.8,
+          "p90": 7.1,
+          "p95": 7.6,
+          "p99": 8.5,
+          "max": 8.9,
+          "mean": 5.042
+        },
+        "appLoopFrameMs": {
+          "samples": 595,
+          "min": 0.3,
+          "p50": 0.7,
+          "p90": 1.5,
+          "p95": 2.1,
+          "p99": 2.7,
+          "max": 3.2,
+          "mean": 0.842
+        }
+      },
+      "sampling": {
+        "warmupFrames": 150,
+        "requestedFrames": 600,
+        "samples": 600,
+        "gpuSamples": 600,
+        "gpuMisses": 0,
+        "truncated": false,
+        "stepSeconds": 0.016666666666666666,
+        "deterministicReset": {
+          "applied": true,
+          "time": 0,
+          "settleSteps": 90,
+          "error": null
+        },
+        "simulationTimeAtEnd": 12.5
+      },
+      "cpuFrameMs": {
+        "samples": 600,
+        "min": 1.4,
+        "p50": 2.2,
+        "p90": 4.4,
+        "p95": 5,
+        "p99": 5.8,
+        "max": 7.4,
+        "mean": 2.541
+      },
+      "gpuFrameMs": {
+        "samples": 600,
+        "min": 1.388,
+        "p50": 1.928,
+        "p90": 2.435,
+        "p95": 2.512,
+        "p99": 3.128,
+        "max": 5.852,
+        "mean": 1.843
+      },
+      "fps": {
+        "deliveredP50": 208.333,
+        "impliedByGpuP50": 518.672,
+        "impliedByCpuP50": 454.545
+      },
+      "render": {
+        "drawCalls": 108,
+        "triangles": 831872,
+        "frameCalls": 71
+      },
+      "memory": {
+        "attributes": 55,
+        "attributesSize": 5306936,
+        "geometries": 20,
+        "indexAttributes": 9,
+        "indexAttributesSize": 3955716,
+        "indirectStorageAttributes": 0,
+        "indirectStorageAttributesSize": 0,
+        "programs": 51,
+        "programsSize": 428529,
+        "readbackBuffers": 0,
+        "readbackBuffersSize": 0,
+        "renderTargets": 23,
+        "storageAttributes": 0,
+        "storageAttributesSize": 0,
+        "textures": 70,
+        "texturesSize": 374234980,
+        "uniformBuffers": 194,
+        "uniformBuffersSize": 42480,
+        "total": 383968641
+      },
+      "sceneContent": {
+        "hasShip": true,
+        "binariesServedFromDisk": [
+          "/models/dutch_ship_medium/dutch_ship_medium.bin",
+          "/models/ocean_buoy/ocean_buoy.bin",
+          "/models/barrel_03/barrel_03.bin",
+          "/models/rock_07/rock_07.bin",
+          "/models/namaqualand_cliff_01/namaqualand_cliff_01.bin"
+        ]
+      },
+      "budget": {
+        "frameMs": 16.7,
+        "fps": 60
+      },
+      "verdict": "PASS",
+      "reasons": [],
+      "consoleErrors": []
+    },
     {
       "id": "webgpu-high",
       "gate": true,
@@ -140,27 +517,27 @@
       },
       "pacing": {
         "classification": "unthrottled",
-        "deliveredFps": 156.25,
-        "referenceFrameMs": 2.7,
+        "deliveredFps": 117.647,
+        "referenceFrameMs": 2.9,
         "intervalMs": {
-          "samples": 451,
-          "min": 1.7,
-          "p50": 6.4,
-          "p90": 7.7,
-          "p95": 8.4,
-          "p99": 15.3,
-          "max": 19.7,
-          "mean": 6.657
+          "samples": 341,
+          "min": 5,
+          "p50": 8.5,
+          "p90": 10.2,
+          "p95": 10.6,
+          "p99": 16.1,
+          "max": 20.6,
+          "mean": 8.806
         },
         "appLoopFrameMs": {
-          "samples": 451,
-          "min": 0.2,
-          "p50": 0.4,
-          "p90": 0.7,
-          "p95": 1.1,
-          "p99": 1.6,
-          "max": 13.9,
-          "mean": 0.543
+          "samples": 341,
+          "min": 0.4,
+          "p50": 0.8,
+          "p90": 1.5,
+          "p95": 1.7,
+          "p99": 2.8,
+          "max": 4,
+          "mean": 0.911
         }
       },
       "sampling": {
@@ -181,33 +558,33 @@
       },
       "cpuFrameMs": {
         "samples": 600,
-        "min": 1.6,
-        "p50": 2.7,
+        "min": 1.7,
+        "p50": 2.9,
         "p90": 6.3,
-        "p95": 7.2,
-        "p99": 8.4,
-        "max": 8.6,
-        "mean": 3.31
+        "p95": 7.1,
+        "p99": 8.2,
+        "max": 9.7,
+        "mean": 3.459
       },
       "gpuFrameMs": {
         "samples": 600,
-        "min": 2.44,
-        "p50": 2.546,
-        "p90": 2.64,
-        "p95": 2.885,
-        "p99": 3.883,
-        "max": 5.174,
-        "mean": 2.611
+        "min": 2.523,
+        "p50": 2.838,
+        "p90": 3.568,
+        "p95": 3.7,
+        "p99": 4.181,
+        "max": 4.699,
+        "mean": 3.02
       },
       "fps": {
-        "deliveredP50": 156.25,
-        "impliedByGpuP50": 392.773,
-        "impliedByCpuP50": 370.37
+        "deliveredP50": 117.647,
+        "impliedByGpuP50": 352.361,
+        "impliedByCpuP50": 344.828
       },
       "render": {
-        "drawCalls": 140,
-        "triangles": 891726,
-        "frameCalls": 114
+        "drawCalls": 152,
+        "triangles": 1127148,
+        "frameCalls": 115
       },
       "memory": {
         "attributes": 55,
@@ -218,17 +595,397 @@
         "indirectStorageAttributes": 0,
         "indirectStorageAttributesSize": 0,
         "programs": 55,
-        "programsSize": 429903,
+        "programsSize": 437736,
         "readbackBuffers": 0,
         "readbackBuffersSize": 0,
-        "renderTargets": 28,
+        "renderTargets": 29,
         "storageAttributes": 0,
         "storageAttributesSize": 0,
-        "textures": 65,
-        "texturesSize": 377876388,
-        "uniformBuffers": 215,
-        "uniformBuffersSize": 36640,
-        "total": 390263631
+        "textures": 71,
+        "texturesSize": 414030760,
+        "uniformBuffers": 238,
+        "uniformBuffersSize": 46000,
+        "total": 426435196
+      },
+      "sceneContent": {
+        "hasShip": true,
+        "binariesServedFromDisk": [
+          "/models/ocean_buoy/ocean_buoy.bin",
+          "/models/dutch_ship_medium/dutch_ship_medium.bin",
+          "/models/barrel_03/barrel_03.bin",
+          "/models/rock_07/rock_07.bin",
+          "/models/namaqualand_cliff_01/namaqualand_cliff_01.bin"
+        ]
+      },
+      "budget": {
+        "frameMs": 16.7,
+        "fps": 60
+      },
+      "verdict": "PASS",
+      "reasons": [],
+      "consoleErrors": []
+    },
+    {
+      "id": "webgpu-ultra",
+      "gate": false,
+      "requestedBackend": "webgpu",
+      "backend": "webgpu",
+      "tier": "ultra",
+      "preset": "skyPro",
+      "camera": {
+        "position": [
+          0,
+          14,
+          48
+        ],
+        "target": [
+          0,
+          2,
+          0
+        ]
+      },
+      "resolution": {
+        "width": 1600,
+        "height": 900,
+        "dpr": 1
+      },
+      "drawingBuffer": {
+        "width": 1600,
+        "height": 900,
+        "pixelRatio": 1
+      },
+      "adapter": {
+        "vendor": "nvidia",
+        "architecture": "blackwell",
+        "device": "",
+        "description": "",
+        "isFallbackAdapter": false,
+        "features": [
+          "bgra8unorm-storage",
+          "chromium-experimental-multi-draw-indirect",
+          "chromium-experimental-timestamp-query-inside-passes",
+          "clip-distances",
+          "core-features-and-limits",
+          "depth-clip-control",
+          "depth32float-stencil8",
+          "dual-source-blending",
+          "float32-blendable",
+          "float32-filterable",
+          "indirect-first-instance",
+          "primitive-index",
+          "rg11b10ufloat-renderable",
+          "shader-f16",
+          "subgroup-size-control",
+          "subgroups",
+          "texture-component-swizzle",
+          "texture-compression-bc",
+          "texture-compression-bc-sliced-3d",
+          "texture-formats-tier1",
+          "texture-formats-tier2",
+          "timestamp-query"
+        ],
+        "hasTimestampQuery": true
+      },
+      "gl": {
+        "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+        "vendor": "Google Inc. (NVIDIA)",
+        "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 5090 (0x00002B85) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+        "hasDisjointTimerQuery": true
+      },
+      "focus": {
+        "hasFocus": true,
+        "visibility": "visible"
+      },
+      "gpuTiming": {
+        "rendererPropertyExists": false,
+        "backendPropertyExists": true,
+        "enabledAtConstruction": false,
+        "deviceHasFeature": true,
+        "enabled": true,
+        "method": "WebGPU timestamp-query, summed over the frame (THREE.TimestampQuery.RENDER)",
+        "error": null
+      },
+      "pacing": {
+        "classification": "unthrottled",
+        "deliveredFps": 88.496,
+        "referenceFrameMs": 3.681,
+        "intervalMs": {
+          "samples": 262,
+          "min": 7.2,
+          "p50": 11.3,
+          "p90": 13.2,
+          "p95": 14,
+          "p99": 18.8,
+          "max": 22,
+          "mean": 11.486
+        },
+        "appLoopFrameMs": {
+          "samples": 262,
+          "min": 0.4,
+          "p50": 0.9,
+          "p90": 1.6,
+          "p95": 1.7,
+          "p99": 2.5,
+          "max": 4.2,
+          "mean": 1.016
+        }
+      },
+      "sampling": {
+        "warmupFrames": 150,
+        "requestedFrames": 600,
+        "samples": 600,
+        "gpuSamples": 600,
+        "gpuMisses": 0,
+        "truncated": false,
+        "stepSeconds": 0.016666666666666666,
+        "deterministicReset": {
+          "applied": true,
+          "time": 0,
+          "settleSteps": 90,
+          "error": null
+        },
+        "simulationTimeAtEnd": 12.5
+      },
+      "cpuFrameMs": {
+        "samples": 600,
+        "min": 1.9,
+        "p50": 3,
+        "p90": 6.2,
+        "p95": 7.2,
+        "p99": 8.5,
+        "max": 9.4,
+        "mean": 3.498
+      },
+      "gpuFrameMs": {
+        "samples": 600,
+        "min": 3.494,
+        "p50": 3.681,
+        "p90": 3.953,
+        "p95": 4.058,
+        "p99": 5.02,
+        "max": 5.517,
+        "mean": 3.747
+      },
+      "fps": {
+        "deliveredP50": 88.496,
+        "impliedByGpuP50": 271.665,
+        "impliedByCpuP50": 333.333
+      },
+      "render": {
+        "drawCalls": 152,
+        "triangles": 1496044,
+        "frameCalls": 115
+      },
+      "memory": {
+        "attributes": 55,
+        "attributesSize": 7301048,
+        "geometries": 20,
+        "indexAttributes": 9,
+        "indexAttributesSize": 7940484,
+        "indirectStorageAttributes": 0,
+        "indirectStorageAttributesSize": 0,
+        "programs": 55,
+        "programsSize": 437736,
+        "readbackBuffers": 0,
+        "readbackBuffersSize": 0,
+        "renderTargets": 29,
+        "storageAttributes": 0,
+        "storageAttributesSize": 0,
+        "textures": 71,
+        "texturesSize": 415931560,
+        "uniformBuffers": 238,
+        "uniformBuffersSize": 46000,
+        "total": 431656828
+      },
+      "sceneContent": {
+        "hasShip": true,
+        "binariesServedFromDisk": [
+          "/models/dutch_ship_medium/dutch_ship_medium.bin",
+          "/models/ocean_buoy/ocean_buoy.bin",
+          "/models/barrel_03/barrel_03.bin",
+          "/models/rock_07/rock_07.bin",
+          "/models/namaqualand_cliff_01/namaqualand_cliff_01.bin"
+        ]
+      },
+      "budget": {
+        "frameMs": 16.7,
+        "fps": 60
+      },
+      "verdict": "PASS",
+      "reasons": [],
+      "consoleErrors": []
+    },
+    {
+      "id": "webgpu-max",
+      "gate": false,
+      "requestedBackend": "webgpu",
+      "backend": "webgpu",
+      "tier": "max",
+      "preset": "skyPro",
+      "camera": {
+        "position": [
+          0,
+          14,
+          48
+        ],
+        "target": [
+          0,
+          2,
+          0
+        ]
+      },
+      "resolution": {
+        "width": 1600,
+        "height": 900,
+        "dpr": 1
+      },
+      "drawingBuffer": {
+        "width": 1600,
+        "height": 900,
+        "pixelRatio": 1
+      },
+      "adapter": {
+        "vendor": "nvidia",
+        "architecture": "blackwell",
+        "device": "",
+        "description": "",
+        "isFallbackAdapter": false,
+        "features": [
+          "bgra8unorm-storage",
+          "chromium-experimental-multi-draw-indirect",
+          "chromium-experimental-timestamp-query-inside-passes",
+          "clip-distances",
+          "core-features-and-limits",
+          "depth-clip-control",
+          "depth32float-stencil8",
+          "dual-source-blending",
+          "float32-blendable",
+          "float32-filterable",
+          "indirect-first-instance",
+          "primitive-index",
+          "rg11b10ufloat-renderable",
+          "shader-f16",
+          "subgroup-size-control",
+          "subgroups",
+          "texture-component-swizzle",
+          "texture-compression-bc",
+          "texture-compression-bc-sliced-3d",
+          "texture-formats-tier1",
+          "texture-formats-tier2",
+          "timestamp-query"
+        ],
+        "hasTimestampQuery": true
+      },
+      "gl": {
+        "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+        "vendor": "Google Inc. (NVIDIA)",
+        "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 5090 (0x00002B85) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+        "hasDisjointTimerQuery": true
+      },
+      "focus": {
+        "hasFocus": true,
+        "visibility": "visible"
+      },
+      "gpuTiming": {
+        "rendererPropertyExists": false,
+        "backendPropertyExists": true,
+        "enabledAtConstruction": false,
+        "deviceHasFeature": true,
+        "enabled": true,
+        "method": "WebGPU timestamp-query, summed over the frame (THREE.TimestampQuery.RENDER)",
+        "error": null
+      },
+      "pacing": {
+        "classification": "display-limited",
+        "deliveredFps": 58.14,
+        "referenceFrameMs": 6.066,
+        "intervalMs": {
+          "samples": 174,
+          "min": 13.8,
+          "p50": 17.2,
+          "p90": 18.9,
+          "p95": 19.6,
+          "p99": 20.9,
+          "max": 21.8,
+          "mean": 17.296
+        },
+        "appLoopFrameMs": {
+          "samples": 174,
+          "min": 0.4,
+          "p50": 0.7,
+          "p90": 0.9,
+          "p95": 1.1,
+          "p99": 1.2,
+          "max": 1.5,
+          "mean": 0.68
+        }
+      },
+      "sampling": {
+        "warmupFrames": 150,
+        "requestedFrames": 600,
+        "samples": 600,
+        "gpuSamples": 600,
+        "gpuMisses": 0,
+        "truncated": false,
+        "stepSeconds": 0.016666666666666666,
+        "deterministicReset": {
+          "applied": true,
+          "time": 0,
+          "settleSteps": 90,
+          "error": null
+        },
+        "simulationTimeAtEnd": 12.5
+      },
+      "cpuFrameMs": {
+        "samples": 600,
+        "min": 1.7,
+        "p50": 3.5,
+        "p90": 5.5,
+        "p95": 7,
+        "p99": 9.7,
+        "max": 12.3,
+        "mean": 3.816
+      },
+      "gpuFrameMs": {
+        "samples": 600,
+        "min": 5.418,
+        "p50": 6.066,
+        "p90": 8.207,
+        "p95": 8.426,
+        "p99": 8.72,
+        "max": 9.405,
+        "mean": 6.566
+      },
+      "fps": {
+        "deliveredP50": 58.14,
+        "impliedByGpuP50": 164.853,
+        "impliedByCpuP50": 285.714
+      },
+      "render": {
+        "drawCalls": 164,
+        "triangles": 2184568,
+        "frameCalls": 127
+      },
+      "memory": {
+        "attributes": 55,
+        "attributesSize": 9367736,
+        "geometries": 20,
+        "indexAttributes": 9,
+        "indexAttributesSize": 12071556,
+        "indirectStorageAttributes": 0,
+        "indirectStorageAttributesSize": 0,
+        "programs": 55,
+        "programsSize": 437736,
+        "readbackBuffers": 0,
+        "readbackBuffersSize": 0,
+        "renderTargets": 29,
+        "storageAttributes": 0,
+        "storageAttributesSize": 0,
+        "textures": 77,
+        "texturesSize": 584093960,
+        "uniformBuffers": 250,
+        "uniformBuffersSize": 46960,
+        "total": 606017948
       },
       "sceneContent": {
         "hasShip": true,
@@ -331,26 +1088,26 @@
       "pacing": {
         "classification": "unthrottled",
         "deliveredFps": 1250,
-        "referenceFrameMs": 1.934,
+        "referenceFrameMs": 1.911,
         "intervalMs": {
-          "samples": 3075,
+          "samples": 2893,
           "min": 0.4,
           "p50": 0.8,
-          "p90": 1.6,
-          "p95": 1.7,
-          "p99": 2,
-          "max": 9.6,
-          "mean": 0.976
+          "p90": 1.8,
+          "p95": 2,
+          "p99": 2.4,
+          "max": 6.6,
+          "mean": 1.037
         },
         "appLoopFrameMs": {
-          "samples": 3075,
+          "samples": 2893,
           "min": 0,
           "p50": 0.2,
           "p90": 0.3,
           "p95": 0.3,
-          "p99": 0.4,
-          "max": 0.9,
-          "mean": 0.213
+          "p99": 0.6,
+          "max": 1.3,
+          "mean": 0.222
         }
       },
       "sampling": {
@@ -375,23 +1132,23 @@
         "p50": 0.8,
         "p90": 1,
         "p95": 1.2,
-        "p99": 1.4,
-        "max": 1.8,
-        "mean": 0.812
+        "p99": 1.5,
+        "max": 1.7,
+        "mean": 0.794
       },
       "gpuFrameMs": {
         "samples": 600,
-        "min": 1.366,
-        "p50": 1.934,
-        "p90": 3.256,
-        "p95": 3.857,
-        "p99": 5.791,
-        "max": 6.584,
-        "mean": 2.191
+        "min": 0.637,
+        "p50": 1.911,
+        "p90": 2.494,
+        "p95": 2.697,
+        "p99": 3.239,
+        "max": 5.459,
+        "mean": 1.819
       },
       "fps": {
         "deliveredP50": 1250,
-        "impliedByGpuP50": 517.063,
+        "impliedByGpuP50": 523.286,
         "impliedByCpuP50": 1250
       },
       "render": {
@@ -408,17 +1165,207 @@
         "indirectStorageAttributes": 0,
         "indirectStorageAttributesSize": 0,
         "programs": 47,
-        "programsSize": 477384,
+        "programsSize": 479585,
         "readbackBuffers": 0,
         "readbackBuffersSize": 0,
         "renderTargets": 15,
         "storageAttributes": 0,
         "storageAttributesSize": 0,
         "textures": 58,
-        "texturesSize": 360601798,
+        "texturesSize": 379476166,
         "uniformBuffers": 102,
-        "uniformBuffersSize": 25984,
-        "total": 368437384
+        "uniformBuffersSize": 26400,
+        "total": 387314369
+      },
+      "sceneContent": {
+        "hasShip": true,
+        "binariesServedFromDisk": [
+          "/models/dutch_ship_medium/dutch_ship_medium.bin",
+          "/models/ocean_buoy/ocean_buoy.bin",
+          "/models/barrel_03/barrel_03.bin",
+          "/models/namaqualand_cliff_01/namaqualand_cliff_01.bin",
+          "/models/rock_07/rock_07.bin"
+        ]
+      },
+      "budget": {
+        "frameMs": 33.3,
+        "fps": 30
+      },
+      "verdict": "PASS",
+      "reasons": [],
+      "consoleErrors": []
+    },
+    {
+      "id": "webgl-high",
+      "gate": false,
+      "requestedBackend": "webgl",
+      "backend": "webgl",
+      "tier": "high",
+      "preset": "skyPro",
+      "camera": {
+        "position": [
+          0,
+          14,
+          48
+        ],
+        "target": [
+          0,
+          2,
+          0
+        ]
+      },
+      "resolution": {
+        "width": 1600,
+        "height": 900,
+        "dpr": 1
+      },
+      "drawingBuffer": {
+        "width": 1600,
+        "height": 900,
+        "pixelRatio": 1
+      },
+      "adapter": {
+        "vendor": "nvidia",
+        "architecture": "blackwell",
+        "device": "",
+        "description": "",
+        "isFallbackAdapter": false,
+        "features": [
+          "bgra8unorm-storage",
+          "chromium-experimental-multi-draw-indirect",
+          "chromium-experimental-timestamp-query-inside-passes",
+          "clip-distances",
+          "core-features-and-limits",
+          "depth-clip-control",
+          "depth32float-stencil8",
+          "dual-source-blending",
+          "float32-blendable",
+          "float32-filterable",
+          "indirect-first-instance",
+          "primitive-index",
+          "rg11b10ufloat-renderable",
+          "shader-f16",
+          "subgroup-size-control",
+          "subgroups",
+          "texture-component-swizzle",
+          "texture-compression-bc",
+          "texture-compression-bc-sliced-3d",
+          "texture-formats-tier1",
+          "texture-formats-tier2",
+          "timestamp-query"
+        ],
+        "hasTimestampQuery": true
+      },
+      "gl": {
+        "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+        "vendor": "Google Inc. (NVIDIA)",
+        "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 5090 (0x00002B85) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+        "hasDisjointTimerQuery": true
+      },
+      "focus": {
+        "hasFocus": true,
+        "visibility": "visible"
+      },
+      "gpuTiming": {
+        "rendererPropertyExists": false,
+        "backendPropertyExists": true,
+        "enabledAtConstruction": false,
+        "deviceHasFeature": true,
+        "enabled": true,
+        "method": "WebGL2 EXT_disjoint_timer_query_webgl2, summed over the frame",
+        "error": null
+      },
+      "pacing": {
+        "classification": "unthrottled",
+        "deliveredFps": 588.235,
+        "referenceFrameMs": 5.188,
+        "intervalMs": {
+          "samples": 845,
+          "min": 1,
+          "p50": 1.7,
+          "p90": 3.4,
+          "p95": 4.5,
+          "p99": 37,
+          "max": 174,
+          "mean": 3.551
+        },
+        "appLoopFrameMs": {
+          "samples": 845,
+          "min": 0.2,
+          "p50": 0.5,
+          "p90": 0.6,
+          "p95": 1.8,
+          "p99": 2.9,
+          "max": 33.6,
+          "mean": 0.627
+        }
+      },
+      "sampling": {
+        "warmupFrames": 150,
+        "requestedFrames": 600,
+        "samples": 600,
+        "gpuSamples": 600,
+        "gpuMisses": 0,
+        "truncated": false,
+        "stepSeconds": 0.016666666666666666,
+        "deterministicReset": {
+          "applied": true,
+          "time": 0,
+          "settleSteps": 90,
+          "error": null
+        },
+        "simulationTimeAtEnd": 12.5
+      },
+      "cpuFrameMs": {
+        "samples": 600,
+        "min": 1.3,
+        "p50": 1.8,
+        "p90": 2.2,
+        "p95": 2.3,
+        "p99": 2.9,
+        "max": 3.6,
+        "mean": 1.863
+      },
+      "gpuFrameMs": {
+        "samples": 600,
+        "min": 4.5,
+        "p50": 5.188,
+        "p90": 6.162,
+        "p95": 6.428,
+        "p99": 6.961,
+        "max": 11.141,
+        "mean": 5.335
+      },
+      "fps": {
+        "deliveredP50": 588.235,
+        "impliedByGpuP50": 192.753,
+        "impliedByCpuP50": 555.556
+      },
+      "render": {
+        "drawCalls": 140,
+        "triangles": 891726,
+        "frameCalls": 114
+      },
+      "memory": {
+        "attributes": 55,
+        "attributesSize": 6193592,
+        "geometries": 20,
+        "indexAttributes": 9,
+        "indexAttributesSize": 5200962,
+        "indirectStorageAttributes": 0,
+        "indirectStorageAttributesSize": 0,
+        "programs": 55,
+        "programsSize": 425475,
+        "readbackBuffers": 0,
+        "readbackBuffersSize": 0,
+        "renderTargets": 28,
+        "storageAttributes": 0,
+        "storageAttributesSize": 0,
+        "textures": 65,
+        "texturesSize": 396750756,
+        "uniformBuffers": 215,
+        "uniformBuffersSize": 39504,
+        "total": 408610289
       },
       "sceneContent": {
         "hasShip": true,
@@ -440,7 +1387,7 @@
     }
   ],
   "summary": {
-    "pass": 2,
+    "pass": 7,
     "fail": 0,
     "unverified": 0,
     "gates": [

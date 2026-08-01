@@ -9,6 +9,7 @@ import { AdaptiveQuality, QUALITY_TIERS, type QualityTier } from './core/Quality
 import { OceanSimulation } from './ocean/OceanSimulation';
 import { OceanMesh } from './ocean/OceanMesh';
 import { OceanMaterial } from './ocean/OceanMaterial';
+import { Reflections } from './ocean/Reflections';
 import { OceanSampler } from './ocean/Sampler';
 import { DEFAULT_SPECTRUM } from './ocean/Spectrum';
 import { Atmosphere, Clouds, Weather } from './sky';
@@ -53,6 +54,8 @@ class App {
 
   private simulation!: OceanSimulation;
   private water!: OceanMaterial;
+  /** Planar reflection. Null on the WebGL2 path, which keeps the analytic sky. */
+  private reflections: Reflections | null = null;
   private oceanMesh!: OceanMesh;
   private sampler!: OceanSampler;
 
@@ -146,6 +149,15 @@ class App {
       tileSizes: this.simulation.tileSizes,
     });
     this.scene.add(this.wake.debugObject);
+
+    // Planar reflection, on WebGPU only. Whether it exists is baked into the
+    // surface's node graph, so it is decided here, once, from the backend — and
+    // the WebGL2 path keeps the analytic sky reflection it always had, which is
+    // a coherent simpler image rather than a broken richer one.
+    if (this.backend === 'webgpu') {
+      this.reflections = new Reflections(QUALITY_TIERS[this.state.quality].reflectionScale);
+      this.scene.add(this.reflections.plane);
+    }
 
     boot.set(0.5, 'Compiling water shaders…');
     this.water = this.buildWaterMaterial();
@@ -483,6 +495,7 @@ class App {
       tileSizes: this.simulation.tileSizes,
       floorDepthNode: (worldPosition) => this.seafloor.depthNode(worldPosition),
       foam: { texture: this.wake.texture, extent: this.wake.extent },
+      reflectionNode: this.reflections?.node ?? null,
     });
   }
 
@@ -535,6 +548,8 @@ class App {
     // one — which is the whole point of having a declared fallback policy.
     this.water.setRefraction(this.backend === 'webgl' ? 0 : quality.refraction);
     this.water.setDepthRange(this.camera.far - this.camera.near);
+    this.water.setReflection(quality.reflection);
+    this.reflections?.setQuality(quality.reflectionScale);
 
     this.applyPreset();
   }
@@ -813,6 +828,7 @@ class App {
     this.ship?.dispose();
     this.props?.dispose();
     this.seafloor?.dispose();
+    this.reflections?.dispose();
     this.assets?.dispose();
     this.captureTarget?.dispose();
     this.renderer?.dispose();

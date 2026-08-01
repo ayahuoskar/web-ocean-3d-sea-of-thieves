@@ -30,6 +30,7 @@ interface CapturedPixels {
 /** Only the parts of `window.__ocean` the tests use. */
 interface OceanHooks {
   backend: 'webgpu' | 'webgl';
+  scene: { getObjectByName(name: string): { visible: boolean } | undefined };
   director: { snapToTarget(): void; currentMode: string };
   wake: {
     emit(x: number, z: number, heading: number, speed: number, width: number): void;

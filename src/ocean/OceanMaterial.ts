@@ -75,6 +75,16 @@ export interface OceanMaterialInputs {
    * fixed, so it is baked in as a constant rather than carried as a uniform.
    */
   foam?: { texture: THREE.Texture; extent: number } | null;
+  /**
+   * Planar reflection texture node, from `ocean/Reflections`.
+   *
+   * Omitted rather than mixed out where it is not wanted. Whether the reflection
+   * exists is a *backend* decision, known once at startup and never revisited,
+   * so it belongs in the graph's construction — leaving the node in and weighting
+   * it to zero would still pay for the second view of the scene every frame.
+   * Per-tier strength, which does change at runtime, is a uniform.
+   */
+  reflectionNode?: unknown | null;
 }
 
 /**
@@ -152,6 +162,11 @@ export class OceanMaterial {
    */
   private readonly uDepthRange = uniform(40000);
 
+  /** How much of the planar reflection reaches the surface, 0..1. */
+  private readonly uReflectionAmount = uniform(1);
+  /** Screen-space offset applied to the reflection lookup, at unit distance. */
+  private readonly uReflectionDistortion = uniform(0.09);
+
   /** World centre of the foam accumulation buffer. See `setFoamCenter`. */
   private readonly uFoamCenter = uniform(new THREE.Vector2());
   /** How strongly accumulated foam reads against the surface, 0..1. */
@@ -226,6 +241,12 @@ export class OceanMaterial {
     this.uDepthRange.value = Math.max(1, metres);
   }
 
+  /** Per-tier reflection strength. No effect when built without a reflection. */
+  setReflection(amount: number, distortion = 0.09): void {
+    this.uReflectionAmount.value = Math.max(0, Math.min(1, amount));
+    this.uReflectionDistortion.value = Math.max(0, distortion);
+  }
+
   /** Must be called with the ocean mesh's world translation every frame. */
   setWorldOffset(x: number, z: number): void {
     this.uOffsetX.value = x;
@@ -293,6 +314,7 @@ export class OceanMaterial {
     const { displacementTextures, derivativeTextures, tileSizes } = inputs;
     const floorDepth = inputs.floorDepthNode ?? null;
     const foam = inputs.foam ?? null;
+    const planar = (inputs.reflectionNode ?? null) as any;
 
     // The graph is always built for the maximum cascade count; `setCascades`
     // decides how many of them contribute.
@@ -450,10 +472,46 @@ export class OceanMaterial {
         .mul(backlight.mul(crest).mul(this.uScatterStrength))
         .toVar();
 
-      // --- sky reflection ------------------------------------------------------
+      // --- reflection ----------------------------------------------------------
+      // The analytic sky gradient is kept as the base layer, not replaced. It is
+      // what fills the horizon, where a planar reflection has nothing to offer
+      // and where its texture runs out anyway; the mirrored scene is composited
+      // over it wherever it actually contains something.
       const reflectDir = viewDir.negate().reflect(n).toVar();
       const skyBlend = reflectDir.y.clamp(0, 1).sqrt().toVar();
       const reflection = mix(this.uHorizonColor, this.uSkyColor, skyBlend).toVar();
+
+      if (planar !== null) {
+        // The mirror is a flat plane; the water is not. Offsetting the lookup by
+        // the surface normal is what makes the reflection ripple with the waves
+        // rather than sitting on them like a decal. Scaled down with distance for
+        // the same reason the refraction offset is: a fixed screen-space offset
+        // is metres at the horizon and millimetres underfoot.
+        const offset = n.xz
+          .mul(this.uReflectionDistortion)
+          .div(viewDistance.mul(0.05).add(1))
+          .toVar();
+        const rawUv = screenUV.add(offset).toVar();
+        const mirrored = planar.sample(viewportSafeUV(rawUv)).toVar();
+
+        // Faded out where the lookup leaves the reflection, rather than clamped
+        // into it. A mirrored camera only covers what is in front of it, so near
+        // the horizon the offset walks the lookup off the edge — and clamping
+        // there streaks the last row of texels sideways, which showed up as a
+        // dark band lying along the horizon.
+        const rEdge = rawUv.min(rawUv.oneMinus()).toVar();
+        const inFrame = rEdge.x.min(rEdge.y).smoothstep(0, 0.05).clamp(0, 1).toVar();
+
+        // Also faded as the view flattens. At a grazing angle the reflected ray
+        // leaves the plane almost immediately and the planar approximation stops
+        // describing anything; the analytic sky is the better answer there, and
+        // it is also what the eye expects, since distant water reads as sky.
+        const facing = nDotV.smoothstep(0.02, 0.22).toVar();
+
+        reflection.assign(
+          mix(reflection, mirrored.rgb, inFrame.mul(facing).mul(this.uReflectionAmount)),
+        );
+      }
 
       // --- sun specular (GGX) ---------------------------------------------------
       const halfVector = normalize(viewDir.add(sunDir)).toVar();
