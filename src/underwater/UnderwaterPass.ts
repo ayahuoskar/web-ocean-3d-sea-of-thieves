@@ -91,7 +91,7 @@ export const DEFAULT_UNDERWATER_PARAMS: UnderwaterParams = {
  * on the seafloor are the same evaluation of the same field — see
  * `underwater/Caustics`.
  */
-export type CausticsField = (worldPosition: unknown) => unknown;
+export type CausticsField = (worldPosition: unknown, lod?: unknown) => unknown;
 
 /** Hard ceiling on the tap count, for sanity rather than for compilation. */
 const MAX_GODRAY_STEPS = 64;
@@ -117,13 +117,22 @@ export class UnderwaterPass {
   /**
    * Brightness of light scattered back out of the medium toward the viewer.
    *
-   * 0.55, down from 0.95. The inscatter term replaces the scene in proportion to
-   * how much the water absorbed, so a bright medium does not just tint the view
-   * — it *is* the view at any distance, and at 0.95 the submerged scene was a
-   * flat teal wash with the seafloor eleven metres away completely invisible.
-   * Real water darkens as it thickens; it does not converge on a bright fog.
+   * 0.36, down from 0.95 and then from 0.55. The inscatter term replaces the
+   * scene in proportion to how much the water absorbed, so a bright medium does
+   * not just tint the view — it *is* the view at any distance. At 0.95 the
+   * submerged scene was a flat teal wash with the seafloor eleven metres away
+   * completely invisible; 0.55 still left a hull at ten metres reading as a faint
+   * smudge against a milky field, which is what a viewer described as washed out.
+   *
+   * Real water darkens as it thickens. It does not converge on a bright fog: the
+   * limiting colour looking into open water from below is the small fraction of
+   * downwelling light that scatters back, and against a sunlit surface directly
+   * above, that is a *dark* blue-green, not a pale one. What should be bright is
+   * the shafts and the surface itself, both of which are added separately — so
+   * lowering this raises the contrast between them and the medium rather than
+   * darkening the frame as a whole.
    */
-  private readonly uAmbient = uniform(0.55);
+  private readonly uAmbient = uniform(0.36);
   private readonly uCameraDepth = uniform(4);
 
   // --- volumetric shafts ---------------------------------------------------
@@ -150,6 +159,14 @@ export class UnderwaterPass {
   /** World Y of the mean water surface the shafts descend from. */
   private readonly uSeaLevel = uniform(0);
   private readonly uCaustics = uniform(DEFAULT_UNDERWATER_PARAMS.causticsStrength);
+  /**
+   * World size of one texel of the caustics field, metres.
+   *
+   * Pushed in rather than assumed, because it is the caustics module that owns
+   * its resolution and extent, and the mip level the march asks for is only
+   * correct relative to the real texel size.
+   */
+  private readonly uCausticsTexel = uniform(320 / 768);
 
   // --- ray reconstruction ---------------------------------------------------
   // A post pass draws with the post-processor's own orthographic quad camera, so
@@ -194,7 +211,7 @@ export class UnderwaterPass {
   build(scenePassColor: unknown, sceneDepth: unknown, causticsNode: CausticsField): unknown {
     const colorNode: any = scenePassColor;
     const depthNode: any = sceneDepth;
-    const caustics = causticsNode as (worldPosition: any) => any;
+    const caustics = causticsNode as (worldPosition: any, lod?: any) => any;
 
     if (colorNode === null || colorNode === undefined) {
       throw new Error('UnderwaterPass.build: scenePassColor is required.');
@@ -265,22 +282,15 @@ export class UnderwaterPass {
 
         If(this.uGodRayStrength.greaterThan(0.0001), () => {
           // Rebuild the world-space view ray for this pixel.
-          // NDC from the screen uv. **y is flipped, and that is not cosmetic.**
-        //
-        // Screen uv runs top-down on the WebGPU backend and is explicitly flipped
-        // to run top-down on the WebGL one, while NDC y runs bottom-up on both —
-        // the same asymmetry `clipToScreenUV` in `ScreenSpaceReflection` exists to
-        // absorb. Taking `suv.y * 2 - 1` therefore builds a ray pointing *down*
-        // wherever the pixel looks up.
-        //
-        // It did not read as a broken ray, which is why it survived. It read as
-        // fog: the sky was handed a downward ray into an exponential layer that
-        // only thickens downward, so it integrated the whole column and every
-        // preset rendered as a white-out, while the water was handed an upward
-        // ray, left the layer immediately and got no fog at all. The give-away
-        // was that the result did not respond to density — a 175x sweep produced
-        // the same white, because both ends of it were saturated.
-        const ndc = vec2(suv.x.mul(2).sub(1), suv.y.mul(-2).add(1)).toVar('uwNdc');
+          //
+          // **NDC y is flipped, and that is not cosmetic.** Screen uv runs
+          // top-down on the WebGPU backend and is explicitly flipped to run
+          // top-down on the WebGL one, while NDC y runs bottom-up on both — the
+          // same asymmetry `clipToScreenUV` in `ScreenSpaceReflection` exists to
+          // absorb. Taking `suv.y * 2 - 1` builds a ray pointing *down* wherever
+          // the pixel looks up, which sent every shaft the wrong way and was the
+          // reason the god rays never converged on the sun.
+          const ndc = vec2(suv.x.mul(2).sub(1), suv.y.mul(-2).add(1)).toVar('uwNdc');
           const viewH = this.uInvProjection.mul(vec4(ndc.x, ndc.y, -1, 1)).toVar('uwViewH');
           const viewDir = normalize(viewH.xyz.div(viewH.w)).toVar('uwViewDir');
           const worldDir = normalize(
@@ -292,6 +302,29 @@ export class UnderwaterPass {
           const axial = viewDir.z.negate().max(1e-3).toVar('uwAxial');
           const march = min(dist.div(axial), this.uShaftRange).toVar('uwMarch');
           const stepLength = march.mul(this.uInvSteps).toVar('uwStep');
+
+          // Mip level matched to the march's own sampling rate.
+          //
+          // `log2(stepLength / texel)` is the level at which one texel of the
+          // caustics field spans one march step — the Nyquist level for this
+          // sampler. Below it the march is point-sampling a signal it cannot
+          // resolve, and because the start offset is an interleaved gradient
+          // noise the resulting variance arrives as a stationary screen-space
+          // lattice rather than as noise. That grid over the seafloor was the
+          // symptom.
+          //
+          // Backed off to 0.75 of the full level. The exact figure is correct for
+          // a box filter and this is a trilinear one, which over-blurs slightly;
+          // three quarters keeps the shafts' filaments legible while removing the
+          // lattice. Clamped at zero so a short march never asks for a sharper
+          // level than the base.
+          const shaftLod = stepLength
+            .div(this.uCausticsTexel)
+            .max(1)
+            .log2()
+            .mul(0.75)
+            .max(0)
+            .toVar('uwShaftLod');
 
           // Start the march at a per-pixel fraction of a step. Without it every
           // pixel samples the same set of planes and the shafts show up as
@@ -316,7 +349,7 @@ export class UnderwaterPass {
             // surface down to the sample, so this is the light *arriving* here.
             // What it does not know is how much survives the trip back to the
             // eye, which is the second term.
-            const arriving = caustics(p).mul(submerged);
+            const arriving = caustics(p, shaftLod).mul(submerged);
             const toEye = exp(this.uSigma.mul(t.negate()));
 
             acc.addAssign(arriving.mul(toEye.g).mul(stepLength));
@@ -380,6 +413,11 @@ export class UnderwaterPass {
    * The scene camera. Required for depth linearisation and for projecting the
    * sun; see the backend note at the top of this file.
    */
+  /** World metres per texel of the caustics field. See `uCausticsTexel`. */
+  setCausticsTexelSize(metres: number): void {
+    this.uCausticsTexel.value = Math.max(1e-3, metres);
+  }
+
   setCamera(camera: THREE.PerspectiveCamera | THREE.OrthographicCamera): void {
     this.camera = camera;
   }

@@ -90,6 +90,7 @@ export class Caustics {
    * though there is no assign stack yet.
    */
   private readonly fn: any;
+  private readonly fnLod: any;
   /** The web as a function of surface xz, before depth shear and extinction. */
   private readonly surfaceFn: any;
 
@@ -175,7 +176,20 @@ export class Caustics {
     this.target = new THREE.RenderTarget(resolution, resolution, {
       type: THREE.HalfFloatType,
       format: THREE.RGBAFormat,
-      minFilter: THREE.LinearFilter,
+      // Mipmapped, and the god-ray march depends on it.
+      //
+      // The march steps several metres between samples while the field's texel
+      // is 0.42 m, so it point-samples a signal it is nowhere near resolving.
+      // With no mip chain to fall back on, the result is variance — and because
+      // the march's start offset is an interleaved gradient noise, that variance
+      // arrives as a *stationary screen-space lattice* rather than as noise,
+      // which is what showed up as a fine grid over the seafloor.
+      //
+      // Implicit LOD cannot fix it either: inside the loop, adjacent pixels are
+      // sampling positions metres apart, so the derivative the hardware infers is
+      // meaningless. The consumer has to ask for the level that matches its own
+      // sampling rate, which is what `intensityNode`'s `lod` is for.
+      minFilter: THREE.LinearMipmapLinearFilter,
       magFilter: THREE.LinearFilter,
       // Clamped, not repeated. The pattern is anchored in the world; wrapping it
       // would tile a visibly identical web onto the far side of the region.
@@ -183,7 +197,7 @@ export class Caustics {
       wrapT: THREE.ClampToEdgeWrapping,
       depthBuffer: false,
       stencilBuffer: false,
-      generateMipmaps: false,
+      generateMipmaps: true,
     });
     this.texture = this.target.texture;
 
@@ -199,7 +213,27 @@ export class Caustics {
      * Sampling entry point: the same quantity the old analytic version returned,
      * but as one texture fetch plus two closed forms.
      */
-    this.fn = Fn(([worldPosition]: any) => {
+    // Two variants of one field: one that lets the hardware pick the mip level
+    // from its own derivatives, and one that is told the level explicitly.
+    //
+    // A surface being shaded wants the first. Its neighbouring fragments are
+    // neighbouring points on the floor, so the derivative is exactly the right
+    // footprint — and at a grazing view over the seafloor that footprint spans
+    // many texels, which is the case that was aliasing into a visible lattice.
+    // Forcing level 0 there defeated the mip chain entirely.
+    //
+    // The volumetric march wants the second. Its neighbouring fragments sample
+    // points metres apart along different rays, so the inferred derivative is
+    // meaningless; it has to state the level its own step length implies.
+    this.fn = Fn(([worldPosition]: any) => this.field(worldPosition, null));
+    this.fnLod = Fn(([worldPosition, lod]: any) => this.field(worldPosition, lod));
+
+    this.setSunDirection(new THREE.Vector3(0.35, 0.62, 0.7));
+  }
+
+  /** Shared body of both sampler variants. `lod` null selects implicit LOD. */
+  private field(worldPosition: any, lod: any): any {
+    return (() => {
       const p = vec3(worldPosition).toVar('causticsP');
 
       // Depth below the surface; above water there is nothing to cast.
@@ -215,13 +249,12 @@ export class Caustics {
       const edge = coord.min(coord.oneMinus()).toVar();
       const inside = edge.x.min(edge.y).smoothstep(0, 0.03).clamp(0, 1).toVar();
 
-      const web = texture(this.texture, coord).r.mul(inside).toVar();
+      const sampled = texture(this.texture, coord);
+      const web = (lod === null ? sampled : sampled.level(lod)).r.mul(inside).toVar();
       const fade = exp(below.mul(this.uDepthFade).negate());
 
       return web.mul(this.uStrength).mul(fade);
-    });
-
-    this.setSunDirection(new THREE.Vector3(0.35, 0.62, 0.7));
+    })();
   }
 
   /**
@@ -260,9 +293,14 @@ export class Caustics {
    * be shared by any number of materials.
    *
    * @param worldPosition A `vec3` node — typically `positionWorld`.
+   * @param lod Explicit mip level. 0 for a surface being shaded, where the
+   *   hardware's own derivatives would be right anyway; higher for a consumer
+   *   that samples far apart, such as the volumetric march. Passing the level
+   *   that matches the caller's sampling rate is what turns aliasing into blur,
+   *   and blur is what a shaft sampled every few metres should look like.
    */
-  intensityNode(worldPosition: unknown): unknown {
-    return this.fn(worldPosition);
+  intensityNode(worldPosition: unknown, lod: unknown = null): unknown {
+    return lod === null ? this.fn(worldPosition) : this.fnLod(worldPosition, lod);
   }
 
   setParams(p: Partial<CausticsParams>): void {

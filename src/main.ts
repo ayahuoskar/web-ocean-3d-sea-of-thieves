@@ -229,6 +229,9 @@ class App {
     // Rebuilds the sand shader once, so it happens here at setup and never in a
     // frame path.
     this.seafloor.setCaustics(this.caustics.intensityNode(positionWorld));
+    // The volumetric march picks its caustics mip level from this, so it has to
+    // be told after the field exists — see `uCausticsTexel`.
+    this.underwater.setCausticsTexelSize(this.caustics.extent / this.caustics.resolution);
 
     // `RenderPipeline`, not the `PostProcessing` alias: the latter is deprecated
     // as of r183 and warns on every boot.
