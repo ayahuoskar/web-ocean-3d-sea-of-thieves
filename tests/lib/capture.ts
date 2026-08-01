@@ -34,7 +34,10 @@ interface OceanHooks {
   setRainOverride(intensity: number | null): void;
   director: { snapToTarget(): void; currentMode: string };
   /** The surface material. Only the knobs a test drives are declared. */
-  water: { setWakeDisplacement(value: number): void };
+  water: {
+    setWakeDisplacement(value: number): void;
+    setReflection(amount: number): void;
+  };
   wake: {
     emit(x: number, z: number, heading: number, speed: number, width: number): void;
     setCenter(x: number, z: number): void;
@@ -56,6 +59,9 @@ interface OceanHooks {
   setShipInput(throttle: number, rudder: number): void;
   shipControlsEnabled(): boolean;
   touchControlsVisible(): boolean;
+  /** Reflection layers. Null on the WebGL2 path, which has neither. */
+  reflections: { setQuality(scale: number): void } | null;
+  ssr: { setStrength(amount: number): void } | null;
   surfaceWetness(): number;
   shipState(): {
     throttle: number;

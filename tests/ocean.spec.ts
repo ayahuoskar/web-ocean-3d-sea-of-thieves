@@ -73,6 +73,31 @@ test.describe('boot and rendering', () => {
       () => (window as unknown as { __ocean: { backend: string } }).__ocean.backend,
     );
     expect(backend).toBe('webgl');
+
+    // "still renders" has to mean a frame was rendered.
+    //
+    // This asserted the backend string and an empty console and stopped there,
+    // which is satisfied by an app that boots cleanly onto WebGL2 and then draws
+    // a flat blue rectangle — or nothing at all. Read the frame and require
+    // structure in it.
+    const frame = await capture(page);
+    let min = 255;
+    let max = 0;
+    let sum = 0;
+    for (let i = 0; i < frame.data.length; i += 4) {
+      const luma =
+        0.2126 * frame.data[i] + 0.7152 * frame.data[i + 1] + 0.0722 * frame.data[i + 2];
+      if (luma < min) min = luma;
+      if (luma > max) max = luma;
+      sum += luma;
+    }
+    const mean = sum / (frame.data.length / 4);
+    expect(mean, 'the WebGL2 frame is black').toBeGreaterThan(4);
+    expect(
+      max - min,
+      `the WebGL2 frame spans only ${(max - min).toFixed(1)} levels of luminance, ` +
+        'which is a cleared buffer rather than a rendered scene',
+    ).toBeGreaterThan(40);
   });
 });
 
@@ -408,6 +433,80 @@ test.describe('interaction', () => {
       `hiding the ship changed the water by mean ΔE ${score.meanDeltaE.toFixed(3)}; ` +
         'a value near zero means the surface is reflecting a sky gradient, not the scene',
     ).toBeGreaterThan(0.4);
+  });
+
+  /**
+   * The screen-space trace has to carry its own weight.
+   *
+   * The test above cannot show that. Planar reflection and SSR are composited,
+   * not chosen between — they fail in opposite places, which is why engines layer
+   * them — and both are driven from one tier number. So "hiding the ship changes
+   * the water" is satisfied by the planar layer alone, and would pass with the
+   * trace completely broken.
+   *
+   * This turns the planar layer off and asks the same question of what is left.
+   * SSR is the layer that has the *displaced* surface and can put the hull's
+   * reflection on the wave under it, which one mirror plane at y = 0 cannot do at
+   * all, so it is the layer worth having a separate assertion for.
+   */
+  test('screen-space reflection alone still reflects the hull', async ({ page }) => {
+    await page.goto('/');
+    await waitForOcean(page);
+
+    test.skip(
+      !(await hasGpuAdapter(page)),
+      'no GPU adapter: the software path cannot render these frames in time',
+    );
+    const backend = await page.evaluate(() => window.__ocean.backend);
+    test.skip(backend !== 'webgpu', 'SSR is a WebGPU-only path by policy');
+
+    await setState(page, { preset: 'seaOfThieves', quality: 'high' });
+
+    const hasSsr = await page.evaluate(() => window.__ocean.ssr !== null);
+    expect(hasSsr, 'no SSR instance on the WebGPU path, so this test proves nothing').toBe(true);
+
+    // Planar off, screen-space at full strength. `applyQuality` drives both from
+    // the tier, so these have to be set after the state change, not before.
+    await page.evaluate(() => {
+      window.__ocean.water.setReflection(0);
+      window.__ocean.ssr!.setStrength(1);
+    });
+
+    const look = async () => {
+      await page.evaluate(() => window.__ocean.resetDeterministic(28, 90));
+      await setCamera(page, [28, 4.5, 22], [0, 3, 0]);
+      return capture(page);
+    };
+
+    const withShip = await look();
+    await page.evaluate(() => {
+      const ship = window.__ocean.scene.getObjectByName('ship');
+      if (ship) ship.visible = false;
+    });
+    const withoutShip = await look();
+    await page.evaluate(() => {
+      const ship = window.__ocean.scene.getObjectByName('ship');
+      if (ship) ship.visible = true;
+    });
+
+    const half = Math.floor(withShip.height / 2);
+    const crop = (image: RgbaImage): RgbaImage => ({
+      width: image.width,
+      height: image.height - half,
+      data: image.data.slice(half * image.width * 4),
+    });
+
+    const score = compareImages(crop(withShip), crop(withoutShip));
+
+    // Lower bar than the layered test on purpose: SSR only reflects what is
+    // already on screen, so it recovers less of the hull than the mirrored view
+    // does. Still far above the measured run-to-run noise floor of ~0.04.
+    expect(
+      score.meanDeltaE,
+      `with the planar layer off, hiding the ship changed the water by mean ΔE ` +
+        `${score.meanDeltaE.toFixed(3)}; near zero means the screen-space trace is ` +
+        'contributing nothing and the layered test above was passing on planar alone',
+    ).toBeGreaterThan(0.15);
   });
 
   /**
@@ -869,17 +968,47 @@ test.describe('performance', () => {
         return { textures: info.textures, geometries: info.geometries };
       });
 
-    for (const quality of ['low', 'high', 'low', 'high']) await setState(page, { quality });
+    const cycle = async (times: number) => {
+      for (let i = 0; i < times; i++) {
+        await setState(page, { quality: 'low' });
+        await setState(page, { quality: 'high' });
+      }
+    };
+
+    // Warm-up, so lazily-created internal targets exist before anything is
+    // counted.
+    await cycle(2);
     const baseline = await sample();
 
-    for (let i = 0; i < 4; i++) {
-      await setState(page, { quality: 'low' });
-      await setState(page, { quality: 'high' });
-    }
+    await cycle(4);
+    const mid = await sample();
+
+    await cycle(8);
     const after = await sample();
 
-    // Allow a little slack for lazily-created internal targets, but a real leak
-    // grows linearly with the number of cycles and will blow past this.
+    /*
+     * Measured as a *rate*, not as a total.
+     *
+     * The previous version ran 8 transitions and allowed 8 extra textures, which
+     * is one per transition — so the exact leak this test exists to catch, a
+     * single texture per tier change, sat precisely on the limit and passed. That
+     * is not a slack allowance, it is the failure mode written down as the
+     * budget.
+     *
+     * Two segments instead. The second is twice as long as the first, so a
+     * per-cycle leak has to show at least twice the growth; anything created once
+     * and reused shows up in the first segment and not the second. The absolute
+     * bound stays as a backstop for a leak so large it saturates both.
+     */
+    const firstSegment = mid.textures - baseline.textures;
+    const secondSegment = after.textures - mid.textures;
+
+    expect(
+      secondSegment,
+      `textures grew by ${firstSegment} over 4 cycles and ${secondSegment} over the next 8; ` +
+        'growth that continues at rate is a leak, growth that stops is lazy allocation',
+    ).toBeLessThanOrEqual(Math.max(2, firstSegment));
+
     expect(after.textures).toBeLessThanOrEqual(baseline.textures + 8);
     expect(after.geometries).toBeLessThanOrEqual(baseline.geometries + 4);
   });

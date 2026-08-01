@@ -664,7 +664,23 @@ export class VolumetricFog {
     const kSafe = select(k.lessThan(0), magnitude.negate(), magnitude).toVar();
 
     const decay = exp(kSafe.negate().min(EXP_CEIL));
-    const tau = sigmaOrigin.mul(t).mul(float(1).sub(decay)).div(kSafe);
+    const tau = sigmaOrigin.mul(t).mul(float(1).sub(decay)).div(kSafe).toVar();
+
+    // Cap at the constant-density integral, for the same reason `sigmaAt` caps
+    // the density it returns.
+    //
+    // The medium this pass models does not keep thickening below the layer's
+    // base -- `sigmaAt` clamps to `uSigmaBase` there, because a fog bank sitting
+    // on the sea does not become arbitrarily dense underneath it. The closed form
+    // had no such cap, so for a downward ray the in-scattering the march summed
+    // and the transmittance multiplying it described two different media, and the
+    // disagreement grew exponentially with how far below the base the ray ran.
+    //
+    // `sigma_b * t` is the exact optical depth of the capped medium once the ray
+    // is fully inside the constant-density region, and a strict upper bound
+    // before that, so the minimum is right where it matters and conservative
+    // where it does not.
+    tau.assign(tau.min(this.uSigmaBase.mul(t)));
 
     return exp(tau.clamp(0, TAU_CEIL).negate());
   }

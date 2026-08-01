@@ -44,8 +44,16 @@ export interface ComparisonResult {
    */
   meanDeltaE: number;
   /**
-   * 95th-percentile ΔE94. Sensitive to a localised change that the mean drowns:
-   * a broken reflection on the hull is 2% of the frame and invisible to a mean.
+   * 95th-percentile ΔE94. Catches a change concentrated in a *large minority* of
+   * the frame — more than 5% of pixels — that the mean averages away.
+   *
+   * It does **not** catch a small localised change, and an earlier version of
+   * this comment claimed it did: "a broken reflection on the hull is 2% of the
+   * frame and invisible to a mean". That is true of the mean and equally true of
+   * p95, which by construction ignores everything outside the worst 5%. A 2%
+   * region moves p99 and the max, not this. `fractionAbove` is the number that
+   * actually answers it, and it is the one to tighten if a small-region
+   * regression needs gating.
    */
   p95DeltaE: number;
   /** Largest single-pixel ΔE94. Diagnostic only — one bad pixel is not a gate. */

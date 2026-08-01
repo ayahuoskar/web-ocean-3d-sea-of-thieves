@@ -1074,6 +1074,17 @@ class App {
         camera: this.camera,
         director: this.director,
         simulation: this.simulation,
+        /**
+         * Reflection layers, exposed so a test can isolate them.
+         *
+         * The two are composited, not chosen between, and the tier drives both
+         * from one number — so a test that only asks "does hiding the ship change
+         * the water" is satisfied by the planar layer alone and would pass with
+         * the screen-space trace completely broken. Null on the WebGL2 path,
+         * which has neither.
+         */
+        reflections: this.reflections,
+        ssr: this.ssr,
         sampler: this.sampler,
         atmosphere: this.atmosphere,
         loop: this.loop,

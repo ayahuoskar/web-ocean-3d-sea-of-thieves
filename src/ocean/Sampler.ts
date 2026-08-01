@@ -91,7 +91,7 @@ export class OceanSampler {
           READBACK_SIZE,
           READBACK_SIZE,
         );
-        this.slices[i].data = toFloat32(raw);
+        this.slices[i].data = decodeInto(raw, this.slices[i]);
       }
       this.everResolved = true;
     } catch {
@@ -183,21 +183,44 @@ function sampleBilinear(data: Float32Array, u: number, v: number, out: Float32Ar
 }
 
 /**
+ * Decodes a readback into the slice's own buffer, allocating at most once.
+ *
  * Render-target readbacks come back typed to match the attachment. Half-float
  * targets yield a Uint16Array of raw IEEE-754 binary16 bit patterns, which must
  * be decoded — reading them as integers silently produces values in the tens of
  * thousands instead of the tenths of a metre they represent.
+ *
+ * The decode used to allocate its output every call. At the default 64x64 slice
+ * that is 64 kB per cascade per readback, and the readback runs every frame for
+ * every cascade — around 190 kB of garbage a frame at three cascades, in a
+ * project whose stated performance policy is no per-frame allocation. It never
+ * showed up in the frame time because the cost is deferred to whenever the
+ * collector decides to run, which is exactly what makes this kind of allocation
+ * worth removing rather than measuring.
+ *
+ * The buffer is grown, never shrunk, and reused across readbacks; a tier change
+ * that alters the slice size reallocates once and then settles.
  */
-function toFloat32(raw: ArrayBufferView): Float32Array {
-  if (raw instanceof Float32Array) return raw;
-  if (raw instanceof Uint16Array) {
-    const out = new Float32Array(raw.length);
-    for (let i = 0; i < raw.length; i++) out[i] = halfToFloat(raw[i]);
-    return out;
+function decodeInto(raw: ArrayBufferView, slice: CascadeSlice): Float32Array {
+  // A Float32 target needs no decode, but it must still be copied: the array the
+  // renderer hands back is not guaranteed to outlive the next readback.
+  const source =
+    raw instanceof Float32Array || raw instanceof Uint16Array
+      ? raw
+      : (raw as unknown as ArrayLike<number>);
+  const length = source.length;
+
+  let out = slice.data;
+  if (out === null || out.length !== length) {
+    out = new Float32Array(length);
+    slice.data = out;
   }
-  const view = raw as unknown as ArrayLike<number>;
-  const out = new Float32Array(view.length);
-  for (let i = 0; i < view.length; i++) out[i] = view[i];
+
+  if (source instanceof Uint16Array) {
+    for (let i = 0; i < length; i++) out[i] = halfToFloat(source[i]);
+  } else {
+    for (let i = 0; i < length; i++) out[i] = source[i];
+  }
   return out;
 }
 

@@ -649,6 +649,7 @@ function looksLikeSoftware(...strings) {
  */
 function verdictFor(config, measurement, environment, options) {
   const reasons = [];
+  const consoleErrors = measurement.consoleErrors ?? [];
   const budget = BUDGETS[config.backend];
 
   if (options.headless) reasons.push('headless run — rAF pacing and GPU scheduling are not representative');
@@ -679,13 +680,37 @@ function verdictFor(config, measurement, environment, options) {
     reasons.push(`GPU timestamp queries unavailable${measurement.timing.error ? ` (${measurement.timing.error})` : ''}`);
   }
   if (measurement.cpuSamples.length < MIN_SAMPLES) {
-    reasons.push(`only ${measurement.cpuSamples.length} samples, need ${MIN_SAMPLES} for percentiles`);
+    reasons.push(
+      `only ${measurement.cpuSamples.length} CPU samples, need ${MIN_SAMPLES} for percentiles`,
+    );
+  }
+  // The GPU count is the one that matters, and it was never checked.
+  //
+  // The verdict is computed from `summarise(measurement.gpuSamples)`, but only
+  // the CPU sample count was gated -- so a run where timestamp resolution
+  // silently failed for all but a handful of frames would report a p50 over five
+  // samples and PASS on it. `gpuMisses` was recorded in the artefact and read by
+  // nobody.
+  if (measurement.gpuSamples.length < MIN_SAMPLES) {
+    reasons.push(
+      `only ${measurement.gpuSamples.length} GPU samples (${measurement.gpuMisses} frames ` +
+        `returned no timestamp), need ${MIN_SAMPLES} for percentiles`,
+    );
   }
   // A frame cost measured without the hero object in it is not this project's
   // frame cost, however clean the distribution looks.
   if (!measurement.hasShip) reasons.push('scene content incomplete: the ship did not load');
   if (!measurement.reset.applied) {
     reasons.push(`world state was not pinned (${measurement.reset.error}) — the sample is not reproducible`);
+  }
+  // Console errors were collected, written into the artefact, and never allowed
+  // to affect the verdict. A configuration that threw on every frame could
+  // therefore report a clean PASS -- and a frame that fails early is a *fast*
+  // frame, so the error made the number look better rather than worse.
+  if (consoleErrors.length > 0) {
+    const shown = consoleErrors.slice(0, 3).join(' | ');
+    const more = consoleErrors.length > 3 ? ` (+${consoleErrors.length - 3} more)` : '';
+    reasons.push(`${consoleErrors.length} console error(s) during the sample: ${shown}${more}`);
   }
 
   if (reasons.length > 0) return { verdict: 'UNVERIFIED', reasons, budget };
@@ -763,7 +788,7 @@ async function runConfiguration(browser, baseUrl, config, options) {
     );
 
     const { verdict, reasons, budget } = verdictFor(
-      config, { ...raw, pacing }, environment, options,
+      config, { ...raw, pacing, consoleErrors }, environment, options,
     );
 
     return {
