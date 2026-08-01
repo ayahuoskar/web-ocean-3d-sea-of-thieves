@@ -243,10 +243,40 @@ test.describe('canonical shots', () => {
       }
     });
 
+    // Identical modulo 8-bit quantisation, rather than byte-exact.
+    //
+    // Byte-exactness is the wrong bar for a GPU render. Measured on the
+    // reference stack, two captures of a genuinely unchanged frame differ in
+    // about twenty bytes out of 3.7 million, always by exactly 1 — pixels whose
+    // colour lands on a rounding boundary and falls either side of it between
+    // renders. Demanding zero makes this test fail for reasons that have nothing
+    // to do with the UI.
+    //
+    // It still detects what it exists to detect. UI bleeding into a capture is
+    // a solid region of glass panel and text: tens of thousands of pixels,
+    // differing by tens or hundreds of levels. Nothing about the bound below
+    // could absorb that.
+    let differing = 0;
+    let maxDelta = 0;
+    for (let i = 0; i < withUi.data.length; i++) {
+      const delta = Math.abs(withUi.data[i] - withoutUi.data[i]);
+      if (delta > 0) {
+        differing++;
+        if (delta > maxDelta) maxDelta = delta;
+      }
+    }
+    const differingFraction = differing / withUi.data.length;
+
     expect(
-      Buffer.compare(Buffer.from(withUi.data), Buffer.from(withoutUi.data)),
-      'hiding the overlay changed the captured frame, so the shots contain UI',
-    ).toBe(0);
+      maxDelta,
+      `hiding the overlay changed a pixel by ${maxDelta} levels, which is more than ` +
+        'rounding — the shots contain UI',
+    ).toBeLessThanOrEqual(1);
+    expect(
+      differingFraction,
+      `hiding the overlay changed ${differing} of ${withUi.data.length} bytes ` +
+        `(${(100 * differingFraction).toFixed(4)}%) — the shots contain UI`,
+    ).toBeLessThan(0.0001);
   });
 
   for (const shot of SHOTS) {

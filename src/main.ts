@@ -305,27 +305,37 @@ class App {
 
     const previous = this.renderer.getRenderTarget();
     this.renderer.setRenderTarget(this.captureTarget);
-    // Rendered twice, and the first result discarded.
+    // Exactly one render, and that matters.
     //
-    // The wave displacement and derivative targets carry generated mip chains,
-    // and the surface samples them trilinearly with anisotropy — so the mid- and
-    // far-field shading reads from mips built by the same frame that draws them.
-    // The first render after a simulation step can therefore sample a chain that
-    // is still being built, which showed up as a several-percent brightness
-    // swing across everything past the near field while the foreground stayed
-    // bit-identical. The second render always sees a settled chain.
-    await this.post.renderAsync();
+    // This used to render twice and discard the first, to let the wave textures'
+    // generated mip chains settle. That became actively wrong once the surface
+    // started sampling the framebuffer for refraction: the second render's
+    // backdrop can contain the first render's output, so the image feeds back
+    // into itself and two consecutive captures of an unchanged world no longer
+    // agree — which is precisely the property the whole visual harness rests on.
+    //
+    // Settling is the caller's job instead, and the harness already does it by
+    // discarding warm-up captures before the one it keeps.
     await this.post.renderAsync();
     this.renderer.setRenderTarget(previous);
 
-    const raw = await this.renderer.readRenderTargetPixelsAsync(
+    const raw = (await this.renderer.readRenderTargetPixelsAsync(
       this.captureTarget,
       0,
       0,
       width,
       height,
-    );
-    return { width, height, data: new Uint8Array(raw.buffer ?? raw) };
+    )) as ArrayBufferView;
+
+    // Copied to an exactly-sized buffer, honouring the view's offset and length.
+    //
+    // Not `new Uint8Array(raw.buffer)`: the readback allocation is pooled and can
+    // be larger than the image, so taking the whole backing store appends stale
+    // bytes from a previous read. The pixels are identical either way, but the
+    // trailing garbage is not, and it made two captures of an unchanged frame
+    // compare unequal — a false regression in every byte-exact check.
+    const view = new Uint8Array(raw.buffer, raw.byteOffset, width * height * 4);
+    return { width, height, data: new Uint8Array(view) };
   }
 
   /**
@@ -479,17 +489,21 @@ class App {
     this.sampler.rebuild();
 
     // The wave textures are recreated by `resize`, so the material's bindings are
-    // stale — rebuild the surface against the new ones.
+    // stale — re-point them.
     //
-    // Every input the first build received must be passed again. `floorDepthNode`
-    // in particular: without it the surface silently falls back to a view-angle
-    // approximation of the water column, losing the shallow turquoise and the
-    // shelf-break edge for the rest of the session. That regression is invisible
-    // to typecheck, so `buildWaterMaterial` is the single place both paths call.
-    const previous = this.water;
-    this.water = this.buildWaterMaterial();
-    this.oceanMesh.mesh.material = this.water.material;
-    previous.dispose();
+    // Rebuilding the material instead, as this used to, was wrong in three ways.
+    // Every input had to be re-supplied and one silently was not, which is how
+    // `floorDepthNode` went missing after any tier change. The node graph
+    // recompiled mid-session, which is exactly the in-gameplay shader compile the
+    // performance work is meant to avoid. And once the surface began sampling the
+    // framebuffer for refraction, each rebuild leaked the backdrop texture that
+    // came with it — measured at forty textures over eight tier changes, which
+    // the leak test caught.
+    this.water.setCascades(
+      this.simulation.displacementTextures,
+      this.simulation.derivativeTextures,
+      this.simulation.tileSizes,
+    );
 
     this.scene.remove(this.oceanMesh.mesh);
     this.oceanMesh.dispose();
@@ -509,6 +523,13 @@ class App {
     // Particle budget is a live setting, not a construction-time one; `setCount`
     // rebuilds the instanced geometry against the new tier.
     this.particles.setCount(quality.underwaterParticles);
+
+    // WebGL2 gets the analytic path regardless of tier. The backdrop and depth
+    // reads are the least portable part of the surface, and a fallback that
+    // renders a coherent simpler image beats one that renders a broken richer
+    // one — which is the whole point of having a declared fallback policy.
+    this.water.setRefraction(this.backend === 'webgl' ? 0 : quality.refraction);
+    this.water.setDepthRange(this.camera.far - this.camera.near);
 
     this.applyPreset();
   }

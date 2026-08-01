@@ -3,15 +3,20 @@ import {
   Fn,
   cameraPosition,
   float,
+  linearDepth,
   mix,
   normalize,
   positionLocal,
   positionWorld,
+  screenUV,
   texture,
   uniform,
   vec2,
   vec3,
   vec4,
+  viewportDepthTexture,
+  viewportSafeUV,
+  viewportSharedTexture,
 } from 'three/tsl';
 
 export interface WaterAppearance {
@@ -83,8 +88,24 @@ export interface OceanMaterialInputs {
  *   specular      GGX highlight for the sun disc
  *   foam          Jacobian-driven whitecaps composited on top
  */
+/**
+ * Cascade slots the shader is always built with.
+ *
+ * Fixed rather than derived from the active tier, so a tier change re-points
+ * texture bindings instead of recompiling the graph. Matches `CASCADES` in
+ * `Spectrum`; a tier asking for more than this would silently lose bands, so the
+ * two are asserted equal at construction.
+ */
+const MAX_CASCADES = 3;
+
 export class OceanMaterial {
   readonly material: THREE.MeshBasicNodeMaterial;
+
+  // Cascade bindings, re-pointed by `setCascades` rather than rebuilt.
+  private readonly displacementNodes: any[] = [];
+  private readonly derivativeNodes: any[] = [];
+  private readonly uTileSizes: any[] = [];
+  private readonly uCascadeWeights: any[] = [];
 
   // --- appearance ----------------------------------------------------------
   private readonly uDeepColor = uniform(new THREE.Color(DEFAULT_APPEARANCE.deepColor));
@@ -113,6 +134,24 @@ export class OceanMaterial {
   private readonly uOffsetX = uniform(0);
   private readonly uOffsetZ = uniform(0);
 
+  /** Metres of screen-space offset applied to the refracted sample, at unit distance. */
+  private readonly uRefractionStrength = uniform(0.22);
+  /**
+   * How much of the transmitted colour comes from the real scene behind the
+   * surface, as opposed to the analytic body colour. 0 restores the pre-refraction
+   * look exactly, which is what the WebGL2 fallback and Low tier use.
+   */
+  private readonly uRefractionAmount = uniform(1);
+  /**
+   * Camera far minus near, in metres.
+   *
+   * `linearDepth` normalises to the 0..1 range the camera spans, so a depth
+   * difference has to be scaled by that span to become a thickness. Pushed as a
+   * uniform rather than read from a camera node because this material is also
+   * built for a WebGL2 path where the two must agree exactly.
+   */
+  private readonly uDepthRange = uniform(40000);
+
   /** World centre of the foam accumulation buffer. See `setFoamCenter`. */
   private readonly uFoamCenter = uniform(new THREE.Vector2());
   /** How strongly accumulated foam reads against the surface, 0..1. */
@@ -122,6 +161,18 @@ export class OceanMaterial {
     this.material = new THREE.MeshBasicNodeMaterial();
     this.material.side = THREE.DoubleSide; // visible from below when submerged
     this.material.name = 'ocean-water';
+
+    // Transparent so the surface is drawn *after* the opaque scene and can read
+    // it as a backdrop — that read is the whole basis of refraction, and before
+    // the opaque pass there is simply nothing behind the water to sample.
+    //
+    // Depth is still written, unusually for a transparent material, because
+    // everything downstream depends on the water having a position: the
+    // underwater pass linearises this depth to bound its shaft march, and without
+    // it the shafts would run straight through the surface to the sky.
+    this.material.transparent = true;
+    this.material.depthWrite = true;
+
     this.build(inputs);
   }
 
@@ -156,6 +207,25 @@ export class OceanMaterial {
     this.uDisplacementScale.value = value;
   }
 
+  /**
+   * Per-tier refraction policy.
+   *
+   * `amount` 0 drops the surface back to the analytic body colour without
+   * recompiling anything — the node graph still contains the backdrop sample, but
+   * its contribution is mixed out. That is the WebGL2 and Low-tier path: the
+   * depth-buffer read is the part that is least portable, and a tier that cannot
+   * afford it gets a coherent image rather than a broken one.
+   */
+  setRefraction(amount: number, strength = 0.22): void {
+    this.uRefractionAmount.value = Math.max(0, Math.min(1, amount));
+    this.uRefractionStrength.value = Math.max(0, strength);
+  }
+
+  /** Camera far minus near, in metres. See `uDepthRange`. */
+  setDepthRange(metres: number): void {
+    this.uDepthRange.value = Math.max(1, metres);
+  }
+
   /** Must be called with the ocean mesh's world translation every frame. */
   setWorldOffset(x: number, z: number): void {
     this.uOffsetX.value = x;
@@ -187,11 +257,53 @@ export class OceanMaterial {
 
   // ----------------------------------------------------------------- internals
 
+  /**
+   * Rebinds the wave field without rebuilding the shader.
+   *
+   * A quality change recreates the simulation's render targets, so the surface
+   * has to be pointed at the new ones. It used to be reconstructed wholesale for
+   * that, which was wrong three ways: the node graph recompiled mid-session,
+   * every rebuild had to remember to re-supply every input (and one of them
+   * silently didn't — see `floorDepthNode`), and once the surface began sampling
+   * the framebuffer for refraction each rebuild leaked the backdrop texture that
+   * came with it, measured at forty textures over eight tier changes.
+   *
+   * The graph is therefore built once for the maximum cascade count and the
+   * texture nodes are re-pointed here. Cascades the current tier does not use are
+   * bound to a live texture and weighted to zero — binding nothing is not an
+   * option, since a sampler with no texture is a validation error even when its
+   * result is multiplied away.
+   */
+  setCascades(
+    displacementTextures: THREE.Texture[],
+    derivativeTextures: THREE.Texture[],
+    tileSizes: number[],
+  ): void {
+    const active = Math.min(displacementTextures.length, MAX_CASCADES);
+    for (let i = 0; i < MAX_CASCADES; i++) {
+      const source = Math.min(i, active - 1);
+      this.displacementNodes[i].value = displacementTextures[source];
+      this.derivativeNodes[i].value = derivativeTextures[source];
+      this.uTileSizes[i].value = tileSizes[source];
+      this.uCascadeWeights[i].value = i < active ? 1 : 0;
+    }
+  }
+
   private build(inputs: OceanMaterialInputs): void {
     const { displacementTextures, derivativeTextures, tileSizes } = inputs;
-    const cascadeCount = displacementTextures.length;
     const floorDepth = inputs.floorDepthNode ?? null;
     const foam = inputs.foam ?? null;
+
+    // The graph is always built for the maximum cascade count; `setCascades`
+    // decides how many of them contribute.
+    const cascadeCount = MAX_CASCADES;
+    for (let i = 0; i < MAX_CASCADES; i++) {
+      const source = Math.min(i, displacementTextures.length - 1);
+      this.displacementNodes.push(texture(displacementTextures[source]) as any);
+      this.derivativeNodes.push(texture(derivativeTextures[source]) as any);
+      this.uTileSizes.push(uniform(tileSizes[source]));
+      this.uCascadeWeights.push(uniform(i < displacementTextures.length ? 1 : 0));
+    }
 
     // ------------------------------------------------------------- vertex stage
     this.material.positionNode = Fn(() => {
@@ -208,9 +320,13 @@ export class OceanMaterial {
       // hundred metres their wavelength is well under a pixel, and keeping them
       // only produces aliasing that no amount of MSAA will fix.
       for (let i = 0; i < cascadeCount; i++) {
-        const sample = texture(displacementTextures[i], worldXZ.div(tileSizes[i])).toVar();
+        const sample = this.displacementNodes[i]
+          .sample(worldXZ.div(this.uTileSizes[i]))
+          .toVar();
         displacement.addAssign(
-          sample.xyz.mul(cascadeGeometryFade(groundDistance, i, cascadeCount)),
+          sample.xyz
+            .mul(cascadeGeometryFade(groundDistance, i, cascadeCount))
+            .mul(this.uCascadeWeights[i]),
         );
       }
 
@@ -232,8 +348,12 @@ export class OceanMaterial {
       // would double-count independent bands and wash the whole surface white.
       const fold = float(1).toVar();
       for (let i = 0; i < cascadeCount; i++) {
-        const d = texture(derivativeTextures[i], worldPos.xz.div(tileSizes[i])).toVar();
-        const fade = cascadeShadingFade(viewDistance, i, cascadeCount);
+        const d = this.derivativeNodes[i].sample(worldPos.xz.div(this.uTileSizes[i])).toVar();
+        // Weight folds into the fade, so a cascade the tier does not use
+        // contributes no slope and — via `mix` toward 1 — no folding either.
+        const fade = cascadeShadingFade(viewDistance, i, cascadeCount).mul(
+          this.uCascadeWeights[i],
+        );
         slope.addAssign(vec2(d.x, d.y).mul(fade));
         fold.assign(fold.min(mix(float(1), d.z, fade)));
       }
@@ -256,21 +376,69 @@ export class OceanMaterial {
       const fresnel = f0.add(float(1).sub(f0).mul(fresnelPow)).clamp(0, 1).toVar();
 
       // --- transmitted colour -------------------------------------------------
-      // Path length through the water column. With a seafloor we can use the real
-      // thickness, refracted along the view ray, which is what makes shallows read
-      // as turquoise-over-sand and a drop-off read as a hard edge. Without one we
-      // fall back to a view-angle approximation: grazing views look through more
-      // water, so the body darkens toward the horizon.
-      const pathLength = (
+      //
+      // What the eye sees looking *into* the water: the scene behind the surface,
+      // refracted, attenuated by the column of water it crossed, and progressively
+      // replaced by light scattered back out of that column.
+      //
+      // The thickness of the column is measured, not assumed. Reading the depth
+      // buffer behind the surface gives the real distance from the surface to
+      // whatever is under it, so a hull a metre down stays legible while the
+      // seafloor thirty metres down does not — and a drop-off reads as an edge
+      // because it genuinely is one. The seafloor heightfield remains the fallback
+      // for the WebGL2 path and for anything the depth buffer cannot answer for.
+
+      // Surface normals bend the view ray. Scaled down with distance, because the
+      // same lateral offset at the horizon is a whole screen away, and scaled by
+      // depth so shallow water distorts less than deep — which is what stops the
+      // distortion from tearing at a shoreline.
+      const distortion = n.xz
+        .mul(this.uRefractionStrength)
+        .div(viewDistance.mul(0.06).add(1))
+        .toVar();
+      const refractedUv: any = (viewportSafeUV(screenUV.add(distortion)) as any).toVar();
+
+      // Depth of the scene behind the surface, and of the surface itself.
+      // `linearDepth` is normalised over the near/far range, so the difference is
+      // scaled back into metres by `uDepthRange` before it means anything.
+      const surfaceZ: any = (linearDepth() as any).toVar();
+      const behindZ: any = (linearDepth(viewportDepthTexture(refractedUv)) as any).toVar();
+
+      // A refracted sample can land on something *in front of* the water — the
+      // hull's own topsides, most obviously — and pulling that colour underwater
+      // smears it down the wave face. Where that happens, fall back to the
+      // unrefracted sample, which is behind the surface by construction.
+      const straightZ: any = (linearDepth(viewportDepthTexture(screenUV)) as any).toVar();
+      const valid: any = behindZ.greaterThan(surfaceZ).toVar();
+      const sampleUv: any = valid.select(refractedUv, screenUV).toVar();
+      const backdropZ: any = valid.select(behindZ, straightZ).toVar();
+
+      // Column thickness. Two independent estimates, and the smaller wins: the
+      // depth buffer knows about the hull and the props, the heightfield knows
+      // about seafloor the depth buffer may never have rendered.
+      const bufferThickness: any = backdropZ.sub(surfaceZ).max(0).mul(this.uDepthRange).toVar();
+      const pathLength: any = (
         floorDepth === null
-          ? float(1).div(nDotV).mul(3.5)
-          : // Snell-ish stretch: the ray bends toward vertical entering water, so
-            // the column is travelled at less than the naive 1/cos(theta).
-            floorDepth(worldPos).max(0).mul(float(1).div(nDotV.max(0.25)))
+          ? bufferThickness
+          : bufferThickness.min(
+              floorDepth(worldPos).max(0).mul(float(1).div(nDotV.max(0.25))),
+            )
       ).toVar();
 
-      const absorption = this.uExtinction.mul(pathLength).negate().exp().toVar();
-      const bodyColor = mix(this.uDeepColor, this.uShallowColor, absorption as never).toVar();
+      const absorption: any = this.uExtinction.mul(pathLength).negate().exp().toVar();
+
+      // Beer–Lambert on the refracted scene colour, plus the light scattered out
+      // of the column toward the eye. The two are complementary: whatever the
+      // water absorbed on the way through is what it has to give back as body
+      // colour, which is why `absorption` weights one and its complement the
+      // other rather than both being tuned independently.
+      const refracted: any = viewportSharedTexture(sampleUv).rgb.toVar();
+      const inscatter: any = mix(this.uDeepColor, this.uShallowColor, absorption).toVar();
+      const bodyColor: any = mix(
+        inscatter,
+        refracted,
+        absorption.mul(this.uRefractionAmount),
+      ).toVar();
 
       // --- subsurface scattering ---------------------------------------------
       // Crests transmit light when the sun is behind them.

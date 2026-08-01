@@ -170,29 +170,29 @@ GPU frame time, milliseconds, from timestamp queries:
 
 | Configuration | p50 | p90 | p95 | p99 | min | max | implied FPS | Verdict |
 |---|---|---|---|---|---|---|---|---|
-| WebGPU · Low | 0.26 | 0.27 | 0.28 | 0.70 | 0.25 | 2.64 | 3802 | PASS |
-| WebGPU · Medium | 1.32 | 1.71 | 1.84 | 3.74 | 1.26 | 4.44 | 756 | PASS |
-| **WebGPU · High** | **2.89** | 3.39 | 5.21 | 5.52 | 2.34 | 5.89 | **347** | **PASS** |
-| WebGPU · Ultra | 4.10 | 6.29 | 6.50 | 6.94 | 3.49 | 7.37 | 244 | PASS |
-| WebGPU · Max | 6.25 | 8.32 | 8.60 | 9.00 | 5.55 | 9.97 | 160 | PASS |
-| **WebGL2 · Low** | **0.66** | 1.42 | 1.73 | 2.98 | 0.28 | 3.54 | **1506** | **PASS** |
-| WebGL2 · High | 4.29 | 5.40 | 5.77 | 6.47 | 3.18 | 7.04 | 233 | PASS |
+| WebGPU · Low | 0.30 | 0.31 | 0.31 | 0.32 | 0.27 | 0.82 | 3344 | PASS |
+| WebGPU · Medium | 1.45 | 1.49 | 1.50 | 1.98 | 1.38 | 2.54 | 691 | PASS |
+| **WebGPU · High** | **2.55** | 2.82 | 3.04 | 3.96 | 2.44 | 5.06 | **392** | **PASS** |
+| WebGPU · Ultra | 3.88 | 4.25 | 4.37 | 4.80 | 3.51 | 5.63 | 258 | PASS |
+| WebGPU · Max | 5.96 | 7.95 | 8.24 | 8.52 | 5.41 | 8.63 | 168 | PASS |
+| **WebGL2 · Low** | **1.73** | 2.40 | 2.66 | 3.13 | 0.62 | 4.02 | **579** | **PASS** |
+| WebGL2 · High | 4.56 | 5.92 | 6.38 | 7.05 | 3.21 | 8.37 | 219 | PASS |
 
 Scene cost and CPU frame time for the same runs:
 
 | Configuration | CPU p50 | CPU p99 | Draw calls | Render passes | Triangles | Textures | Render targets | Programs | Texture bytes |
 |---|---|---|---|---|---|---|---|---|---|
-| WebGPU · Low | 1.0 | 3.0 | 47 | 36 | 282 961 | 38 | 14 | 39 | 273 MB |
-| WebGPU · Medium | 1.8 | 4.9 | 94 | 69 | 485 569 | 47 | 21 | 47 | 283 MB |
-| WebGPU · High | 2.5 | 7.3 | 138 | 113 | 633 229 | 54 | 27 | 51 | 323 MB |
-| WebGPU · Ultra | 2.5 | 6.9 | 138 | 113 | 817 677 | 54 | 27 | 51 | 323 MB |
-| WebGPU · Max | 2.7 | 7.3 | 150 | 125 | 1 161 945 | 54 | 27 | 51 | 476 MB |
-| WebGL2 · Low | 0.7 | 1.7 | 47 | 36 | 282 961 | 38 | 14 | 39 | 273 MB |
-| WebGL2 · High | 1.6 | 3.0 | 138 | 113 | 633 229 | 54 | 27 | 51 | 323 MB |
+| WebGPU · Low | 0.7 | 2.2 | 49 | 37 | 332 306 | 58 | 15 | 43 | 344 MB |
+| WebGPU · Medium | 1.4 | 3.2 | 96 | 70 | 596 450 | 67 | 22 | 51 | 353 MB |
+| WebGPU · High | 3.4 | 42.1 | 140 | 114 | 891 726 | 74 | 28 | 55 | 393 MB |
+| WebGPU · Ultra | 2.6 | 8.4 | 140 | 114 | 1 260 622 | 74 | 28 | 55 | 393 MB |
+| WebGPU · Max | 2.8 | 9.3 | 152 | 126 | 1 949 146 | 74 | 28 | 55 | 546 MB |
+| WebGL2 · Low | 0.8 | 1.5 | 49 | 37 | 332 306 | 58 | 15 | 43 | 344 MB |
+| WebGL2 · High | 1.9 | 3.1 | 140 | 114 | 891 726 | 74 | 28 | 55 | 393 MB |
 
 Reading these:
 
-- **Both gates pass with a wide margin on this GPU.** WebGPU High costs 2.89 ms
+- **Both gates pass with a wide margin on this GPU.** WebGPU High costs 2.55 ms
   against a 16.7 ms budget — 5.8× headroom; WebGL2 Low costs 0.66 ms against
   33.3 ms. That is an RTX 5090 result and it should be read as one; see
   Limitations.

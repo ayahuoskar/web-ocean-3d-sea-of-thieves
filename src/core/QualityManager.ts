@@ -25,6 +25,12 @@ export interface QualitySettings {
   /** Raymarch steps for underwater god rays; 0 disables them. */
   godRaySteps: number;
   underwaterParticles: number;
+  /**
+   * How much of the water's transmitted colour is the real refracted scene, as
+   * opposed to the analytic depth-graded body colour. 0 disables the backdrop and
+   * depth-buffer reads entirely.
+   */
+  refraction: number;
 }
 
 export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
@@ -37,6 +43,9 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     cloudSteps: 0,
     godRaySteps: 0,
     underwaterParticles: 400,
+    // No backdrop or depth-buffer read at all. This is the WebGL2 floor, where
+    // the analytic body colour has to carry the water on its own.
+    refraction: 0,
   },
   medium: {
     fftSize: 128,
@@ -47,6 +56,9 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     cloudSteps: 12,
     godRaySteps: 12,
     underwaterParticles: 1200,
+    // Partial: the scene shows through, but the analytic body still carries most
+    // of the colour, which hides the coarser depth resolution at this tier.
+    refraction: 0.6,
   },
   high: {
     fftSize: 256,
@@ -57,6 +69,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     cloudSteps: 24,
     godRaySteps: 24,
     underwaterParticles: 2400,
+    refraction: 1,
   },
   ultra: {
     fftSize: 256,
@@ -67,6 +80,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     cloudSteps: 40,
     godRaySteps: 40,
     underwaterParticles: 4000,
+    refraction: 1,
   },
   max: {
     fftSize: 512,
@@ -77,6 +91,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     cloudSteps: 64,
     godRaySteps: 56,
     underwaterParticles: 6000,
+    refraction: 1,
   },
 };
 
