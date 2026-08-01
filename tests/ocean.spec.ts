@@ -468,6 +468,65 @@ test.describe('interaction', () => {
     });
   });
 
+  /**
+   * Rain has to reach the water.
+   *
+   * It was an overlay: a camera-following particle volume that disturbed
+   * nothing. The distinguishing test is not whether rain is drawn — it always
+   * was — but whether the *surface* changes when it falls, and whether that
+   * change goes away when the rain stops.
+   */
+  test('rain disturbs the ocean surface, and the surface recovers', async ({ page }) => {
+    await page.goto('/');
+    await waitForOcean(page);
+
+    test.skip(
+      !(await hasGpuAdapter(page)),
+      'no GPU adapter: the software path cannot render these frames in time',
+    );
+
+    await setState(page, { preset: 'storm', quality: 'high' });
+
+    // Low over the water, where impact rings are decimetre features and legible.
+    // The rain particles themselves are excluded by hiding them, so what is
+    // being measured is the surface and not the curtain in front of it.
+    const look = async (rain: number) =>
+      page.evaluate(async (intensity) => {
+        const ocean = window.__ocean;
+        const weather = ocean.scene.getObjectByName('weather');
+        if (weather) weather.visible = false;
+        // Before the reset, not after. The settle run is what fills the foam
+        // buffer, so setting the rate afterwards would settle the world under
+        // the *previous* call's rain and then photograph it under this one's.
+        ocean.setRainOverride(intensity);
+        await ocean.resetDeterministic(35, 60);
+        ocean.setCamera(0, 4.5, 26, 0, 1.5, 0);
+        await ocean.step(1 / 60, 30);
+        await ocean.capturePixels();
+        await ocean.capturePixels();
+        return ocean.capturePixels();
+      }, rain);
+
+    const dry = await look(0);
+    const wet = await look(1);
+    const dryAgain = await look(0);
+
+    const falling = compareImages(dry as never, wet as never);
+    const recovered = compareImages(dry as never, dryAgain as never);
+
+    expect(
+      falling.meanDeltaE,
+      `rain changed the surface by mean ΔE ${falling.meanDeltaE.toFixed(3)}; ` +
+        'near zero means impacts are not reaching the water',
+    ).toBeGreaterThan(0.25);
+
+    expect(
+      recovered.meanDeltaE,
+      `the surface did not return to its dry state after the rain stopped ` +
+        `(mean ΔE ${recovered.meanDeltaE.toFixed(3)})`,
+    ).toBeLessThan(falling.meanDeltaE * 0.25);
+  });
+
   test('camera modes switch via keyboard', async ({ page }) => {
     await page.goto('/');
     await waitForOcean(page);

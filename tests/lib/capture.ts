@@ -31,6 +31,7 @@ interface CapturedPixels {
 interface OceanHooks {
   backend: 'webgpu' | 'webgl';
   scene: { getObjectByName(name: string): { visible: boolean } | undefined };
+  setRainOverride(intensity: number | null): void;
   director: { snapToTarget(): void; currentMode: string };
   wake: {
     emit(x: number, z: number, heading: number, speed: number, width: number): void;

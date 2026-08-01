@@ -119,6 +119,10 @@ export class Wake {
    * proportionally less for everything else.
    */
   private readonly uBreakRate = uniform(0.5);
+  /** Rain rate, 0..1. */
+  private readonly uRainAgitation = uniform(0);
+  /** Foam per second deposited by rain at full intensity. */
+  private readonly uRainRate = uniform(0.22);
 
   /**
    * Wave derivative bindings for the breaking-crest term.
@@ -223,6 +227,11 @@ export class Wake {
       this.uTileSizes[i].value = tileSizes[source];
       this.uCascadeWeights[i].value = i < active ? 1 : 0;
     }
+  }
+
+  /** Rain rate, 0..1, driving the agitation term. */
+  setRainAgitation(intensity: number): void {
+    this.uRainAgitation.value = Math.max(0, Math.min(1, intensity));
   }
 
   /** Tunes how readily the surface is treated as breaking, and how fast it foams. */
@@ -425,6 +434,15 @@ export class Wake {
       const breaking = fold.smoothstep(this.uBreakThreshold, this.uBreakThreshold.sub(0.22));
       deposit.addAssign(breaking.mul(this.uBreakRate).mul(this.uStep));
 
+      // Rain agitation. Heavy rain aerates a surface on its own — it goes white
+      // in a downpour whether or not the waves are steep enough to break — so
+      // this is a separate, unconditional contribution rather than a bias on the
+      // fold threshold. Broken up so it reads as a stipple rather than a wash.
+      const stipple = rainStipple(world.mul(0.55)).toVar();
+      deposit.addAssign(
+        this.uRainAgitation.mul(stipple.mul(0.7).add(0.3)).mul(this.uRainRate).mul(this.uStep),
+      );
+
       for (let i = 0; i < MAX_EMITTERS; i++) {
         const slot = this.emitters[i];
         const amount = slot.params.x;
@@ -467,6 +485,19 @@ export class Wake {
     return material;
   }
 }
+
+/**
+ * Cheap world-space stipple for the rain agitation term.
+ *
+ * A plain hash rather than interpolated noise: rain-aerated water is a spray of
+ * discrete bright specks, and the hard edges a hash produces are closer to that
+ * than a smooth field would be. It is also evaluated once per texel of the foam
+ * buffer rather than per screen pixel, so it can afford to be blunt.
+ */
+const rainStipple = /*@__PURE__*/ Fn(([p]: [any]) => {
+  const h = vec2(p.dot(vec2(127.1, 311.7)), p.dot(vec2(269.5, 183.3))).toVar();
+  return h.sin().mul(43758.5453).fract().x;
+});
 
 function createCopyMaterial(source: THREE.Texture): THREE.NodeMaterial {
   const material = new THREE.NodeMaterial();

@@ -65,6 +65,10 @@ export class Weather {
   private readonly uSnowSpeed = uniform(1.1);
   /** Horizontal metres of drift per metre of fall — the wind shear. */
   private readonly uShear = uniform(new THREE.Vector2(0.16, 0.05));
+  /** Streak length multiplier, rising with rain rate. */
+  private readonly uStreakLength = uniform(1);
+  /** Streak tilt in radians, derived from the shear so the two cannot disagree. */
+  private readonly uStreakTilt = uniform(-Math.atan(0.16));
 
   constructor() {
     this.object = new THREE.Object3D();
@@ -102,6 +106,10 @@ export class Weather {
 
   getKind(): WeatherKind {
     return this.kind;
+  }
+
+  getIntensity(): number {
+    return this.intensity;
   }
 
   setIntensity(v: number): void {
@@ -153,9 +161,24 @@ export class Weather {
     this.rainGeometry.instanceCount = Math.round(RAIN_COUNT * ramp);
     this.snowGeometry.instanceCount = Math.round(SNOW_COUNT * ramp);
 
-    this.uRainOpacity.value = 0.18 + 0.5 * this.intensity;
+    this.uRainOpacity.value = 0.16 + 0.44 * this.intensity;
     this.uSnowOpacity.value = 0.35 + 0.5 * this.intensity;
     this.uRainSpeed.value = 18 + 12 * this.intensity;
+    // Harder rain falls faster and therefore streaks longer, on top of the
+    // per-drop variation the material already applies.
+    this.uStreakLength.value = 0.85 + 0.85 * this.intensity;
+  }
+
+  /**
+   * Sets the wind shear the precipitation falls through.
+   *
+   * The streak tilt is derived here rather than authored, because a streak that
+   * does not lie along its own motion is the single most obvious way to make
+   * rain look pasted onto the frame.
+   */
+  setShear(x: number, z: number): void {
+    (this.uShear.value as THREE.Vector2).set(x, z);
+    this.uStreakTilt.value = -Math.atan(x);
   }
 
   private buildRainMaterial(): THREE.SpriteNodeMaterial {
@@ -180,17 +203,36 @@ export class Weather {
     const z = seed.y.sub(0.5).mul(RAIN_RADIUS * 2).add(y.mul(shear.y));
 
     material.positionNode = vec3(x, y, z);
-    // Thin and long: streaks in ref-storm.png are barely a pixel wide.
-    material.scaleNode = vec2(0.022, float(0.9).add(seed.w.mul(0.7)));
-    // Tilt the streak to match the shear so it lies along its own motion.
-    material.rotationNode = float(-Math.atan(0.16));
+
+    // Streak length follows fall speed, because that is what a streak *is*: the
+    // distance a drop covers while the shutter is open. A fixed length makes
+    // heavy rain read as more drops of the same size rather than as harder rain,
+    // which is most of why the old curtain looked like static.
+    const lengthScale: any = speed.div(this.uRainSpeed).mul(this.uStreakLength);
+    const width: any = float(0.016).add(seed.z.mul(0.012));
+    const length: any = float(0.7).add(seed.w.mul(0.6)).mul(lengthScale);
+    material.scaleNode = vec2(width, length);
+
+    // Tilt from the actual shear, not a baked constant, so the streak lies along
+    // its own motion when the wind changes.
+    material.rotationNode = this.uStreakTilt;
 
     const coord = uv();
+    // Across the streak: a tight core with a soft shoulder. A drop is a lens, so
+    // its edge is dim and its centre carries almost all the light.
     const across = float(1).sub(coord.x.sub(0.5).abs().mul(2.0));
-    const along = sin(coord.y.mul(Math.PI));
-    const alpha = pow(across, 3.0).mul(pow(along, 0.6)).mul(this.uRainOpacity);
+    const core = pow(across, 4.0);
+    // Along it: bright at the leading end, tapering behind — a real streak is an
+    // exposure trail, brightest where the drop is now.
+    const along = pow(coord.y, 0.55).mul(float(1).sub(coord.y).mul(2.4).min(1.0));
 
-    material.colorNode = vec4(vec3(0.72, 0.8, 0.92), alpha);
+    // Nearer drops are brighter and better resolved. Depth here is the seed's
+    // own scatter, which is cheap and reads correctly because the volume is
+    // centred on the viewer.
+    const nearness = float(0.55).add(seed.x.sub(0.5).abs().oneMinus().mul(0.45));
+
+    const alpha = core.mul(along).mul(nearness).mul(this.uRainOpacity);
+    material.colorNode = vec4(vec3(0.78, 0.85, 0.96), alpha);
     return material;
   }
 

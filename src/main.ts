@@ -112,6 +112,8 @@ class App {
   private captureTarget: THREE.RenderTarget | null = null;
   /** True while `stepDeterministic` owns the wave-field readback. */
   private deterministic = false;
+  /** Test-only rain rate override; null means the weather system decides. */
+  private rainOverride: number | null = null;
 
   constructor(canvas: HTMLCanvasElement, uiRoot: HTMLElement) {
     this.canvas = canvas;
@@ -603,6 +605,14 @@ class App {
     this.weather.setKind(preset.weather.kind);
     this.weather.setIntensity(preset.weather.intensity);
 
+    // Rain leans with the wind that is driving the sea. Reading the shear off
+    // the same wind speed and direction the spectrum uses is what stops a storm
+    // from having waves running one way and rain slanting another — the two
+    // being visibly independent is a strong tell that the weather is a costume.
+    const windAngle = preset.sea.windDirection;
+    const lean = Math.min(0.55, this.state.windSpeed * 0.022);
+    this.weather.setShear(Math.cos(windAngle) * lean, Math.sin(windAngle) * lean);
+
     this.simulation.updateSpectrum({
       ...preset.sea,
       windSpeed: this.state.windSpeed,
@@ -630,6 +640,17 @@ class App {
     this.weather.update(dt, this.camera.position);
 
     this.water.setSun(this.atmosphere.sunDirection, this.atmosphere.sunColor, 6);
+
+    // Rain reaches the water. Only rain does — snow settles far too slowly to
+    // punch a ring into a surface, and driving this from `weather.intensity`
+    // alone would have the Arctic preset stippling the sea with snowflakes.
+    const raining =
+      this.rainOverride ??
+      (this.weather.getKind() === 'rain' ? this.weather.getIntensity() : 0);
+    this.water.setRain(raining, elapsed);
+    // Agitation: heavy rain whitens a sea surface on its own, independently of
+    // whether the waves are steep enough to break.
+    this.wake.setRainAgitation(raining);
 
     this.simulation.update(elapsed);
     // Deterministic stepping owns the readback and awaits it; kicking off a
@@ -852,6 +873,15 @@ class App {
         /** Direct throttle/rudder input, bypassing the keyboard. */
         setShipInput: (throttle: number, rudder: number) =>
           this.shipControls?.setInput(throttle, rudder),
+        /**
+         * Forces the rain rate the surface sees, independently of the preset's
+         * weather. Lets a test vary one input while holding the sea state,
+         * lighting and camera fixed, which comparing two presets could not.
+         * `null` returns control to the weather system.
+         */
+        setRainOverride: (intensity: number | null) => {
+          this.rainOverride = intensity;
+        },
         /** Exact-pixel frame capture; see `App.capturePixels`. */
         capturePixels: () => this.capturePixels(),
         dispose: () => this.dispose(),

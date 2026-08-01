@@ -1,6 +1,7 @@
 import * as THREE from 'three/webgpu';
 import {
   Fn,
+  If,
   cameraPosition,
   float,
   linearDepth,
@@ -162,6 +163,13 @@ export class OceanMaterial {
    */
   private readonly uDepthRange = uniform(40000);
 
+  /** Rain rate, 0..1. Drives how many lattice cells are producing impacts. */
+  private readonly uRainIntensity = uniform(0);
+  /** Strength of the impact slope perturbation. */
+  private readonly uRainSlope = uniform(0.32);
+  /** Rain clock, seconds. Separate from the wave clock so it can be frozen. */
+  private readonly uRainTime = uniform(0);
+
   /** How much of the planar reflection reaches the surface, 0..1. */
   private readonly uReflectionAmount = uniform(1);
   /** Screen-space offset applied to the reflection lookup, at unit distance. */
@@ -239,6 +247,19 @@ export class OceanMaterial {
   /** Camera far minus near, in metres. See `uDepthRange`. */
   setDepthRange(metres: number): void {
     this.uDepthRange.value = Math.max(1, metres);
+  }
+
+  /**
+   * Rain striking the surface.
+   *
+   * `time` is passed rather than integrated internally so the impacts share the
+   * simulation clock — which is what lets a deterministic capture reproduce the
+   * same rings, and what makes the rain stop when the world is paused.
+   */
+  setRain(intensity: number, time: number, slope = 0.32): void {
+    this.uRainIntensity.value = Math.max(0, Math.min(1, intensity));
+    this.uRainTime.value = time;
+    this.uRainSlope.value = Math.max(0, slope);
   }
 
   /** Per-tier reflection strength. No effect when built without a reflection. */
@@ -379,6 +400,22 @@ export class OceanMaterial {
         slope.addAssign(vec2(d.x, d.y).mul(fade));
         fold.assign(fold.min(mix(float(1), d.z, fade)));
       }
+
+      // Rain impacts, added to the wave slope before the normal is built so they
+      // ride the surface rather than sitting on a plane over it.
+      //
+      // Faded out with distance, hard. The rings are decimetre features; past
+      // thirty metres or so they are well under a pixel and all they can
+      // contribute is aliasing — the same reason the finest wave cascade fades.
+      // Behind a uniform branch, so every clear preset pays one compare.
+      If(this.uRainIntensity.greaterThan(0.001), () => {
+        const nearness = viewDistance.smoothstep(38, 6).clamp(0, 1);
+        slope.addAssign(
+          rainSlope(worldPos.xz, this.uRainTime, this.uRainIntensity)
+            .mul(this.uRainSlope)
+            .mul(nearness),
+        );
+      });
 
       const normal = normalize(vec3(slope.x.negate(), 1, slope.y.negate())).toVar();
 
@@ -651,6 +688,77 @@ export class OceanMaterial {
  * download, and so the foam breakup is scale-free — it stays crisp no matter how
  * close the camera gets.
  */
+/**
+ * Rain striking the water, as a slope perturbation.
+ *
+ * Procedural against a lattice rather than a simulated field. Each cell of a
+ * world-space grid launches one ring per cycle, at a position and a phase hashed
+ * from the cell index, so impacts are scattered in space and time without any
+ * state being stored anywhere. That matters more than it sounds: a buffer would
+ * have to be camera-relative, and every impact near the edge would pop in and
+ * out as the viewer moved. Anchored to the world by construction, a ripple stays
+ * where it landed.
+ *
+ * The spec allows "a shared, camera-relative, low-resolution GPU field or another
+ * bounded technique"; this is the second. It is bounded by the 3x3 neighbourhood,
+ * costs no memory, needs no readback, and is deterministic — the same second of
+ * simulation time produces the same rain on every machine.
+ *
+ * Slope is accumulated directly rather than height. The normal is what the
+ * shading actually wants, and differentiating a height field would mean
+ * evaluating this three times per fragment instead of once.
+ */
+
+/** Metres per lattice cell. One impact per cell per cycle. */
+const RAIN_CELL = 2.6;
+/** Seconds between a cell's impacts. */
+const RAIN_PERIOD = 1.35;
+/** Metres per second the ring expands. */
+const RAIN_SPEED = 1.5;
+/** Radians per metre across the ring — how tight the wavefront reads. */
+const RAIN_FREQUENCY = 13.0;
+
+const rainSlope = /*@__PURE__*/ Fn(([worldXZ, time, intensity]: [any, any, any]) => {
+  const cell = worldXZ.div(RAIN_CELL).floor().toVar();
+  const slope = vec2(0, 0).toVar();
+
+  for (let dz = -1; dz <= 1; dz++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      const neighbour = cell.add(vec2(dx, dz)).toVar();
+      const h = hash2(neighbour).toVar();
+
+      // Where in the cell the drop landed, and how far through its cycle it is.
+      const drop = neighbour.add(h).mul(RAIN_CELL).toVar();
+      const age = time.div(RAIN_PERIOD).add(h.x.mul(7.13).add(h.y.mul(3.71))).fract()
+        .mul(RAIN_PERIOD).toVar();
+
+      // Rain rate sets how many cells are raining, not how hard each ring hits.
+      // Scaling amplitude instead would make light rain look like heavy rain
+      // seen through fog; scaling population is what actually changes.
+      const active = h.y.step(intensity).toVar();
+
+      const delta = worldXZ.sub(drop).toVar();
+      const r = delta.length().max(1e-3).toVar();
+      const front = age.mul(RAIN_SPEED).toVar();
+      const x = r.sub(front).toVar();
+
+      // A wave packet at the expanding front, dying with age and with distance.
+      const envelope = x
+        .mul(x)
+        .mul(-9.0)
+        .exp()
+        .mul(float(1).sub(age.div(RAIN_PERIOD)))
+        .mul(r.mul(-1.6).exp())
+        .toVar();
+
+      // d/dr of sin(x * F) * envelope, keeping the dominant term.
+      const dhdr = x.mul(RAIN_FREQUENCY).cos().mul(RAIN_FREQUENCY).mul(envelope).toVar();
+      slope.addAssign(delta.div(r).mul(dhdr).mul(active));
+    }
+  }
+  return slope;
+});
+
 const hash2 = /*@__PURE__*/ Fn(([p]: [any]) => {
   const h = vec2(p.dot(vec2(127.1, 311.7)), p.dot(vec2(269.5, 183.3))).toVar();
   return h.sin().mul(43758.5453).fract();
