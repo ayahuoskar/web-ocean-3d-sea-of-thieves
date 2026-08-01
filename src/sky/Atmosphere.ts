@@ -151,6 +151,14 @@ export interface AtmosphereParams {
   turbidity: number; // 1..20 haze
   rayleigh: number; // scattering strength
   mieCoefficient: number;
+  /**
+   * How far the sky is pulled toward flat, achromatic overcast light, 0..1.
+   *
+   * Not the same thing as cloud coverage, which draws the clouds themselves.
+   * This is the light between and behind them, and it is the parameter that
+   * makes a storm sky read as weather rather than as dust.
+   */
+  overcast?: number;
   mieDirectionalG: number; // 0..0.99 forward scattering
   exposure: number;
   groundColor: THREE.Color;
@@ -218,6 +226,8 @@ export class Atmosphere {
   private readonly _sunDirection = new THREE.Vector3(0, 1, 0);
   private readonly _moonDirection = new THREE.Vector3(0, 1, 0);
   private readonly _sunColor = new THREE.Color(1, 1, 1);
+  private readonly _zenithColor = new THREE.Color(0.32, 0.48, 0.82);
+  private readonly _horizonColor = new THREE.Color(0.7, 0.78, 0.9);
 
   private elapsed = 0;
   /** Clamped copy of `nightIntensity`; also gates the moonlight source. */
@@ -230,6 +240,16 @@ export class Atmosphere {
   private readonly uBetaM = uniform(new THREE.Vector3());
   private readonly uSunE = uniform(0);
   private readonly uMieG = uniform(0.8);
+  /** How far toward flat overcast light the sky is pulled, 0..1. */
+  private readonly uOvercast = uniform(0);
+  /**
+   * The colour thick cloud light actually is. Not pure grey: droplet scattering
+   * is near-achromatic but the light still arrives having crossed some clear
+   * atmosphere, so overcast reads faintly cool rather than neutral.
+   */
+  private readonly uOvercastTint: any = uniform(new THREE.Color(0.92, 0.96, 1.04));
+  /** Multiplier applied to the flattened sky. Overcast is darker than clear. */
+  private readonly uOvercastDarken = uniform(0.78);
   /**
    * Day and night are scaled separately, folded on the CPU. They must not share
    * a multiplier: the twilight gain exists to rescue a *sunlit* sky near the
@@ -339,6 +359,27 @@ export class Atmosphere {
     return this._sunColor;
   }
 
+  /**
+   * Approximate colour of the sky overhead, and at the horizon.
+   *
+   * Published so the water can agree with the dome. The surface's reflection and
+   * its aerial perspective were driven by preset constants — and, for the sky
+   * colour, by the *sun* colour, which is not the sky at all — so wherever the
+   * two disagreed the horizon showed a hard step between them. Deriving both
+   * from the same state that lights the scene means they cannot drift apart when
+   * a preset changes.
+   *
+   * Approximate on purpose: an exact answer means sampling the dome, and the
+   * horizon is precisely where a single sample is least representative.
+   */
+  get zenithColor(): THREE.Color {
+    return this._zenithColor;
+  }
+
+  get horizonColor(): THREE.Color {
+    return this._horizonColor;
+  }
+
   /** Direction to the moon, normalised, world space. */
   get moonDirection(): THREE.Vector3 {
     return this._moonDirection;
@@ -375,6 +416,10 @@ export class Atmosphere {
     }
     if (params.mieDirectionalG !== undefined && params.mieDirectionalG !== p.mieDirectionalG) {
       p.mieDirectionalG = params.mieDirectionalG;
+      changed = true;
+    }
+    if (params.overcast !== undefined && params.overcast !== p.overcast) {
+      p.overcast = params.overcast;
       changed = true;
     }
     if (params.exposure !== undefined && params.exposure !== p.exposure) {
@@ -469,6 +514,7 @@ export class Atmosphere {
     this.uSunDir.value.copy(this._sunDirection);
     this.uMoonDir.value.copy(this._moonDirection);
     this.uMieG.value = Math.min(0.99, Math.max(0, p.mieDirectionalG));
+    this.uOvercast.value = Math.min(1, Math.max(0, p.overcast ?? 0));
 
     this.nightAmount = Math.min(1, Math.max(0, p.nightIntensity));
     const night = this.nightAmount;
@@ -550,7 +596,19 @@ export class Atmosphere {
     // the sun is high, sun-tinted at low elevations, near-black at night.
     _skyTint.setRGB(0.32, 0.48, 0.82).lerp(this._sunColor, (1 - day) * 0.6);
     _skyTint.lerp(NIGHT_SKY_TINT, night);
+    // Overcast desaturates the fill along with the dome it stands in for, or a
+    // grey sky would keep casting blue light into the shadows.
+    const overcast = Math.min(1, Math.max(0, p.overcast ?? 0));
+    if (overcast > 0) {
+      const grey = _skyTint.r * 0.2126 + _skyTint.g * 0.7152 + _skyTint.b * 0.0722;
+      _skyTint.lerp(_overcastFill.setRGB(grey * 0.92, grey * 0.96, grey * 1.04), overcast);
+    }
     this.ambientLight.color.copy(_skyTint);
+
+    // Published for the water surface, which has to agree with the dome at the
+    // horizon or the two meet in a visible step. See `zenithColor`.
+    this._zenithColor.copy(_skyTint);
+    this._horizonColor.copy(_skyTint).lerp(WHITE, 0.42 * (1 - night));
     this.ambientLight.groundColor.copy(p.groundColor);
     this.ambientLight.intensity = (0.15 + 0.85 * day) * (1 - 0.86 * night) + 0.03 * night;
   }
@@ -613,6 +671,29 @@ export class Atmosphere {
       const l0 = fex.mul(0.1).add(fex.mul(sunE).mul(19000.0).mul(sunDisc));
 
       const dayColor = lin.add(l0).mul(0.04).add(vec3(0.0, 0.0003, 0.00075)).toVar('dayColor');
+
+      // --- overcast ----------------------------------------------------------
+      //
+      // Preetham describes a *clear* atmosphere made hazy by aerosol. Asking it
+      // for a storm by winding turbidity up to 12 and leaning on the Mie term
+      // does not produce an overcast sky: it produces a sandy, brown one, which
+      // is what a dusty desert horizon actually looks like and is nothing like
+      // weather. The ocean then faithfully reflected that brown, which is why the
+      // storm preset had khaki water.
+      //
+      // Under thick cloud almost none of the light reaching the eye has taken the
+      // single-scattering path the model integrates. It has been diffused through
+      // a kilometre of water droplets, which are large enough to scatter all
+      // visible wavelengths nearly equally — so the sky goes achromatic and
+      // loses its vertical gradient. That is what this does: pull toward the
+      // sky's own luminance, flatten the gradient, and darken. It is a separate
+      // control from cloud coverage because the cloud layer draws the clouds and
+      // this describes the light between and behind them.
+      const skyLuma = dayColor.dot(vec3(0.2126, 0.7152, 0.0722)).toVar('skyLuma');
+      const flat = vec3(skyLuma).mul(this.uOvercastTint).toVar('skyFlat');
+      dayColor.assign(
+        mix(dayColor, flat.mul(this.uOvercastDarken), this.uOvercast),
+      );
 
       // --- ground half -------------------------------------------------------
       // Below the horizon the dome shows a diffuse ground lit by the horizon sky.
@@ -693,6 +774,7 @@ export class Atmosphere {
 const WHITE = /*@__PURE__*/ new THREE.Color(1, 1, 1);
 const NIGHT_SKY_TINT = /*@__PURE__*/ new THREE.Color(0.12, 0.2, 0.42);
 const _skyTint = /*@__PURE__*/ new THREE.Color();
+const _overcastFill = /*@__PURE__*/ new THREE.Color();
 
 /**
  * Henyey–Greenstein phase function, normalised to 1/(4*pi) like Sky.js.

@@ -17,6 +17,8 @@ export interface Preset {
     mieCoefficient: number;
     mieDirectionalG: number;
     exposure: number;
+    /** How far toward flat overcast light the sky is pulled, 0..1. */
+    overcast?: number;
     nightIntensity: number;
     moonElevation: number;
     moonAzimuth: number;
@@ -259,10 +261,13 @@ export const PRESETS: Record<PresetId, Preset> = {
     atmosphere: {
       sunElevation: 0.3,
       sunAzimuth: 2,
-      turbidity: 9,
-      rayleigh: 0.9,
-      mieCoefficient: 0.02,
+      // Same correction as Storm, less of it: fog is a bright diffuse overcast
+      // rather than a dark one.
+      turbidity: 5,
+      rayleigh: 1.3,
+      mieCoefficient: 0.012,
       mieDirectionalG: 0.7,
+      overcast: 0.7,
       exposure: 1,
       nightIntensity: 0,
       moonElevation: -0.5,
@@ -406,10 +411,16 @@ export const PRESETS: Record<PresetId, Preset> = {
     atmosphere: {
       sunElevation: 0.22,
       sunAzimuth: 3.6,
-      turbidity: 12,
-      rayleigh: 0.7,
-      mieCoefficient: 0.024,
+      // Turbidity down from 12, rayleigh up from 0.7, Mie down from 0.024. Those
+      // values were being used to fake an overcast and produced a sandy brown
+      // horizon instead — Preetham reads high turbidity as *dust*, not cloud, and
+      // the ocean then reflected the dust. `overcast` is the parameter that
+      // actually describes this sky.
+      turbidity: 5.5,
+      rayleigh: 1.6,
+      mieCoefficient: 0.009,
       mieDirectionalG: 0.72,
+      overcast: 0.88,
       exposure: 0.85,
       nightIntensity: 0.1,
       moonElevation: -0.5,

@@ -620,9 +620,18 @@ class App {
     });
 
     this.water.setAppearance(preset.water);
+    // Sky and horizon come from the atmosphere, not from preset constants.
+    //
+    // The first argument used to be the *sun* colour, which is not the sky by
+    // any reading, and the other two were a single authored fog colour. So the
+    // water's reflection and its aerial perspective were describing a different
+    // sky from the one being drawn behind it, and where they disagreed the
+    // horizon showed a hard step. Both now derive from the state that lights the
+    // scene, so a preset cannot pull them apart. `fog.color` survives as the
+    // aerial-perspective tint, which is genuinely an authored choice.
     this.water.setSky(
-      this.atmosphere.sunColor,
-      preset.fog.color,
+      this.atmosphere.zenithColor,
+      this.atmosphere.horizonColor,
       preset.fog.color,
       preset.fog.density,
     );
@@ -640,6 +649,14 @@ class App {
     this.weather.update(dt, this.camera.position);
 
     this.water.setSun(this.atmosphere.sunDirection, this.atmosphere.sunColor, 6);
+    // The sun moves and the sky follows it, so these have to be refreshed every
+    // frame rather than only when a preset is applied.
+    this.water.setSky(
+      this.atmosphere.zenithColor,
+      this.atmosphere.horizonColor,
+      getPreset(this.state.preset).fog.color,
+      getPreset(this.state.preset).fog.density,
+    );
 
     // Rain reaches the water. Only rain does — snow settles far too slowly to
     // punch a ring into a surface, and driving this from `weather.intensity`
