@@ -86,6 +86,15 @@ export interface OceanMaterialInputs {
    * Per-tier strength, which does change at runtime, is a uniform.
    */
   reflectionNode?: unknown | null;
+  /**
+   * Screen-space reflection, as a function of shading point, normal and the
+   * colour to fall back to where the trace misses.
+   *
+   * Supplied as a callback rather than a node because it has to be *called*
+   * inside the fragment function — it emits control flow and reads per-fragment
+   * variables, so it cannot be built ahead of time like the planar texture can.
+   */
+  ssrNode?: ((worldPosition: any, worldNormal: any, fallback: any) => any) | null;
 }
 
 /**
@@ -172,8 +181,16 @@ export class OceanMaterial {
 
   /** Rain rate, 0..1. Drives how many lattice cells are producing impacts. */
   private readonly uRainIntensity = uniform(0);
-  /** Strength of the impact slope perturbation. */
-  private readonly uRainSlope = uniform(0.32);
+  /**
+   * Strength of the impact slope perturbation.
+   *
+   * Lower than it first looks like it should be. With the lattice corrected so
+   * that every cell rains at full intensity, 0.32 turned the near surface into a
+   * hammered-metal texture — the rings were unmistakably there, which was the
+   * point, but they read as a material rather than as weather. Rain dimples a
+   * surface; it does not emboss it.
+   */
+  private readonly uRainSlope = uniform(0.16);
   /** Rain clock, seconds. Separate from the wave clock so it can be frozen. */
   private readonly uRainTime = uniform(0);
 
@@ -353,6 +370,7 @@ export class OceanMaterial {
     const floorDepth = inputs.floorDepthNode ?? null;
     const foam = inputs.foam ?? null;
     const planar = (inputs.reflectionNode ?? null) as any;
+    const ssr = inputs.ssrNode ?? null;
 
     // The graph is always built for the maximum cascade count; `setCascades`
     // decides how many of them contribute.
@@ -573,6 +591,23 @@ export class OceanMaterial {
         );
       }
 
+      if (ssr !== null) {
+        // Layered *over* the planar reflection, not instead of it.
+        //
+        // The two fail in opposite places, which is exactly why engines composite
+        // rather than choose. A screen-space trace has the real displaced surface
+        // and gets the hull's reflection attached to the wave under it — the case
+        // planar cannot serve, since one mirror plane at y = 0 misplaces
+        // everything coming off a wave face. But it can only reflect what is
+        // already on screen, so it loses the moment the reflected object leaves
+        // the frame, and there the planar view still has it.
+        //
+        // The distance-flattened `n` is passed rather than the raw normal: the
+        // trace is far more sensitive to normal roughness than the shading is,
+        // because adjacent pixels fire rays metres apart at grazing incidence.
+        reflection.assign(ssr(worldPos, n, reflection));
+      }
+
       // --- sun specular (GGX) ---------------------------------------------------
       const halfVector = normalize(viewDir.add(sunDir)).toVar();
       const nDotH = n.dot(halfVector).clamp(0, 1).toVar();
@@ -778,7 +813,15 @@ const rainSlope = /*@__PURE__*/ Fn(([worldXZ, time, intensity]: [any, any, any])
       // Rain rate sets how many cells are raining, not how hard each ring hits.
       // Scaling amplitude instead would make light rain look like heavy rain
       // seen through fog; scaling population is what actually changes.
-      const active = h.y.step(intensity).toVar();
+      //
+      // Written as an explicit comparison rather than `h.y.step(intensity)`.
+      // TSL's method form reverses the arguments — `x.step(e)` is `step(e, x)`,
+      // which is `x >= e` — so that spelling activated a cell when its hash
+      // *exceeded* the rain rate. Cells switched on as the rain eased and at full
+      // intensity none were active at all, the exact inverse of the intent. It
+      // survived its own test because that test only asked whether rain changed
+      // the surface, and an inverted mask changes it just as much.
+      const active = intensity.greaterThan(h.y).select(float(1), float(0)).toVar();
 
       const delta = worldXZ.sub(drop).toVar();
       const r = delta.length().max(1e-3).toVar();

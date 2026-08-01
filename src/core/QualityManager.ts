@@ -49,6 +49,21 @@ export interface QualitySettings {
    * every ripple, so it is never seen sharp.
    */
   reflectionScale: number;
+  /**
+   * Volumetric fog march steps. 0 is a bit-exact pass-through costing nothing.
+   *
+   * The march integrates cell weights exactly rather than as Riemann rectangles,
+   * so raising this refines the noise detail, not the amount of fog — which is
+   * why the tiers can differ this widely without the image changing brightness.
+   */
+  fogSteps: number;
+  /**
+   * Lens-rain droplet lattice count, 1..3. 0 disables the effect entirely.
+   *
+   * Each level adds a lattice and, above 1, extra texture reads for misting
+   * and chromatic dispersion. A clear frame costs one compare at any level.
+   */
+  lensRainQuality: number;
 }
 
 export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
@@ -66,6 +81,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     refraction: 0,
     reflection: 0,
     reflectionScale: 0.25,
+    fogSteps: 0,
+    lensRainQuality: 1,
   },
   medium: {
     fftSize: 128,
@@ -81,6 +98,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     refraction: 0.6,
     reflection: 0.6,
     reflectionScale: 0.35,
+    fogSteps: 12,
+    lensRainQuality: 2,
   },
   high: {
     fftSize: 256,
@@ -94,6 +113,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     refraction: 1,
     reflection: 0.85,
     reflectionScale: 0.5,
+    fogSteps: 24,
+    lensRainQuality: 3,
   },
   ultra: {
     fftSize: 256,
@@ -107,6 +128,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     refraction: 1,
     reflection: 1,
     reflectionScale: 0.6,
+    fogSteps: 40,
+    lensRainQuality: 3,
   },
   max: {
     fftSize: 512,
@@ -120,6 +143,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     refraction: 1,
     reflection: 1,
     reflectionScale: 0.75,
+    fogSteps: 56,
+    lensRainQuality: 3,
   },
 };
 

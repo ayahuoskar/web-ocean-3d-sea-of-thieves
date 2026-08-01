@@ -19,7 +19,13 @@ import {
 /** Where "View Source" goes. It previously pointed at `#`. */
 const SOURCE_URL = 'https://github.com/2600th/web-ocean-3d';
 
-type SliderKey = 'windSpeed' | 'peakWavelength' | 'cloudCoverage' | 'timeOfDay' | 'pixelRatio';
+type SliderKey =
+  | 'windSpeed'
+  | 'peakWavelength'
+  | 'cloudCoverage'
+  | 'timeOfDay'
+  | 'fogDensity'
+  | 'pixelRatio';
 type ToggleKey = 'buoyancyProbes' | 'wakeProbes' | 'forceWebGL';
 
 interface SliderSpec {
@@ -61,6 +67,14 @@ const SLIDERS: readonly SliderSpec[] = [
     max: 1,
     step: 0.01,
     format: (v) => `${Math.round(v * 100)}%`,
+  },
+  {
+    key: 'fogDensity',
+    label: 'Volumetric Fog',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    format: (v) => (v === 0 ? 'Off' : `${Math.round(v * 100)}%`),
   },
   {
     key: 'timeOfDay',

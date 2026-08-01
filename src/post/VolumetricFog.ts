@@ -33,7 +33,8 @@ import {
  *
  *   1. **Transmittance, analytically.** For a medium whose density varies only
  *      with height, the optical depth along a straight ray has a closed form
- *      (see `medium` below) — no march required. So how much of the scene
+ *      (Wenzel, "Real-Time Atmospheric Effects in Games", SIGGRAPH 2006 — see
+ *      `transmittanceAt` below). No march required. So how much of the scene
  *      survives the fog is *exact*, at every quality tier, and identical whether
  *      the march runs 8 steps or 48. This matters more than it sounds: the tier
  *      drops on its own when frames get long, and a fog whose thickness visibly
@@ -41,24 +42,38 @@ import {
  *      obvious one. It also means the effect has no banding in its opacity at
  *      all, which is where a naive volumetric normally shows its steps first.
  *
- *   2. **In-scattering, marched.** What the march is actually for is the part
- *      that is *not* analytic: how the light reaching each point along the ray
- *      varies. Two terms do the work. The sun's transmittance down to a sample
- *      is itself a closed-form height integral (`sigma * H / sun.y`), so fog deep
- *      in the layer is lit far less than fog near its top — the bank glows along
- *      its upper surface and goes blue-grey inside, with no shadow map and no
- *      secondary march. And a Henyey–Greenstein lobe on the angle between the
- *      view ray and the sun makes looking toward the sun through fog bloom, while
- *      looking away from it stays flat and cool. The phase term is constant along
- *      the ray for a directional light, so it is evaluated once per pixel rather
- *      than once per step.
+ *   2. **In-scattering, marched — but weighted analytically.** Each march cell
+ *      contributes `L * (T(cellStart) - T(cellEnd))`, which is the *exact*
+ *      integral of `sigma * T` across that cell, not a Riemann rectangle. Two
+ *      things follow. The sum telescopes to `1 - T(end)` regardless of how many
+ *      cells there are, so the total in-scattered energy is step-count
+ *      independent in the same way the transmittance is — this is Hillaire's
+ *      energy-conserving segment integration (Frostbite, SIGGRAPH 2015) with the
+ *      constant-extinction assumption dropped, since here `T` is known in closed
+ *      form and does not need one. And the far cells, which this march
+ *      deliberately makes long, stop over-contributing: a rectangle rule
+ *      overestimates a cell of optical depth ~1 by about 40%.
+ *
+ *      What the march is actually for is the part that is *not* analytic: how the
+ *      light reaching each point varies. Two terms do that. The sun's
+ *      transmittance down to a sample is itself a closed-form height integral
+ *      (`sigma * H / sun.y`), so fog deep in the layer is lit far less than fog
+ *      near its top — the bank glows along its upper surface and goes blue-grey
+ *      inside, with no shadow map and no secondary march. And a Henyey–Greenstein
+ *      lobe on the angle between the view ray and the sun makes looking toward the
+ *      sun through fog bloom, while looking away from it stays flat and cool. The
+ *      phase term is constant along the ray for a directional light, so it is
+ *      evaluated once per pixel rather than once per step.
  *
  *   3. **An analytic tail.** Past `maxDistance` the march stops, but the fog does
  *      not, and stopping the integral there would leave a visible shell at that
- *      radius. The remaining segment is closed out with `L * (T(end) - T(scene))`,
- *      the exact single-scatter integral for a segment lit uniformly, which costs
- *      two exponentials once per pixel and makes `maxDistance` a pure performance
- *      control with no visual signature.
+ *      radius. The remaining segment is closed out with the same
+ *      `L * (T(end) - T(scene))` the cells use, which costs one more evaluation
+ *      per pixel and makes `maxDistance` a pure performance control with no
+ *      visual signature. Together with item 2 this means that for a uniformly lit
+ *      medium the whole pass collapses *exactly* to `scene * T + L * (1 - T)` —
+ *      the classic fog lerp, which is the correct limit to degrade to. Everything
+ *      that makes it volumetric is the structure layered on top of that.
  *
  * Banks are a two-octave procedural field modulating the *scattering*, not the
  * extinction. That is a deliberate approximation and worth being honest about:
@@ -118,7 +133,16 @@ export interface VolumetricFogParams {
   sunColor: THREE.Color;
   /** Brightness of the directional in-scattering that produces the sun bloom. */
   sunIntensity: number;
-  /** Henyey–Greenstein g. Positive is forward scattering; ~0.7 for fog droplets. */
+  /**
+   * Henyey–Greenstein g. Positive is forward scattering, so the fog brightens
+   * toward the sun.
+   *
+   * Measured fog droplets sit around 0.8–0.87, and using that here would be
+   * wrong: what softens the lobe in real fog is multiple scattering, which a
+   * single-scattering integral does not have, so a physical g over-concentrates
+   * the glow into a hard disc. Engines that expose this generally see 0.1–0.4
+   * used for plain haze and 0.6+ only when a visible sunbeam is the point.
+   */
   anisotropy: number;
   /** Metres. Bounds the march only — beyond it the analytic tail takes over. */
   maxDistance: number;
@@ -143,7 +167,7 @@ export const DEFAULT_VOLUMETRIC_FOG_PARAMS: VolumetricFogParams = {
   sunDirection: new THREE.Vector3(0.35, 0.62, 0.7).normalize(),
   sunColor: new THREE.Color(0xffe9cf),
   sunIntensity: 0.55,
-  anisotropy: 0.72,
+  anisotropy: 0.6,
   maxDistance: 1500,
   detail: 0.55,
   detailScale: 130,
@@ -196,20 +220,57 @@ const TAU_CEIL = 40;
 const AMBIENT_PATH = 1.0;
 
 /**
- * Clamp on the Henyey–Greenstein lobe, relative to isotropic.
+ * Soft ceiling on the Henyey–Greenstein lobe, relative to isotropic.
  *
- * At g = 0.72 the raw forward value is ~22x isotropic. On a cloud that spike is
- * confined to the silver lining along an edge; here it is multiplying a
- * full-screen integral, and unclamped it turns the quarter of the sky around the
- * sun into flat white. 6x still reads as a distinct bloom against the 0.1x floor
- * behind the viewer — a 60x range, which is more contrast than the phase
- * function is actually being asked to sell.
+ * The lobe's peak is `(1 + g) / (1 - g)^2` times isotropic, which is ~10x at
+ * g = 0.6 and ~82x at the 0.85 the anisotropy control is limited to. On a cloud
+ * that spike is confined to a silver lining along one edge; here it multiplies a
+ * *full-screen* integral, and unbounded it turns the quarter of the sky around
+ * the sun into a flat white disc.
+ *
+ * Applied as a Reinhard-style knee, `p * C / (p + C)`, rather than a hard clamp.
+ * A hard clamp is what actually produces the flat disc — it truncates the top of
+ * the lobe into a plateau with a visible edge. The knee stays monotonic, so the
+ * glow keeps falling off from its centre however hard the anisotropy is pushed,
+ * and it is near-transparent for the small values behind the viewer.
+ *
+ * It does not preserve the phase function's unit integral, and there is no
+ * published prescription for clamping the evaluated phase — the literature
+ * bounds `g` itself, sums several HG lobes, or substitutes Cornette–Shanks. The
+ * honest justification for doing it anyway is that this is a single-scattering
+ * integral, and single scattering has none of the multiple scattering that
+ * softens the forward lobe in real fog; the knee is standing in for that, badly
+ * but cheaply.
  */
-const PHASE_MIN = 0.1;
-const PHASE_MAX = 6;
+const PHASE_CEIL = 8;
+
+/**
+ * Hard limit on `g`. Not for the spike — the knee handles that — but because the
+ * phase function is only defined on the open interval and its denominator
+ * collapses at the endpoints.
+ */
+const MAX_ANISOTROPY = 0.85;
 
 /** Vertical feature size as a fraction of the horizontal one — banks are flat. */
 const DETAIL_ASPECT = 0.22;
+
+/**
+ * Octaves in the bank field.
+ *
+ * This one number is the entire performance story of this pass. Measured at
+ * 1600x900 on the reference GPU, a march step costs ~0.0025 ms with the bank
+ * field off and ~0.013 ms per octave with it on: the noise is roughly five times
+ * everything else in the loop body put together, and the rest of the effect —
+ * ray setup, two closed-form medium evaluations, the phase lobe, the self-shadow
+ * exponentials — rounds to nothing beside it.
+ *
+ * So one octave, which is also what Wronski's shipped volumetric fog used over
+ * the same exponential height profile. Two looked slightly better and cost
+ * slightly under twice as much, which is not a trade worth making for an effect
+ * that already gets most of its structure from the height profile and the sun
+ * self-shadow rather than from the noise.
+ */
+const DETAIL_OCTAVES = 1;
 
 export class VolumetricFog {
   private readonly params: VolumetricFogParams;
@@ -363,78 +424,93 @@ export class VolumetricFog {
         const sigmaOrigin = this.uSigmaOrigin;
 
         // --- transmittance, in closed form -----------------------------------
-        const toScene = this.medium(dist, sigmaOrigin, slope);
-        const transmittance = toScene.transmittance.toVar('fogT');
-
+        const transmittance = this.transmittanceAt(dist, sigmaOrigin, slope).toVar('fogT');
         const tEnd = dist.min(this.uMaxDistance).toVar('fogEnd');
-        const atEnd = this.medium(tEnd, sigmaOrigin, slope);
 
         // --- the phase lobe, once for the whole ray --------------------------
         // A directional sun subtends the same scattering angle at every point on
         // a straight ray, so this is a per-pixel constant and has no business
         // inside the loop.
-        const phase = henyeyGreenstein(rd.dot(this.uSunDir), this.uAnisotropy)
-          .clamp(PHASE_MIN, PHASE_MAX)
-          .toVar('fogPhase');
+        //
+        // `rd` runs camera to sample and `uSunDir` points at the sun, so
+        // `rd . sunDir` is the cosine of the *deflection* angle: both the light's
+        // propagation direction and the scattered direction reverse relative to
+        // these two vectors, and the two sign flips cancel. Looking toward the
+        // sun is therefore forward scattering, which is what a positive `g` has
+        // to brighten. Getting this backwards is the classic way to end up with
+        // haze that darkens toward the light.
+        const phase = softCeiling(
+          henyeyGreenstein(rd.dot(this.uSunDir), this.uAnisotropy),
+          PHASE_CEIL,
+        ).toVar('fogPhase');
 
         // --- in-scattering ---------------------------------------------------
         //
-        // Samples are distributed as t = tEnd * s^2 rather than uniformly. The
+        // Cells are distributed as t = tEnd * s^2 rather than uniformly. The
         // weight this integral carries is sigma(t) * T(t), and both factors are
         // largest near the camera — one because the viewer is usually inside the
         // layer, the other because transmittance only ever falls. Uniform steps
         // spend most of their samples out where the integrand has already decayed
-        // to nothing. This is the same reasoning behind the exponential depth
-        // slices of a froxel volume, minus the volume.
+        // to nothing. Same reasoning as the exponential depth slices of a froxel
+        // volume, minus the volume.
         //
-        // The partition stays exact: cell i spans s in [i/N, (i+1)/N], so its
-        // length in t is tEnd * (2i + 1) / N^2, and the dither only chooses where
-        // *within* that cell the single sample lands. Step count therefore
-        // changes the noise, never the total.
+        // Each cell's weight is the exact `T(start) - T(end)`, carried forward so
+        // the boundary evaluated at the end of one cell is reused as the start of
+        // the next: one closed-form evaluation per step, and a sum that telescopes
+        // to exactly `1 - T(tEnd)` no matter how the range was divided. The dither
+        // then only chooses where *inside* each cell the lighting and the bank
+        // field get sampled. Step count changes the texture of the result and
+        // never its energy.
         const dither = interleavedGradientNoise(screenCoordinate).toVar('fogDither');
         const cell = tEnd.mul(this.uInvSteps).mul(this.uInvSteps).toVar('fogCell');
         const acc = vec3(0, 0, 0).toVar('fogAcc');
+        const boundary = float(1).toVar('fogBoundary');
 
         Loop(this.uSteps, ({ i }: any) => {
-          const s = float(i).add(dither).mul(this.uInvSteps).toVar('fogS');
-          const t = tEnd.mul(s).mul(s).toVar('fogT2');
-          const dt = cell.mul(float(i).mul(2).add(1)).toVar('fogDt');
+          // Far edge of this cell, and the transmittance there.
+          const sFar = float(i).add(1).mul(this.uInvSteps).toVar('fogSFar');
+          const tFar = tEnd.mul(sFar).mul(sFar).toVar('fogTFar');
+          const reached = this.transmittanceAt(tFar, sigmaOrigin, slope).toVar('fogReached');
+          const weight = boundary.sub(reached).max(0).toVar('fogWeight');
+          boundary.assign(reached);
 
-          const m = this.medium(t, sigmaOrigin, slope);
-          const sigma = m.sigma.toVar('fogSigma');
+          // Stochastic sample inside the cell, for everything that varies.
+          const sMid = float(i).add(dither).mul(this.uInvSteps).toVar('fogSMid');
+          const t = tEnd.mul(sMid).mul(sMid).toVar('fogT2');
+          const sigma = this.sigmaAt(t, sigmaOrigin, slope).toVar('fogSigma');
 
           const light = this.lightAt(sigma, phase).toVar('fogLight');
 
           If(this.uDetail.greaterThan(0.001), () => {
             const p = this.uCameraPos.add(rd.mul(t)).toVar('fogP');
             const q = p.add(this.uWindOffset).mul(this.uDetailScale).toVar('fogQ');
-            // Two octaves. Three or more would be prettier and this is the one
-            // place in the loop that could plausibly cost real time — a previous
-            // effect in this project evaluated two 3D lattices per step and took
-            // the frame from milliseconds to seconds.
-            const n = mx_fractal_noise_float(q, 2, 2.0, 0.5, 1.0).toVar('fogN');
+            // The one place in this loop that costs real time — see
+            // DETAIL_OCTAVES, and note that a previous effect in this project
+            // evaluated two 3D lattices per march step and took the frame from
+            // milliseconds to seconds.
+            const n = mx_fractal_noise_float(q, DETAIL_OCTAVES, 2.0, 0.5, 1.0).toVar('fogN');
 
             // Detail the march cannot resolve is not detail, it is noise. Cells
             // grow quadratically toward the far end of the march, and past
             // roughly the feature size the bank field is being point-sampled far
-            // below its Nyquist rate — which shows up as the banks crawling as
-            // the camera turns. Fade it out with the cell size instead. Same
+            // below its Nyquist rate — which shows up as banks crawling as the
+            // camera turns. Fade it out with the cell size instead. Same
             // reasoning as the cloud layer's detail fade.
+            const dt = cell.mul(float(i).mul(2).add(1)).toVar('fogDt');
             const lod = float(1).sub(dt.mul(this.uDetailLod)).clamp(0, 1).toVar('fogLod');
             light.mulAssign(float(1).add(n.mul(this.uDetail).mul(lod)).clamp(0.05, 2.2));
           });
 
-          acc.addAssign(light.mul(sigma).mul(m.transmittance).mul(dt));
+          acc.addAssign(light.mul(weight));
         });
 
         // --- the tail past the march -----------------------------------------
-        // For a segment lit uniformly, the single-scatter integral of
-        // `sigma * T` collapses to the difference of the transmittances at its
-        // ends. Exact, two exponentials, and it is the reason `maxDistance` can
-        // be lowered for performance without carving a visible shell out of the
-        // horizon.
-        const tailLight = this.lightAt(atEnd.sigma, phase);
-        const tail = tailLight.mul(atEnd.transmittance.sub(transmittance).max(0));
+        // `boundary` is now T(tEnd) exactly, so the segment from there to the
+        // scene closes with the same weight the cells used. This is why
+        // `maxDistance` can be lowered for performance without carving a visible
+        // shell out of the horizon.
+        const tailLight = this.lightAt(this.sigmaAt(tEnd, sigmaOrigin, slope), phase);
+        const tail = tailLight.mul(boundary.sub(transmittance).max(0));
 
         outRgb.assign(src.rgb.mul(transmittance).add(acc).add(tail));
       });
@@ -533,40 +609,49 @@ export class VolumetricFog {
   // -------------------------------------------------------------------------
 
   /**
-   * The medium sampled along a ray, at distance `t`.
+   * Extinction per metre at distance `t` along the ray.
    *
-   * For density that varies only with height, `sigma(y) = sigma_b * exp(-(y - base) / H)`,
-   * the optical depth along a ray leaving `y0` with vertical slope `dy` is
-   *
-   *   tau(t) = sigma_0 * (1 - exp(-k)) / (dy / H),   k = t * dy / H
-   *
-   * with `sigma_0` the extinction at the origin. Written as `sigma_0 * t * (1 - exp(-k)) / k`
-   * so the ill-behaved factor is the dimensionless `(1 - exp(-k)) / k`, whose
-   * limit at k = 0 is 1 — a horizontal ray through a constant column, which is
-   * simply `sigma_0 * t`. See K_EPSILON for how that limit is reached safely.
-   *
-   * The exponential is shared: `exp(-k)` is both the density ratio and the
-   * numerator of the optical depth, so the pair costs two exponentials rather
-   * than three. `sigma` is clamped at the layer's base value, which makes the
-   * profile a constant slab below `baseHeight` instead of an unbounded one —
-   * there is no fog under the water, and the unbounded form would otherwise
-   * dominate any ray that dipped below the surface.
-   *
-   * Returned as a plain object rather than a struct-typed `Fn` so both fields
-   * inline at all three call sites without needing a declared TSL layout.
+   * Clamped at the layer's base value, which makes the profile a constant slab
+   * below `baseHeight` rather than an unbounded one. There is no fog under the
+   * water, and the unbounded form would otherwise dominate any ray that dipped
+   * below the surface.
    */
-  private medium(t: any, sigmaOrigin: any, slope: any): { sigma: any; transmittance: any } {
+  private sigmaAt(t: any, sigmaOrigin: any, slope: any): any {
+    return sigmaOrigin.mul(exp(slope.mul(t).negate().min(EXP_CEIL))).min(this.uSigmaBase);
+  }
+
+  /**
+   * Transmittance from the camera to distance `t`, in closed form.
+   *
+   * For density that varies only with height,
+   * `sigma(y) = sigma_b * exp(-(y - base) / H)`, the optical depth along a ray
+   * leaving `y0` with vertical slope `dy` integrates exactly:
+   *
+   *   tau(t) = sigma_0 * t * (1 - exp(-k)) / k,   k = t * dy / H
+   *
+   * with `sigma_0` the extinction at the origin. This is Wenzel's height-fog
+   * integral (SIGGRAPH 2006), arranged so the path length `t` stays an explicit
+   * factor and the only division is by the *dimensionless* `k`. That arrangement
+   * is the point: writing it as `sigma_0 * (1 - exp(-k)) / (dy/H)` is
+   * algebraically identical but divides by the ray slope, so the error of any
+   * guard on that slope grows with how far the ray runs — and near-horizontal
+   * rays, the ones the guard exists for, are exactly the ones that run furthest.
+   *
+   * The limit at k = 0 is `sigma_0 * t`: a horizontal ray through a column of
+   * constant density. Wenzel reaches it with a hard branch, explicitly so no
+   * floating-point special can escape into tone mapping; K_EPSILON reaches it
+   * with a clamp instead, which is branchless and bounds the error at 5e-5
+   * whatever the distance.
+   */
+  private transmittanceAt(t: any, sigmaOrigin: any, slope: any): any {
     const k = slope.mul(t).toVar();
     const magnitude = k.abs().max(K_EPSILON);
     const kSafe = select(k.lessThan(0), magnitude.negate(), magnitude).toVar();
 
-    const decay = exp(kSafe.negate().min(EXP_CEIL)).toVar();
+    const decay = exp(kSafe.negate().min(EXP_CEIL));
     const tau = sigmaOrigin.mul(t).mul(float(1).sub(decay)).div(kSafe);
 
-    return {
-      sigma: sigmaOrigin.mul(decay).min(this.uSigmaBase),
-      transmittance: exp(tau.clamp(0, TAU_CEIL).negate()),
-    };
+    return exp(tau.clamp(0, TAU_CEIL).negate());
   }
 
   /**
@@ -579,11 +664,14 @@ export class VolumetricFog {
    * factor gives a stand-in for the sky. Two exponentials, and the bank gets a
    * lit top and a shadowed interior without a shadow map or a secondary march.
    *
-   * The approximation is the usual planar one: it ignores the planet's curvature
-   * and it integrates to infinity rather than to the top of a finite layer, both
-   * of which are exact enough for a medium whose scale height is tens of metres.
-   * It does blow up as the sun approaches the horizon, which is why `uSunPath`
-   * carries a floor rather than a raw reciprocal.
+   * That `1 / sun.y` is the plane-parallel secant law — the small-angle limit of
+   * the Chapman function, and the same approximation atmospheric solvers replace
+   * with a transmittance LUT once curvature starts to matter. For a layer whose
+   * scale height is tens of metres it never does. What does matter is that the
+   * secant diverges at the horizon where the true value stays finite, which is
+   * why `uSunPath` carries a floor rather than being a raw reciprocal: without it
+   * the entire layer goes black at exactly the elevation fog is most worth
+   * looking at.
    */
   private lightAt(sigma: any, phase: any): any {
     const vertical = sigma.mul(this.uHeight).toVar();
@@ -608,7 +696,7 @@ export class VolumetricFog {
     this.uColor.value.copy(p.color);
     this.uAmbient.value = Math.max(0, p.ambient);
     this.uSunColor.value.copy(p.sunColor);
-    this.uAnisotropy.value = clampNumber(p.anisotropy, -0.95, 0.95);
+    this.uAnisotropy.value = clampNumber(p.anisotropy, -MAX_ANISOTROPY, MAX_ANISOTROPY);
 
     const sun = this.uSunDir.value as THREE.Vector3;
     sun.copy(p.sunDirection);
@@ -680,6 +768,11 @@ function henyeyGreenstein(cosTheta: any, g: any): any {
   const g2 = g.mul(g);
   const denom = pow(float(1).add(g2).sub(cosTheta.mul(g).mul(2)).max(1e-4), 1.5);
   return float(1).sub(g2).div(denom);
+}
+
+/** Reinhard-style knee. Monotonic, asymptotic to `ceiling`. See PHASE_CEIL. */
+function softCeiling(x: any, ceiling: number): any {
+  return x.mul(ceiling).div(x.add(ceiling));
 }
 
 function clampNumber(v: number, lo: number, hi: number): number {

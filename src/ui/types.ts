@@ -37,6 +37,8 @@ export interface UiState {
    * the viewer is being invited to drive. `null` means the preset still owns it.
    */
   timeOfDay: number | null;
+  /** Volumetric fog density, 0..1. 0 is a bit-exact pass-through. */
+  fogDensity: number;
   buoyancyProbes: boolean;
   wakeProbes: boolean;
   forceWebGL: boolean;
@@ -60,6 +62,7 @@ export const DEFAULT_UI_STATE: UiState = {
   peakWavelength: 47,
   cloudCoverage: 0.32,
   timeOfDay: null,
+  fogDensity: 0.35,
   buoyancyProbes: false,
   wakeProbes: false,
   forceWebGL: false,

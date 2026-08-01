@@ -508,23 +508,39 @@ test.describe('interaction', () => {
       }, rain);
 
     const dry = await look(0);
-    const wet = await look(1);
+    const light = await look(0.35);
+    const heavy = await look(1);
     const dryAgain = await look(0);
 
-    const falling = compareImages(dry as never, wet as never);
+    const atLight = compareImages(dry as never, light as never);
+    const atHeavy = compareImages(dry as never, heavy as never);
     const recovered = compareImages(dry as never, dryAgain as never);
 
     expect(
-      falling.meanDeltaE,
-      `rain changed the surface by mean ΔE ${falling.meanDeltaE.toFixed(3)}; ` +
+      atHeavy.meanDeltaE,
+      `rain changed the surface by mean ΔE ${atHeavy.meanDeltaE.toFixed(3)}; ` +
         'near zero means impacts are not reaching the water',
     ).toBeGreaterThan(0.25);
+
+    // Monotonic, not merely different.
+    //
+    // Asserting only that rain changes the surface is too weak to be worth
+    // running: it passed while the impact mask was *inverted*, activating cells
+    // as the rain eased, because an inverted mask changes the water just as much
+    // as a correct one. Heavier rain has to disturb the surface more than
+    // lighter rain, which an inversion cannot satisfy.
+    expect(
+      atHeavy.meanDeltaE,
+      `heavy rain (ΔE ${atHeavy.meanDeltaE.toFixed(3)}) did not disturb the surface ` +
+        `more than light rain (ΔE ${atLight.meanDeltaE.toFixed(3)}) — the impact ` +
+        'mask may be inverted',
+    ).toBeGreaterThan(atLight.meanDeltaE);
 
     expect(
       recovered.meanDeltaE,
       `the surface did not return to its dry state after the rain stopped ` +
         `(mean ΔE ${recovered.meanDeltaE.toFixed(3)})`,
-    ).toBeLessThan(falling.meanDeltaE * 0.25);
+    ).toBeLessThan(atHeavy.meanDeltaE * 0.25);
   });
 
   test('camera modes switch via keyboard', async ({ page }) => {

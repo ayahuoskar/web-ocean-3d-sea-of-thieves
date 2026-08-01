@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { pass, positionWorld } from 'three/tsl';
+import { pass, positionWorld, rtt } from 'three/tsl';
 import { createRenderer, clampPixelRatio, type Backend } from './core/Renderer';
 import { Caustics, UnderwaterParticles, UnderwaterPass } from './underwater';
 import { AssetLoader, Props, Seafloor, Ship } from './scene';
@@ -17,9 +17,12 @@ import { OceanSimulation } from './ocean/OceanSimulation';
 import { OceanMesh } from './ocean/OceanMesh';
 import { OceanMaterial } from './ocean/OceanMaterial';
 import { Reflections } from './ocean/Reflections';
+import { DEFAULT_SSR_STEPS, ScreenSpaceReflection } from './ocean/ScreenSpaceReflection';
 import { OceanSampler } from './ocean/Sampler';
 import { DEFAULT_SPECTRUM } from './ocean/Spectrum';
 import { Atmosphere, Clouds, Weather } from './sky';
+import { VolumetricFog } from './post/VolumetricFog';
+import { LensRain } from './post/LensRain';
 import { CameraDirector } from './cameras/CameraDirector';
 import { getPreset } from './presets';
 import { Panel } from './ui/Panel';
@@ -65,6 +68,8 @@ class App {
   private water!: OceanMaterial;
   /** Planar reflection. Null on the WebGL2 path, which keeps the analytic sky. */
   private reflections: Reflections | null = null;
+  /** Screen-space reflection, layered over the planar one. WebGPU only. */
+  private ssr: ScreenSpaceReflection | null = null;
   private oceanMesh!: OceanMesh;
   private sampler!: OceanSampler;
 
@@ -74,6 +79,8 @@ class App {
 
   private post!: THREE.RenderPipeline;
   private underwater!: UnderwaterPass;
+  private fog!: VolumetricFog;
+  private lensRain!: LensRain;
   private particles!: UnderwaterParticles;
   private caustics!: Caustics;
 
@@ -178,6 +185,8 @@ class App {
     if (this.backend === 'webgpu') {
       this.reflections = new Reflections(QUALITY_TIERS[this.state.quality].reflectionScale);
       this.scene.add(this.reflections.plane);
+      this.ssr = new ScreenSpaceReflection();
+      this.ssr.setCamera(this.camera);
     }
 
     boot.set(0.5, 'Compiling water shaders…');
@@ -218,16 +227,55 @@ class App {
     // as of r183 and warns on every boot.
     this.post = new THREE.RenderPipeline(this.renderer);
     const scenePass = pass(this.scene, this.camera);
-    this.post.outputNode = this.underwater.build(
-      scenePass.getTextureNode(),
-      // Must be the depth *texture* node: the pass linearises it to find where
-      // the scene stops, which is what bounds the shaft march and gives the
-      // shafts their occlusion for free.
-      scenePass.getTextureNode('depth'),
-      // The shafts are an integral of this field along the view ray, so passing
-      // it here is what makes them and the seafloor pattern the same light.
-      (worldPosition) => this.caustics.intensityNode(worldPosition),
-    ) as THREE.Node;
+    // Must be the depth *texture* node: both passes linearise it to find where
+    // the scene stops, which is what bounds their marches.
+    const sceneDepth = scenePass.getTextureNode('depth');
+
+    this.fog = new VolumetricFog();
+    // Required: a post pass draws with the post-processor's own orthographic
+    // quad camera, so the scene camera has to be handed over explicitly.
+    this.fog.setCamera(this.camera);
+
+    // Fog wraps the underwater pass, not the other way round.
+    //
+    // `UnderwaterPass.build` samples its colour input and reads `uvNode`, so it
+    // has to consume the raw texture node; the fog accepts either that or an
+    // already-composited colour. Above water the underwater pass is a bit-exact
+    // pass-through, so the ordering only matters below the surface — where the
+    // fog is faded out anyway, since there is no atmosphere down there.
+    this.lensRain = new LensRain();
+
+    const graded = this.fog.build(
+      this.underwater.build(
+        scenePass.getTextureNode(),
+        sceneDepth,
+        // The shafts are an integral of this field along the view ray, so
+        // passing it here is what makes them and the seafloor pattern the same
+        // light.
+        (worldPosition) => this.caustics.intensityNode(worldPosition),
+      ),
+      sceneDepth,
+    );
+
+    // Lens rain comes last, and needs the graded image resolved to a texture
+    // first.
+    //
+    // Both it and the underwater pass re-sample the image at displaced
+    // coordinates, so both need a *texture* node rather than a composited colour
+    // — and a composited node is exactly what each produces. They therefore
+    // cannot be nested directly in either order, and putting the droplets first
+    // was not merely wrong but silently fatal: the underwater pass called
+    // `.sample()` on something that has no such method and the whole frame came
+    // out black.
+    //
+    // `rtt` resolves the chain into a texture at the cost of one fullscreen
+    // pass. That is the right place to spend it: droplets are lenses, and what
+    // they should be refracting is the finished image — fog, grade and all — not
+    // the raw scene behind it.
+    //
+    // All of this lives inside `outputNode`, so the droplets are part of the
+    // rendered frame while the DOM HUD stays crisp on top of them.
+    this.post.outputNode = this.lensRain.build(rtt(graded as THREE.Node)) as THREE.Node;
 
     boot.set(0.85, 'Wiring controls…');
     this.director = new CameraDirector({
@@ -543,6 +591,10 @@ class App {
       floorDepthNode: (worldPosition) => this.seafloor.depthNode(worldPosition),
       foam: { texture: this.wake.texture, extent: this.wake.extent },
       reflectionNode: this.reflections?.node ?? null,
+      ssrNode: this.ssr
+        ? (worldPosition, worldNormal, fallback) =>
+            this.ssr!.reflectionNode(worldPosition, worldNormal, fallback)
+        : null,
     });
   }
 
@@ -597,6 +649,12 @@ class App {
     this.water.setDepthRange(this.camera.far - this.camera.near);
     this.water.setReflection(quality.reflection);
     this.reflections?.setQuality(quality.reflectionScale);
+    this.ssr?.setQuality(DEFAULT_SSR_STEPS[tier]);
+    this.ssr?.setStrength(quality.reflection);
+    this.fog.setSteps(quality.fogSteps);
+    // WebGL2 gets the two-lattice floor whatever the tier, matching the rest of
+    // the fallback policy.
+    this.lensRain.setQuality(this.backend === 'webgl' ? 1 : quality.lensRainQuality);
 
     this.applyPreset();
   }
@@ -726,11 +784,19 @@ class App {
     this.water.setSun(_keyDirection, key.color, key.intensity * 1.8, key.intensity / 3.4);
     // The sun moves and the sky follows it, so these have to be refreshed every
     // frame rather than only when a preset is applied.
+    //
+    // The water's own aerial perspective is wound back as the volumetric fog
+    // comes up. Both describe the same air between the viewer and the horizon,
+    // and running them at full strength together fogs it twice — the surface
+    // term is a cheap analytic far-field haze and the volumetric pass is the
+    // better answer wherever it is active, so the analytic one yields to it
+    // rather than the two being summed.
+    const fogPreset = getPreset(this.state.preset).fog;
     this.water.setSky(
       this.atmosphere.zenithColor,
       this.atmosphere.horizonColor,
-      getPreset(this.state.preset).fog.color,
-      getPreset(this.state.preset).fog.density,
+      fogPreset.color,
+      fogPreset.density * (1 - 0.75 * this.state.fogDensity),
     );
 
     // Rain reaches the water. Only rain does — snow settles far too slowly to
@@ -743,6 +809,8 @@ class App {
     // Agitation: heavy rain whitens a sea surface on its own, independently of
     // whether the waves are steep enough to break.
     this.wake.setRainAgitation(raining);
+
+    this.lensRain.setIntensity(raining);
 
     this.simulation.update(elapsed);
     // Deterministic stepping owns the readback and awaits it; kicking off a
@@ -773,10 +841,37 @@ class App {
     });
     this.underwater.update(dt);
 
+    // Rain on the lens. Placed here rather than with the other rain wiring
+    // because it needs `submersion`, which is only known once the camera has
+    // been resolved against the surface — the effect suppresses itself as the
+    // viewer goes under, since there is no lens above water to bead on.
+    this.lensRain.setSubmersion(submersion);
+    this.lensRain.update(dt);
+
+    // Volumetric fog follows the key light, and fades out as the camera goes
+    // under. There is no atmosphere below the waterline — the medium down there
+    // is the underwater pass's job, and leaving both on would stack two
+    // different descriptions of the same water on top of each other.
+    this.fog.setParams({
+      sunDirection: _keyDirection,
+      sunColor: this.atmosphere.sunLight.color,
+      sunIntensity: Math.max(0.05, this.atmosphere.sunLight.intensity / 3.4),
+      // The slider is 0..1; `density` is extinction per metre. 0.021 at the top
+      // of the range is visibility of roughly fifty metres — thick sea fog, and
+      // about as far as this should go before the scene stops being visible at
+      // all. Feeding the slider value in raw made it a hundred times too dense
+      // and rendered a black frame.
+      density: this.state.fogDensity * 0.021 * (1 - submersion),
+      windDirection: preset.sea.windDirection,
+      windSpeed: 0.4 + this.state.windSpeed * 0.06,
+    });
+    this.fog.update(dt);
+
     // Particles only cost anything while they can actually be seen.
     this.particles.setVisible(submersion > 0.01);
     if (submersion > 0.01) this.particles.update(dt, this.camera.position);
 
+    this.ssr?.update(dt);
     this.caustics.setSunDirection(this.atmosphere.sunDirection);
     this.caustics.update(dt);
     // Re-bake around the viewer. Must run outside an active render target, so it
@@ -933,6 +1028,8 @@ class App {
           this.weather.resetClock(start);
           this.particles.resetClock(start);
           this.underwater.resetClock(start);
+          this.fog.resetClock(start);
+          this.lensRain.resetClock(start);
           this.caustics.resetClock(start);
           this.atmosphere.resetClock(start);
           this.clouds.resetWind();
@@ -997,6 +1094,8 @@ class App {
     this.clouds?.dispose();
     this.weather?.dispose();
     this.underwater?.dispose();
+    this.fog?.dispose();
+    this.lensRain?.dispose();
     this.particles?.dispose();
     this.caustics?.dispose();
     this.shipControls?.dispose();
@@ -1006,6 +1105,7 @@ class App {
     this.props?.dispose();
     this.seafloor?.dispose();
     this.reflections?.dispose();
+    this.ssr?.dispose();
     this.assets?.dispose();
     this.captureTarget?.dispose();
     this.renderer?.dispose();

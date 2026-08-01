@@ -275,7 +275,10 @@ export class UnderwaterPass {
           // concentric bands; the dither trades that for fine noise, which the
           // eye reads as suspended particulate.
           const dither = interleavedGradientNoise(screenCoordinate).toVar('uwDither');
-          const t = stepLength.mul(dither).toVar('uwT');
+          // `uwMarchT`, not `uwT` — the transmission term above already claims
+          // that name, and TSL silently renames the collision rather than
+          // failing, which makes the shader harder to read than it needs to be.
+          const t = stepLength.mul(dither).toVar('uwMarchT');
           const acc = float(0).toVar('uwAcc');
 
           Loop(this.uSteps, () => {
