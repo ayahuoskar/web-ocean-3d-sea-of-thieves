@@ -141,7 +141,10 @@ class App {
     // shader had already been built without it. It owns no assets, so there is
     // nothing to wait for.
     this.buoyancy = new BuoyancySystem();
-    this.wake = new Wake();
+    this.wake = new Wake({
+      derivativeTextures: this.simulation.derivativeTextures,
+      tileSizes: this.simulation.tileSizes,
+    });
     this.scene.add(this.wake.debugObject);
 
     boot.set(0.5, 'Compiling water shaders…');
@@ -504,6 +507,8 @@ class App {
       this.simulation.derivativeTextures,
       this.simulation.tileSizes,
     );
+    // The foam buffer reads the same fields to find breaking crests.
+    this.wake.setCascades(this.simulation.derivativeTextures, this.simulation.tileSizes);
 
     this.scene.remove(this.oceanMesh.mesh);
     this.oceanMesh.dispose();
@@ -643,17 +648,23 @@ class App {
       const speed = this.previousShipPosition.distanceTo(position) / Math.max(dt, 1e-4);
       this.previousShipPosition.copy(position);
 
-      // The buffer stays anchored on the hull rather than on the viewer. It is
-      // the ship's wake, the ship is what deposits into it, and re-centring on a
-      // camera that can fly across the ocean in seconds would scroll the whole
-      // history out through the edge of a footprint the hull never left.
-      this.wake.setCenter(position.x, position.z);
       this.wake.emit(position.x, position.z, ship.heading, speed, ship.hullBeam);
 
       this.chaseTarget.position.copy(position);
       this.chaseTarget.heading = ship.heading;
       this.director.setChaseTarget(this.chaseTarget);
     }
+
+    // Centred on the viewer, not on the hull.
+    //
+    // It was the hull's while it only held the wake. Now that breaking crests
+    // deposit into the same buffer it has to cover what is being *looked at*,
+    // or the whitecaps stop at an invisible circle a few hundred metres from a
+    // ship that may not even be on screen. The wake still deposits at the hull's
+    // world position and simply falls out of the footprint when the camera
+    // leaves it behind, which is the correct trade: foam you can see beats foam
+    // you cannot.
+    this.wake.setCenter(this.camera.position.x, this.camera.position.z);
 
     // Outside the `ship` branch: the foam has to keep decaying whether or not
     // anything is depositing into it, or a wake left by a ship that has since

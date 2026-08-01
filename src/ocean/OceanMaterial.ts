@@ -482,8 +482,14 @@ export class OceanMaterial {
       // elevation: the same amount of folding produces foam on a crest and
       // almost none a metre lower down. This is what turns smooth blobs into
       // streaks that follow the wave tops.
-      const crestBias = worldPos.y.smoothstep(-0.6, 1.8).clamp(0, 1).toVar();
-      const biased = coverage.mul(crestBias.mul(0.75).add(0.25)).toVar();
+      //
+      // The bias now runs to zero rather than bottoming out at a quarter. That
+      // floor was there to keep the instantaneous mask looking continuous, and
+      // it is exactly what put a wash of foam into every trough; with the
+      // accumulation buffer carrying persistence, this term no longer has to
+      // pretend to be continuous and can be as selective as real whitecaps are.
+      const crestBias = worldPos.y.smoothstep(-0.2, 2.2).clamp(0, 1).toVar();
+      const biased = coverage.mul(crestBias).toVar();
 
       // Break the mask up with world-space noise at roughly the scale of real
       // foam clumps (sub-metre), so the edge dissolves into bubbles rather than
@@ -541,9 +547,8 @@ export class OceanMaterial {
         const present = accumulated.smoothstep(0.02, 0.2).toVar();
         accumulated.assign(
           accumulated
-            .mul(1.35)
-            .add(perturb.mul(0.3).mul(present))
-            .smoothstep(0.1, 0.65)
+            .add(perturb.mul(0.22).mul(present))
+            .smoothstep(0.16, 0.72)
             .clamp(0, 1)
             .mul(present),
         );

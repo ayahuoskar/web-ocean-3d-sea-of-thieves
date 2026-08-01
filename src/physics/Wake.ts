@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { Fn, float, texture, uniform, uv, vec2, vec4 } from 'three/tsl';
+import { Fn, float, mix, texture, uniform, uv, vec2, vec4 } from 'three/tsl';
 
 /**
  * World-anchored wake foam buffer.
@@ -46,6 +46,9 @@ const REFERENCE_SPEED = 7;
 /** tan(19.47 deg) — the Kelvin wedge half-angle. */
 const KELVIN_SLOPE = 0.3536;
 
+/** Cascade slots the accumulate pass is built with. Matches `OceanMaterial`. */
+const WAKE_CASCADES = 3;
+
 /**
  * TSL node objects are structurally dynamic; the generated types cannot express
  * a uniform whose component type is only known at construction. Node-typed
@@ -85,6 +88,40 @@ export class Wake {
   private readonly uScroll = uniform(new THREE.Vector2());
   private readonly uDecay = uniform(1);
   private readonly uCenter = uniform(new THREE.Vector2());
+  /** Frame step, seconds, so deposits are a rate rather than a per-frame amount. */
+  private readonly uStep = uniform(1 / 60);
+  /**
+   * Jacobian below which the surface counts as breaking.
+   *
+   * Low, because folding is rare: the measured sea state carries a mean Jacobian
+   * of 0.86/0.95/0.98 per cascade and only about 0.1% of the surface is actually
+   * folded at any instant, against a few percent whitecap coverage. A threshold
+   * loose enough to catch "nearly folding" catches most of the ocean.
+   */
+  private readonly uBreakThreshold = uniform(0.14);
+  /**
+   * Foam deposited per second by fully-broken water.
+   *
+   * The value that matters is `rate * DECAY_TAU`, which is the coverage this
+   * settles at under continuous breaking — an equilibrium, not a per-frame
+   * amount. At 2.6 that product was 4.4 and clamped to 1, so anything that broke
+   * even weakly saturated to solid white within a frame or two. 0.5 settles just
+   * under a fully-white 1 for water that is breaking hard and continuously, and
+   * proportionally less for everything else.
+   */
+  private readonly uBreakRate = uniform(0.5);
+
+  /**
+   * Wave derivative bindings for the breaking-crest term.
+   *
+   * Built once for the maximum cascade count and re-pointed by `setCascades`,
+   * for the same reason `OceanMaterial` does it: a tier change recreates the
+   * simulation's targets, and rebuilding this material to follow them would
+   * recompile a shader mid-session and leak what it replaced.
+   */
+  private readonly derivativeNodes: any[] = [];
+  private readonly uTileSizes: any[] = [];
+  private readonly uCascadeWeights: any[] = [];
   private readonly emitters: EmitterUniforms[] = [];
 
   /** Pending emissions: [x, z, heading, speed, width] per slot. */
@@ -101,9 +138,27 @@ export class Wake {
   private readonly debugMaterial: THREE.MeshBasicNodeMaterial;
   private disposed = false;
 
-  constructor(resolution = 512, extent = 420) {
+  /**
+   * @param waves Derivative fields and tile sizes, for the breaking-crest term.
+   *
+   * 1024 rather than 512 by default: the buffer now carries whitecaps as well as
+   * the wake, and whitecap edges are decimetre features. Over a 420 m footprint
+   * 512 is 0.82 m per texel, which turns a crest streak into a smear.
+   */
+  constructor(
+    waves: { derivativeTextures: THREE.Texture[]; tileSizes: number[] },
+    resolution = 1024,
+    extent = 420,
+  ) {
     this.resolution = resolution;
     this.extent = extent;
+
+    for (let i = 0; i < WAKE_CASCADES; i++) {
+      const source = Math.min(i, waves.derivativeTextures.length - 1);
+      this.derivativeNodes.push(texture(waves.derivativeTextures[source]) as any);
+      this.uTileSizes.push(uniform(waves.tileSizes[source]));
+      this.uCascadeWeights.push(uniform(i < waves.derivativeTextures.length ? 1 : 0));
+    }
 
     this.buffers = [makeTarget(resolution), makeTarget(resolution)];
     this.output = makeTarget(resolution);
@@ -148,6 +203,23 @@ export class Wake {
     this.debugObject.visible = false;
     this.debugObject.add(this.debugMesh);
     this.debugMesh.position.y = 3;
+  }
+
+  /** Re-points the wave bindings after a tier change. See `derivativeNodes`. */
+  setCascades(derivativeTextures: THREE.Texture[], tileSizes: number[]): void {
+    const active = Math.min(derivativeTextures.length, WAKE_CASCADES);
+    for (let i = 0; i < WAKE_CASCADES; i++) {
+      const source = Math.min(i, active - 1);
+      this.derivativeNodes[i].value = derivativeTextures[source];
+      this.uTileSizes[i].value = tileSizes[source];
+      this.uCascadeWeights[i].value = i < active ? 1 : 0;
+    }
+  }
+
+  /** Tunes how readily the surface is treated as breaking, and how fast it foams. */
+  setBreaking(threshold: number, rate: number): void {
+    this.uBreakThreshold.value = threshold;
+    this.uBreakRate.value = Math.max(0, rate);
   }
 
   /** Recentres the world footprint. Contents are resampled on the next update. */
@@ -205,6 +277,7 @@ export class Wake {
       (this.centerZ_ - this.appliedZ) / this.extent,
     );
     this.uDecay.value = Math.exp(-step / DECAY_TAU);
+    this.uStep.value = step;
     setVec2(this.uCenter.value as THREE.Vector2, this.centerX_, this.centerZ_);
 
     for (let i = 0; i < MAX_EMITTERS; i++) {
@@ -312,6 +385,36 @@ export class Wake {
 
       const world = coord.sub(0.5).mul(extent).add(this.uCenter).toVar();
       const deposit = float(0).toVar();
+
+      // --- breaking crests ----------------------------------------------------
+      //
+      // Whitecaps deposit into the same buffer as the wake, and for the same
+      // reason they belong in a buffer at all: foam is *history*. Air entrained
+      // by a wave that broke two seconds ago is still on the water, drifting and
+      // dissolving, long after the wave itself has moved on.
+      //
+      // Evaluating the fold per fragment each frame — which is what the surface
+      // used to do — cannot express that. It can only ever show where the water
+      // is folding *now*, so foam appears and vanishes with the wave instead of
+      // being left behind by it, and to read as continuous at all it has to be
+      // spread far more widely than real whitecaps are. That is why the near
+      // field was a third white.
+      //
+      // Here the same fold drives a *rate*, and persistence and dissipation are
+      // left to the accumulation. Coverage can then be sparse and still read as
+      // foam, because what the eye integrates is the trail, not the instant.
+      const fold = float(1).toVar();
+      for (let i = 0; i < WAKE_CASCADES; i++) {
+        const d = this.derivativeNodes[i].sample(world.div(this.uTileSizes[i])).toVar();
+        // Unused cascades are weighted to 1 — the neutral value for a running
+        // minimum — rather than to 0, which would read as maximal folding
+        // everywhere and paint the whole ocean white.
+        fold.assign(fold.min(mix(float(1), d.z, this.uCascadeWeights[i])));
+      }
+      // Only genuinely folding water breaks. The threshold is deliberately
+      // tighter than the old per-frame mask could afford to be.
+      const breaking = fold.smoothstep(this.uBreakThreshold, this.uBreakThreshold.sub(0.22));
+      deposit.addAssign(breaking.mul(this.uBreakRate).mul(this.uStep));
 
       for (let i = 0; i < MAX_EMITTERS; i++) {
         const slot = this.emitters[i];
