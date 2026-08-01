@@ -156,7 +156,34 @@ No screenshot is fabricated or borrowed. They are, however, **hand-picked and un
 
 ---
 
-## 7. Summary
+## 7. Status since the audit
+
+The audit above records the state this pass started from. What has changed since,
+with the commit that changed it:
+
+| Row | Was | Now |
+|---|---|---|
+| Wake foam | PARTIAL — buffer computed, never sampled | **WIRED.** Bound into the surface; a test deposits a wake and requires the water to change |
+| Jacobian whitecaps | PARTIAL — no persistence | **WIRED.** Breaking crests deposit into the same accumulation buffer and decay over seconds |
+| Sky reflection | PARTIAL — analytic gradient | **WIRED.** Planar reflection of the scene on WebGPU; a test hides the ship and requires the water below the horizon to change |
+| Refraction / transmission | ABSENT | **WIRED.** Scene backdrop sampled through the surface normal, water column measured from the depth buffer |
+| Ship control | ABSENT | **WIRED.** Throttle and rudder as forces into the buoyancy solver; four behavioural tests |
+| HUD W/S and A/D hints | ABSENT | **WIRED.** Both now do what they advertise; the unimplemented "Camera / Mouse" hint was removed |
+| Underwater god rays | WIRED but wrong | **Rebuilt.** Volumetric integral of the caustics field along the view ray, converging on the refracted sun and occluded by geometry |
+| `shadowMapSize`, `underwaterParticles` | PARTIAL | **WIRED**, and verified per tier |
+| D1–D6 | 6 defects | All fixed |
+
+Still open, and now recorded in `README.md` as limitations: the waterline is a
+whole-frame cross-fade rather than a per-pixel split, there is no Snell window or
+total internal reflection, sun glitter is isotropic, and rain remains an
+uncoupled overlay.
+
+Three defects were introduced during the work and caught by the harness rather
+than by review — a framebuffer feedback loop, a pooled-readback buffer read past
+its length, and a backdrop texture leaked on every tier change. They are
+described in the commits that fixed them.
+
+## 8. Summary
 
 - **5 dead quality settings** removed.
 - **2 partially wired settings** (`shadowMapSize`, `underwaterParticles`) connected properly.

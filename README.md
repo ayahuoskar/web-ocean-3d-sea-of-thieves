@@ -81,7 +81,11 @@ sample points the physics solves against.*
 | **1 / 2 / 3** | Orbit / Fly / Boat camera |
 | **Orbit** | LMB drag rotate · RMB drag pan · scroll zoom |
 | **Fly** | click to capture the mouse · WASD · Space/Ctrl up-down · Shift boost |
-| **Boat** | chase camera locked to the ship |
+| **Boat** | **W/S** throttle ahead and astern · **A/D** rudder · chase camera follows the hull |
+
+Boat mode selects the ship, not just a camera. Leaving it releases ship input, so Orbit and
+Fly keep their own keys. The rudder is a foil: it has little authority until the ship has way
+on, and it reverses when making sternway.
 
 Drop the camera below the surface in any mode to trigger the underwater state.
 
@@ -90,6 +94,12 @@ Drop the camera below the surface in any mode to trigger the underwater state.
 ## Features
 
 **Ocean**
+- Depth-aware refraction: the scene behind the surface, distorted by the wave normal, with
+  the water column measured from the depth buffer and Beer–Lambert absorption over it
+- Planar reflection of ship, props and clouds, faded out at the frame edge and at grazing
+  angles where the plane approximation stops describing anything
+- Persistent foam: breaking crests and the ship's wake deposit into one world-anchored buffer
+  that decays over seconds, rather than a mask recomputed every frame
 - JONSWAP directional spectrum with live wind-speed and peak-wavelength control
 - Three spectral cascades (512 m / 128 m / 16 m tiles) — swell, chop and ripple with no
   visible tiling
@@ -100,7 +110,9 @@ Drop the camera below the surface in any mode to trigger the underwater state.
 - Shallow-water tint driven by real seafloor depth
 
 **World**
-- Sailing ship riding the surface with a trailing Kelvin wake
+- Steerable sailing ship: throttle and rudder resolved into forces the buoyancy solver
+  integrates, so propulsion composes with heave, pitch and roll instead of overriding them
+- Trailing Kelvin wake driven by speed along the bow, curving with the turn and dissipating
 - Buoys and barrels floating independently
 - Procedural seafloor with animated caustics; island silhouette
 - Preetham-model sky with raymarched volumetric clouds, stars, moon, rain and snow
@@ -215,18 +227,19 @@ Full methodology, cost model and the honest list of what remains unmeasured:
   True GPU timings need timestamp queries, which are not implemented.
 - **Material compilation is not prewarmed** — a one-off ~57 ms frame occurs when the ship and
   props finish loading.
-- **The surface reflects an analytic sky gradient, not the scene.** No screen-space or planar
-  reflection exists, so the ship and clouds do not appear in the water.
-- **No refraction.** The surface is opaque; depth colour comes from the seafloor heightfield
-  rather than from refracted scene colour.
-- **Wake foam is computed but not displayed.** `physics/Wake.ts` maintains a correct
-  world-anchored foam buffer every frame that the surface shader does not sample; only the
-  Wake Probes debug overlay can show it.
-- **Whitecaps do not persist.** Foam is recomputed each frame from the instantaneous
-  Jacobian, so it neither advects nor dissipates.
-- **Boat mode is a chase camera only.** The HUD advertises W/S throttle and A/D steering that
-  are not implemented.
-- **God rays are subtle** in high-visibility presets, where there is little to scatter.
+- **The waterline is not a true split.** `submersion` cross-fades the whole frame rather than
+  masking it per pixel, so a camera sitting exactly at the surface does not show water below
+  and air above in the same image. The canonical `waterline` shot is a grazing view, not a
+  meniscus.
+- **No Snell window or total internal reflection.** Looking up from below shows the surface
+  underside shaded like the topside, not the compressed disc of sky and mirrored water that
+  real water produces.
+- **Sun glitter is isotropic.** It should stretch toward the viewer rather than reading as a
+  round highlight.
+- **Rain is an uncoupled overlay.** It does not disturb the surface, wet the ship, or reach
+  the lens.
+- **One machine.** Every performance figure comes from a single RTX 5090; nothing here
+  establishes where the quality tiers stop working.
 - Playwright's bundled Chromium exposes no WebGPU adapter, so it renders through a software
   rasteriser. Screenshot-dependent tests skip there rather than being loosened until they
   pass; a software-runner result is inconclusive, not a pass.
