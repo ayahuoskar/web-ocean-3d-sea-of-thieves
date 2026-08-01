@@ -18,6 +18,10 @@ import { Panel } from './ui/Panel';
 import { Hud } from './ui/Hud';
 import { DEFAULT_UI_STATE, type UiState } from './ui/types';
 
+/** Scratch for the test-hook camera pin; the hook must not allocate either. */
+const _pinPosition = new THREE.Vector3();
+const _pinTarget = new THREE.Vector3();
+
 const boot = {
   root: document.getElementById('boot'),
   bar: document.getElementById('boot-bar'),
@@ -56,7 +60,7 @@ class App {
   private clouds!: Clouds;
   private weather!: Weather;
 
-  private post!: THREE.PostProcessing;
+  private post!: THREE.RenderPipeline;
   private underwater!: UnderwaterPass;
   private particles!: UnderwaterParticles;
   private caustics!: Caustics;
@@ -80,6 +84,14 @@ class App {
 
   private state: UiState = { ...DEFAULT_UI_STATE };
   private disposed = false;
+  /** True once the async scene-content load has settled, whatever the outcome. */
+  private sceneContentLoaded = false;
+  /** True once `compileAsync` has built the initial pipeline set. */
+  private shadersReady = false;
+  /** Lazily created offscreen target for `capturePixels`. */
+  private captureTarget: THREE.RenderTarget | null = null;
+  /** True while `stepDeterministic` owns the wave-field readback. */
+  private deterministic = false;
 
   constructor(canvas: HTMLCanvasElement, uiRoot: HTMLElement) {
     this.canvas = canvas;
@@ -123,12 +135,7 @@ class App {
     this.scene.add(this.seafloor.mesh);
 
     boot.set(0.5, 'Compiling water shaders…');
-    this.water = new OceanMaterial({
-      displacementTextures: this.simulation.displacementTextures,
-      derivativeTextures: this.simulation.derivativeTextures,
-      tileSizes: this.simulation.tileSizes,
-      floorDepthNode: (worldPosition) => this.seafloor.depthNode(worldPosition),
-    });
+    this.water = this.buildWaterMaterial();
     this.oceanMesh = new OceanMesh(this.water.material, {
       radialSegments: quality.meshRings,
       angularSegments: quality.meshSegments,
@@ -161,7 +168,9 @@ class App {
     // frame path.
     this.seafloor.setCaustics(this.caustics.intensityNode(positionWorld));
 
-    this.post = new THREE.PostProcessing(this.renderer);
+    // `RenderPipeline`, not the `PostProcessing` alias: the latter is deprecated
+    // as of r183 and warns on every boot.
+    this.post = new THREE.RenderPipeline(this.renderer);
     const scenePass = pass(this.scene, this.camera);
     this.post.outputNode = this.underwater.build(
       scenePass.getTextureNode(),
@@ -189,10 +198,22 @@ class App {
 
     window.addEventListener('resize', this.onResize);
 
-    this.loop = new Loop(() => {
-      this.post.render();
-    });
+    // `renderAsync`, not `render`. The synchronous form queues GPU work and
+    // returns immediately, so `Loop`'s `await` completed before the frame did:
+    // `frameMs` was timing the submit rather than the work, and the `inFlight`
+    // guard that is supposed to stop unbounded queueing never actually held
+    // anything back. It also left the deterministic capture path racing a render
+    // that was still in flight, which is what made repeated captures of an
+    // identical world disagree.
+    this.loop = new Loop(() => this.post.renderAsync());
     this.loop.add(this.update);
+
+    // Prewarm behind the boot overlay. Every pipeline the first frame will need
+    // is compiled here rather than on first draw — otherwise the frame that
+    // first shows the water pays for compiling it, which is exactly the spike
+    // this project previously measured at ~57 ms when scene content arrived.
+    boot.set(0.95, 'Compiling pipelines…');
+    await this.prewarm();
 
     boot.set(1, 'Ready');
     this.loop.start();
@@ -206,22 +227,128 @@ class App {
     void this.loadSceneContent();
   }
 
+  /**
+   * Advances the world by `steps` increments of `dt`, awaiting a fresh wave-field
+   * readback before each one.
+   *
+   * The interactive path fires the sampler readback and does not wait for it, so
+   * buoyancy runs on data that is a frame or two old and *how* old depends on the
+   * machine. That is invisible in motion and fatal to reproducibility: the hull
+   * ends up somewhere slightly different every run, and so does its wake. Here we
+   * pay the stall, once per step, and get the same hull position every time.
+   */
+  private async stepDeterministic(dt: number, steps = 1): Promise<void> {
+    this.deterministic = true;
+    try {
+      for (let i = 0; i < steps; i++) {
+        await this.sampler.readNow();
+        await this.loop.step(dt, 1);
+      }
+    } finally {
+      this.deterministic = false;
+    }
+  }
+
+  /**
+   * Renders the full post-processed frame into an offscreen target and reads the
+   * pixels straight back.
+   *
+   * This is the capture path the visual harness uses, in preference to a
+   * compositor screenshot. A screenshot goes through the browser's own
+   * presentation path — it can arrive a frame late, it is subject to whatever
+   * the compositor decides about colour management, and under automation it may
+   * not arrive at all. Reading the render target is the same pixels the shader
+   * wrote, on demand, with no frame-pacing dependency.
+   *
+   * The returned buffer is RGBA8, bottom-up (render-target origin), which the
+   * harness flips when it encodes.
+   */
+  async capturePixels(): Promise<{ width: number; height: number; data: Uint8Array }> {
+    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    const width = Math.max(1, Math.floor(size.x));
+    const height = Math.max(1, Math.floor(size.y));
+
+    if (
+      this.captureTarget === null ||
+      this.captureTarget.width !== width ||
+      this.captureTarget.height !== height
+    ) {
+      this.captureTarget?.dispose();
+      this.captureTarget = new THREE.RenderTarget(width, height, {
+        type: THREE.UnsignedByteType,
+        format: THREE.RGBAFormat,
+        colorSpace: THREE.SRGBColorSpace,
+        depthBuffer: false,
+        stencilBuffer: false,
+        generateMipmaps: false,
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+      });
+    }
+
+    const previous = this.renderer.getRenderTarget();
+    this.renderer.setRenderTarget(this.captureTarget);
+    // Rendered twice, and the first result discarded.
+    //
+    // The wave displacement and derivative targets carry generated mip chains,
+    // and the surface samples them trilinearly with anisotropy — so the mid- and
+    // far-field shading reads from mips built by the same frame that draws them.
+    // The first render after a simulation step can therefore sample a chain that
+    // is still being built, which showed up as a several-percent brightness
+    // swing across everything past the near field while the foreground stayed
+    // bit-identical. The second render always sees a settled chain.
+    await this.post.renderAsync();
+    await this.post.renderAsync();
+    this.renderer.setRenderTarget(previous);
+
+    const raw = await this.renderer.readRenderTargetPixelsAsync(
+      this.captureTarget,
+      0,
+      0,
+      width,
+      height,
+    );
+    return { width, height, data: new Uint8Array(raw.buffer ?? raw) };
+  }
+
+  /**
+   * Compiles every material in the scene against the current camera before the
+   * loop starts.
+   *
+   * `compileAsync` walks the visible graph and builds the render pipelines
+   * without drawing, so the cost lands behind the loading overlay where the user
+   * is already waiting. It is best-effort: a backend that cannot honour it must
+   * not stop the app from starting.
+   */
+  private async prewarm(): Promise<void> {
+    try {
+      await this.renderer.compileAsync(this.scene, this.camera);
+      this.shadersReady = true;
+    } catch (error) {
+      console.warn('[ocean] pipeline prewarm skipped', error);
+    }
+  }
+
   private async loadSceneContent(): Promise<void> {
     this.assets = new AssetLoader();
     this.buoyancy = new BuoyancySystem();
     this.wake = new Wake();
     this.scene.add(this.wake.debugObject);
 
-    try {
-      const [ship, props] = await Promise.all([
-        Ship.load(this.assets),
-        Props.load(this.assets),
-      ]);
-      if (this.disposed) return;
+    // Settled, not `Promise.all`. The ship and the scene dressing are separate
+    // features and must fail separately: one unreachable prop asset previously
+    // rejected the whole batch, taking the ship, buoyancy and the wake with it
+    // and leaving an empty ocean with nothing but a console error to show for it.
+    const [shipResult, propsResult] = await Promise.allSettled([
+      Ship.load(this.assets),
+      Props.load(this.assets),
+    ]);
+    if (this.disposed) return;
 
+    if (shipResult.status === 'fulfilled') {
+      const ship = shipResult.value;
       this.ship = ship;
-      this.props = props;
-      this.scene.add(ship.object, props.object);
+      this.scene.add(ship.object);
 
       this.shipBody = new BuoyantBody({
         object: ship.object,
@@ -229,6 +356,18 @@ class App {
         mass: 90_000,
       });
       this.buoyancy.add(this.shipBody);
+
+      ship.setDebugProbesVisible(this.state.buoyancyProbes);
+      this.wake.setDebugVisible(this.state.wakeProbes);
+      this.previousShipPosition.copy(ship.object.position);
+    } else {
+      console.error('[ocean] ship failed to load', shipResult.reason);
+    }
+
+    if (propsResult.status === 'fulfilled') {
+      const props = propsResult.value;
+      this.props = props;
+      this.scene.add(props.object);
 
       for (const floater of props.floaters) {
         this.buoyancy.add(
@@ -240,14 +379,11 @@ class App {
           }),
         );
       }
-
-      ship.setDebugProbesVisible(this.state.buoyancyProbes);
-      this.wake.setDebugVisible(this.state.wakeProbes);
-      this.previousShipPosition.copy(ship.object.position);
-    } catch (error) {
-      // Missing models must not take the ocean down with them.
-      console.error('[ocean] scene content failed to load', error);
+    } else {
+      console.error('[ocean] scene props failed to load', propsResult.reason);
     }
+
+    this.sceneContentLoaded = true;
   }
 
   private buildUi(): void {
@@ -307,6 +443,21 @@ class App {
     }
   }
 
+  /**
+   * The one place the water surface is constructed.
+   *
+   * Both the initial build and every tier rebuild go through here, so a new
+   * input can never be wired into one path and forgotten in the other.
+   */
+  private buildWaterMaterial(): OceanMaterial {
+    return new OceanMaterial({
+      displacementTextures: this.simulation.displacementTextures,
+      derivativeTextures: this.simulation.derivativeTextures,
+      tileSizes: this.simulation.tileSizes,
+      floorDepthNode: (worldPosition) => this.seafloor.depthNode(worldPosition),
+    });
+  }
+
   private applyQuality(tier: QualityTier): void {
     const quality = QUALITY_TIERS[tier];
     this.simulation.resize(quality.fftSize, quality.cascades);
@@ -314,12 +465,14 @@ class App {
 
     // The wave textures are recreated by `resize`, so the material's bindings are
     // stale — rebuild the surface against the new ones.
+    //
+    // Every input the first build received must be passed again. `floorDepthNode`
+    // in particular: without it the surface silently falls back to a view-angle
+    // approximation of the water column, losing the shallow turquoise and the
+    // shelf-break edge for the rest of the session. That regression is invisible
+    // to typecheck, so `buildWaterMaterial` is the single place both paths call.
     const previous = this.water;
-    this.water = new OceanMaterial({
-      displacementTextures: this.simulation.displacementTextures,
-      derivativeTextures: this.simulation.derivativeTextures,
-      tileSizes: this.simulation.tileSizes,
-    });
+    this.water = this.buildWaterMaterial();
     this.oceanMesh.mesh.material = this.water.material;
     previous.dispose();
 
@@ -332,7 +485,16 @@ class App {
     this.scene.add(this.oceanMesh.mesh);
 
     this.clouds.setParams({ steps: quality.cloudSteps });
+
+    // Shadows: the renderer flag alone only stops the pass from running. The
+    // light owns the map, so the tier's resolution has to reach it too.
     this.renderer.shadowMap.enabled = quality.shadowMapSize > 0;
+    this.atmosphere.setShadowMapSize(quality.shadowMapSize);
+
+    // Particle budget is a live setting, not a construction-time one; `setCount`
+    // rebuilds the instanced geometry against the new tier.
+    this.particles.setCount(quality.underwaterParticles);
+
     this.applyPreset();
   }
 
@@ -377,7 +539,9 @@ class App {
     this.water.setSun(this.atmosphere.sunDirection, this.atmosphere.sunColor, 6);
 
     this.simulation.update(elapsed);
-    this.sampler.update();
+    // Deterministic stepping owns the readback and awaits it; kicking off a
+    // second, unawaited one here would put the race straight back.
+    if (!this.deterministic) this.sampler.update();
 
     this.oceanMesh.recenter(this.camera.position);
     this.water.setWorldOffset(this.oceanMesh.mesh.position.x, this.oceanMesh.mesh.position.z);
@@ -468,6 +632,15 @@ class App {
         atmosphere: this.atmosphere,
         loop: this.loop,
         backend: this.backend,
+        /**
+         * Readiness signals. `sceneContentLoaded` settles whether or not the
+         * models arrived, so a harness can distinguish "still loading" from
+         * "loaded, and the ship legitimately is not there".
+         */
+        isReady: () =>
+          this.sceneContentLoaded && this.sampler.ready && this.loop.stats.frameMs > 0,
+        sceneContentLoaded: () => this.sceneContentLoaded,
+        hasShip: () => this.ship !== null,
         getState: () => ({ ...this.state }),
         setState: (partial: Partial<UiState>) => {
           for (const [key, value] of Object.entries(partial)) {
@@ -476,13 +649,72 @@ class App {
           }
           this.panel.setState(partial);
         },
-        /** Places the camera exactly, for reproducible screenshots. */
+        /**
+         * Places the camera exactly, for reproducible screenshots.
+         *
+         * Works in every mode, not just Orbit — see `CameraDirector.pin`.
+         */
         setCamera: (px: number, py: number, pz: number, tx: number, ty: number, tz: number) => {
-          this.camera.position.set(px, py, pz);
-          this.director.orbit.target.set(tx, ty, tz);
-          this.camera.lookAt(tx, ty, tz);
-          this.director.orbit.update();
+          _pinPosition.set(px, py, pz);
+          _pinTarget.set(tx, ty, tz);
+          this.director.pin(_pinPosition, _pinTarget);
         },
+
+        // --- deterministic stepping ------------------------------------------
+        /** Detaches the simulation from wall clock. `step` then owns the clock. */
+        setPaused: (paused: boolean) => this.loop.setPaused(paused),
+        isPaused: () => this.loop.isPaused,
+        elapsedTime: () => this.loop.elapsedTime,
+        /** Advances by exactly `steps` increments of `dt` and renders once. */
+        step: (dt: number, steps = 1) => this.stepDeterministic(dt, steps),
+
+        /**
+         * Returns the world to a known state at simulation time `time`.
+         *
+         * Everything with a clock is rewound and every accumulation buffer is
+         * cleared, so two calls with the same arguments produce the same frame
+         * regardless of what the session did in between.
+         */
+        resetDeterministic: async (time = 0, settleSteps = 90) => {
+          const settleDt = 1 / 60;
+          this.loop.setPaused(true);
+
+          // Rewind far enough that the settle run *ends* exactly at `time`.
+          // Setting the clock to `time` and then stepping forward would leave the
+          // world at `time + settleSteps * dt`, and the caller's chosen time is
+          // the one thing that has to be exact.
+          const start = time - settleSteps * settleDt;
+          this.loop.setElapsed(start);
+
+          this.weather.resetClock(start);
+          this.particles.resetClock(start);
+          this.underwater.resetClock(start);
+          this.caustics.resetClock(start);
+          this.atmosphere.resetClock(start);
+          this.clouds.resetWind();
+          this.wake?.reset(this.renderer);
+
+          // Floating bodies carry position and momentum across a whole session;
+          // returning them to their spawn poses is what stops a capture from
+          // inheriting wherever the hull happened to have drifted.
+          this.buoyancy?.resetToHome();
+          this.ship?.resetClock(start);
+          this.previousShipPosition.copy(this.ship?.object.position ?? this.previousShipPosition);
+
+          // The sampler holds a readback of the *previous* wave field; drop it so
+          // buoyancy re-derives from the field at `time`.
+          this.sampler.rebuild();
+
+          // Settle: the FFT is stateless in time (h(k, t) is evaluated directly),
+          // but buoyancy, wake and foam all integrate, so they need real steps to
+          // reach the state that simulation time implies. Stepping goes through
+          // the synchronous sampler path — see `stepDeterministic`.
+          await this.stepDeterministic(settleDt, settleSteps);
+        },
+
+        shadersReady: () => this.shadersReady,
+        /** Exact-pixel frame capture; see `App.capturePixels`. */
+        capturePixels: () => this.capturePixels(),
         dispose: () => this.dispose(),
       },
     });
@@ -512,6 +744,7 @@ class App {
     this.props?.dispose();
     this.seafloor?.dispose();
     this.assets?.dispose();
+    this.captureTarget?.dispose();
     this.renderer?.dispose();
   }
 }

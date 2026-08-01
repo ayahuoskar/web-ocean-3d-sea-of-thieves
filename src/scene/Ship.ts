@@ -145,10 +145,26 @@ export class Ship {
    * Sail and rigging life. Deliberately tiny: the ship's motion comes from
    * buoyancy, and anything larger here reads as the mesh breathing.
    */
+  /**
+   * Rewinds the sail-billow clock.
+   *
+   * This is an accumulating clock, not a function of simulation time, so it is
+   * the one piece of ship state a deterministic reset cannot reach by setting
+   * `elapsed`. Left alone it silently made every capture unique — the sails are
+   * small, but they are lit, and a fraction of a percent of scale is enough to
+   * move thousands of pixels.
+   */
+  resetClock(time = 0): void {
+    this.time = time;
+    if (this.sails.length === 0) return;
+    const billow = billowAt(time);
+    for (const sail of this.sails) sail.scale.set(1, 1, billow);
+  }
+
   update(dt: number): void {
     if (this.disposed || this.sails.length === 0) return;
     this.time += dt;
-    const billow = 1 + Math.sin(this.time * 0.7) * 0.012 + Math.sin(this.time * 1.9) * 0.004;
+    const billow = billowAt(this.time);
     for (const sail of this.sails) {
       sail.scale.set(1, 1, billow);
     }
@@ -195,6 +211,11 @@ export class Ship {
       }
     });
   }
+}
+
+/** Sail scale at a given clock value. Pure, so `resetClock` can jump to it. */
+function billowAt(time: number): number {
+  return 1 + Math.sin(time * 0.7) * 0.012 + Math.sin(time * 1.9) * 0.004;
 }
 
 const SCRATCH_FORWARD = /*@__PURE__*/ new THREE.Vector3();

@@ -23,7 +23,7 @@ Observed in the reference across the captures in `reference/shots/`.
 | F4 | Reflection & refraction | Sky/scene reflection on the surface; refracted seafloor and submerged hull, distorted by surface normals. | P0 |
 | F5 | Foam | Whitecaps on wave crests (Jacobian/folding driven), shoreline foam, persistent wake foam trailing the ship. | P0 |
 | F6 | Caustics | Animated light caustics on the seafloor and on submerged geometry; visible from above through clear shallow water. | P0 |
-| F7 | Underwater state | Full transition when the camera crosses the surface: blue-green volumetric fog, god rays / light shafts, drifting particulates, bubble columns, muted audio-less ambience, desaturated distance. | P0 |
+| F7 | Underwater state | Full transition when the camera crosses the surface: blue-green volumetric fog, god rays / light shafts, drifting particulates, bubble columns, desaturated distance. | P0 |
 | F8 | Waterline transition | Correct half-submerged framing when the camera sits at the surface; no popping. | P1 |
 | F9 | Atmosphere / sky | Physically based sky with sun position per preset, volumetric cloud layer with live coverage control, stars at night, rain in Storm. | P0 |
 | F10 | Buoyancy | Ship and buoys ride the wave surface — heave, pitch, roll sampled from the displacement field. Debug "Buoyancy Probes" toggle. | P0 |
@@ -35,8 +35,8 @@ Observed in the reference across the captures in `reference/shots/`.
 | F16 | Pixel ratio control | Live 0.5×–2× resolution scale slider. | P1 |
 | F17 | HUD | FPS counter (green→red by health), camera mode switcher, control hints. | P0 |
 | F18 | Control panel | Dark glass panel: quality, preset, wind speed, peak wavelength, cloud coverage, three toggles, pixel ratio, CTA buttons. | P0 |
-| F19 | Scene dressing | Sailing ship, buoys, island, rocks, seaweed, grass, fish shoals. | P1 |
-| F20 | Responsive | Panel collapses / repositions on narrow viewports; touch controls. | P1 |
+| F19 | Scene dressing | Sailing ship, buoys, barrels, and an instanced rock/cliff island. | P1 |
+| F20 | Responsive | Panel collapses to a bottom sheet on narrow viewports; the orbit camera accepts touch gestures. | P1 |
 
 ## 2. Visual-quality checklist
 
@@ -65,9 +65,13 @@ Derived from the reference captures. Each item is a pass/fail gate for the compa
 
 **Objects & motion**
 - [ ] Ship heave/pitch/roll is phase-correct with the waves under it.
-- [ ] Ship shadow lands on the water and reads through into the shallows.
 - [ ] Wake foam trails behind the ship and persists, widening astern.
 - [ ] Buoys bob independently and correctly.
+
+> Removed from this checklist: *"ship shadow lands on the water and reads through
+> into the shallows"*. The surface is a `MeshBasicNodeMaterial` and receives no
+> shadow at all, so the item could never pass. It returns only if the surface is
+> given a lighting model that accepts one.
 
 **UI**
 - [ ] Panel typography, spacing, and glass treatment are crisp at 1× and 2× DPR.
@@ -82,39 +86,41 @@ src/
   main.ts                 bootstrap, wires everything together
   core/
     Renderer.ts           WebGPURenderer + WebGL fallback, resize, pixel ratio
-    Loop.ts               fixed-step sim + render loop, frame timing
+    Loop.ts               frame loop, clamped delta, frame timing
     QualityManager.ts     tier definitions + adaptive downscale on sustained low FPS
-    Disposer.ts           deterministic GPU resource teardown
   ocean/
     Spectrum.ts           JONSWAP directional spectrum -> initial h0 texture
-    FFT.ts                Stockham radix-2 IFFT compute passes (TSL)
-    OceanSimulation.ts    per-frame cascade evolution -> displacement/normal/foam
-    OceanMesh.ts          camera-centred clipmap grid, projected/CDLOD
-    OceanMaterial.ts      PBR surface shading node graph
+    FFT.ts                Stockham radix-2 IFFT fragment passes (TSL)
+    OceanSimulation.ts    per-frame cascade evolution -> displacement/derivatives
+    OceanMesh.ts          camera-centred radial grid with geometric ring spacing
+    OceanMaterial.ts      surface shading node graph
     Sampler.ts            CPU-side height/normal readback for buoyancy
   sky/
-    Atmosphere.ts         analytic sky + sun/moon disc + stars
+    Atmosphere.ts         analytic sky + sun/moon disc + stars + env capture
     Clouds.ts             raymarched volumetric cloud layer
     Weather.ts            rain / snow particle systems
   underwater/
     UnderwaterPass.ts     fog, god rays, colour grade
     Particles.ts          particulates + bubbles
-    Caustics.ts           caustic projection onto seafloor + submerged meshes
+    Caustics.ts           procedural caustic field shared by submerged materials
   scene/
+    AssetLoader.ts        caching, deduplicating glTF loader
     Seafloor.ts           terrain + depth field feeding shallow-water shading
-    Props.ts              island, rocks, seaweed, grass instancing
-    Ship.ts               ship model + rig
-    Fish.ts               boid shoals (compute)
+    Props.ts              buoys, barrels, and an instanced rock/cliff island
+    Ship.ts               ship model, hull normalisation, buoyancy probe layout
   physics/
     Buoyancy.ts           probe-based rigid-body float
-    Wake.ts               wake displacement + foam accumulation buffer
+    Wake.ts               world-anchored wake foam accumulation buffer
   cameras/
-    OrbitMode.ts, FlyMode.ts, BoatMode.ts, CameraDirector.ts
+    CameraDirector.ts     orbit / fly / boat modes and the transitions between them
   ui/
-    Panel.ts, Hud.ts, styles.css
+    Panel.ts, Hud.ts, types.ts, styles.css
   presets/
     index.ts              9 preset definitions
 ```
+
+The tree above is the tree on disk. See [`CLAIMS_AUDIT.md`](CLAIMS_AUDIT.md) for the
+modules this document previously named that were never written.
 
 ### Key decisions
 

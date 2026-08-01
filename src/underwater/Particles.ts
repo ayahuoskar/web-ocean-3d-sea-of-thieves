@@ -14,6 +14,7 @@ import {
   vec3,
   vec4,
 } from 'three/tsl';
+import { SEEDS, fillRandom, mulberry32 } from '../core/random';
 
 /**
  * Suspended matter in the water column.
@@ -164,6 +165,12 @@ export class UnderwaterParticles {
     this.clock = (this.clock + dt) % CLOCK_WRAP;
     this.uTime.value = this.clock;
     this.uCenter.value.copy(cameraPosition);
+  }
+
+  /** Rewinds the animation clock, for reproducible captures. */
+  resetClock(time = 0): void {
+    this.clock = ((time % CLOCK_WRAP) + CLOCK_WRAP) % CLOCK_WRAP;
+    this.uTime.value = this.clock;
   }
 
   dispose(): void {
@@ -326,21 +333,31 @@ function buildQuad(count: number): THREE.InstancedBufferGeometry {
   return geometry;
 }
 
-function randomSeeds(count: number): Float32Array {
-  const seeds = new Float32Array(count * 4);
-  for (let i = 0; i < seeds.length; i++) seeds[i] = Math.random();
-  return seeds;
-}
-
+/**
+ * Seeded, not `Math.random()`.
+ *
+ * The scatter has to survive a reload, otherwise an underwater baseline capture
+ * is comparing two different particle fields and every diff is noise. It also
+ * has to survive a `setCount` rebuild at a *different* count: drawing from one
+ * generator per call means instance `i` gets the same seed whether the buffer
+ * holds 400 particles or 6000, so a tier change re-scales the population instead
+ * of reshuffling it.
+ */
 function buildSnowGeometry(count: number): THREE.InstancedBufferGeometry {
   const geometry = buildQuad(count);
-  geometry.setAttribute('seed', new THREE.InstancedBufferAttribute(randomSeeds(count), 4));
+  const seeds = fillRandom(new Float32Array(count * 4), SEEDS.underwaterSnow);
+  geometry.setAttribute('seed', new THREE.InstancedBufferAttribute(seeds, 4));
   return geometry;
 }
 
 function buildBubbleGeometry(count: number): THREE.InstancedBufferGeometry {
   const geometry = buildQuad(count);
-  geometry.setAttribute('seed', new THREE.InstancedBufferAttribute(randomSeeds(count), 4));
+  const random = mulberry32(SEEDS.bubbles);
+
+  geometry.setAttribute(
+    'seed',
+    new THREE.InstancedBufferAttribute(fillRandom(new Float32Array(count * 4), SEEDS.bubbles), 4),
+  );
 
   // Column axes are chosen once on the CPU: picking them in the shader from a
   // hash would spread the bubbles evenly, and the reference shows them arriving
@@ -348,8 +365,8 @@ function buildBubbleGeometry(count: number): THREE.InstancedBufferGeometry {
   const columns: Array<{ x: number; z: number }> = [];
   for (let c = 0; c < BUBBLE_COLUMNS; c++) {
     columns.push({
-      x: (Math.random() - 0.5) * BUBBLE_RADIUS * 2,
-      z: (Math.random() - 0.5) * BUBBLE_RADIUS * 2,
+      x: (random() - 0.5) * BUBBLE_RADIUS * 2,
+      z: (random() - 0.5) * BUBBLE_RADIUS * 2,
     });
   }
 
@@ -357,9 +374,9 @@ function buildBubbleGeometry(count: number): THREE.InstancedBufferGeometry {
   for (let i = 0; i < count; i++) {
     const c = columns[i % BUBBLE_COLUMNS];
     data[i * 4 + 0] = c.x;
-    data[i * 4 + 1] = Math.random();
+    data[i * 4 + 1] = random();
     data[i * 4 + 2] = c.z;
-    data[i * 4 + 3] = Math.random();
+    data[i * 4 + 3] = random();
   }
   geometry.setAttribute('column', new THREE.InstancedBufferAttribute(data, 4));
 

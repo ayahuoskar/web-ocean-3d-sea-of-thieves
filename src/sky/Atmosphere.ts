@@ -304,6 +304,33 @@ export class Atmosphere {
     this.applyParams();
   }
 
+  /**
+   * Sets the sun shadow map resolution, or disables shadow casting at 0.
+   *
+   * The existing map has to be released explicitly: `WebGLShadowMap` allocates
+   * its render target lazily from `mapSize` and then keeps it, so writing a new
+   * size without disposing leaves the old target bound and the tier change has
+   * no effect at all. Disposing forces reallocation at the requested size on the
+   * next shadow pass.
+   */
+  setShadowMapSize(size: number): void {
+    const enabled = size > 0;
+    const side = enabled ? Math.max(256, Math.round(size)) : this.sunLight.shadow.mapSize.x;
+
+    if (this.sunLight.castShadow === enabled && this.sunLight.shadow.mapSize.x === side) return;
+
+    this.sunLight.castShadow = enabled;
+    if (enabled && this.sunLight.shadow.mapSize.x !== side) {
+      this.sunLight.shadow.mapSize.set(side, side);
+      this.sunLight.shadow.dispose();
+    }
+  }
+
+  /** Current sun shadow map resolution per side; 0 when shadows are off. */
+  get shadowMapSize(): number {
+    return this.sunLight.castShadow ? this.sunLight.shadow.mapSize.x : 0;
+  }
+
   get sunDirection(): THREE.Vector3 {
     return this._sunDirection;
   }
@@ -411,6 +438,12 @@ export class Atmosphere {
     // Star twinkle is driven from a CPU-integrated clock rather than the global
     // `time` node so it stays bounded and pauses with the simulation.
     this.uTime.value = this.elapsed % 3600;
+  }
+
+  /** Rewinds the animation clock, for reproducible captures. */
+  resetClock(time = 0): void {
+    this.elapsed = time;
+    this.uTime.value = ((time % 3600) + 3600) % 3600;
   }
 
   dispose(): void {

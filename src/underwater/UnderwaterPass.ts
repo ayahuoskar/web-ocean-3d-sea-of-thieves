@@ -310,6 +310,12 @@ export class UnderwaterPass {
     this.camera = camera;
   }
 
+  /** Rewinds the animation clock, for reproducible captures. */
+  resetClock(time = 0): void {
+    this.clock = ((time % CLOCK_WRAP) + CLOCK_WRAP) % CLOCK_WRAP;
+    this.uTime.value = this.clock;
+  }
+
   update(dt: number): void {
     if (this.disposed) return;
     this.clock = (this.clock + dt) % CLOCK_WRAP;

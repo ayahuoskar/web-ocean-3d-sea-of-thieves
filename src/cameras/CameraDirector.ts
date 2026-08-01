@@ -120,6 +120,62 @@ export class CameraDirector {
     this.orbit.enabled = mode === 'orbit';
   }
 
+  /**
+   * Places the camera exactly, in whatever mode is active, and synchronises that
+   * mode's internal state so the next `update()` does not immediately undo it.
+   *
+   * A plain `camera.position.set` is not enough for any mode but Orbit: Fly
+   * integrates from its own yaw/pitch and would snap back on the next frame, and
+   * the chase rig damps toward a pose derived from the ship. Each mode therefore
+   * needs its state re-derived from the requested pose, which is what this does.
+   *
+   * Also cancels any in-flight mode transition — a capture taken mid-ease is not
+   * reproducible.
+   */
+  pin(position: THREE.Vector3, target: THREE.Vector3): void {
+    this.transition = 0;
+
+    this.camera.position.copy(position);
+    this.tmpQuat.setFromRotationMatrix(lookAtMatrix(position, target, UP));
+    this.camera.quaternion.copy(this.tmpQuat);
+    this.camera.updateMatrixWorld(true);
+
+    this.desiredPosition.copy(position);
+    this.desiredQuaternion.copy(this.tmpQuat);
+
+    switch (this.mode) {
+      case 'orbit':
+        this.orbit.target.copy(target);
+        this.orbit.update();
+        break;
+      case 'fly':
+        // Re-derive the integrator's yaw/pitch from the pose it must hold.
+        this.tmpEuler.setFromQuaternion(this.tmpQuat);
+        this.yaw = this.tmpEuler.y;
+        this.pitch = this.tmpEuler.x;
+        this.flyVelocity.set(0, 0, 0);
+        break;
+      case 'boat':
+        // Nothing to seed: the chase pose is derived from the target each frame.
+        // `snapToTarget` is the deterministic entry point for this mode.
+        break;
+    }
+  }
+
+  /**
+   * Places the chase camera at its ideal pose for the current target with no
+   * damping, so a capture does not depend on how many frames the rig has had to
+   * converge.
+   */
+  snapToTarget(): void {
+    if (this.mode !== 'boat' || !this.target) return;
+    this.transition = 0;
+    this.updateChase(0);
+    this.camera.position.copy(this.desiredPosition);
+    this.camera.quaternion.copy(this.desiredQuaternion);
+    this.camera.updateMatrixWorld(true);
+  }
+
   update(dt: number): void {
     switch (this.mode) {
       case 'orbit':

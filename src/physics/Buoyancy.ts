@@ -82,6 +82,10 @@ export class BuoyantBody {
   private readonly position = new THREE.Vector3();
   private readonly quaternion = new THREE.Quaternion();
 
+  /** Pose at construction, for `resetToHome`. */
+  private readonly homePosition = new THREE.Vector3();
+  private readonly homeQuaternion = new THREE.Quaternion();
+
   private readonly mass: number;
   private readonly buoyancyStrength: number;
   private readonly probeDepth: number;
@@ -152,6 +156,8 @@ export class BuoyantBody {
 
     this.position.copy(this.object.position);
     this.quaternion.copy(this.object.quaternion);
+    this.homePosition.copy(this.position);
+    this.homeQuaternion.copy(this.quaternion);
   }
 
   /** Teleports the body, clearing momentum. */
@@ -162,6 +168,17 @@ export class BuoyantBody {
     this.angularVelocity.set(0, 0, 0);
     this.hasLastWaterY.fill(0);
     this.writeTransform();
+  }
+
+  /**
+   * Returns the body to the pose it was constructed at, clearing momentum.
+   *
+   * Without this a deterministic capture inherits wherever the hull drifted to
+   * during the preceding session, which is the single largest source of
+   * irreproducibility in a scene full of floating objects.
+   */
+  resetToHome(): void {
+    this.reset(this.homePosition, this.homeQuaternion);
   }
 
   update(dt: number, sampler: OceanSampler): void {
@@ -333,6 +350,11 @@ export class BuoyancySystem {
     for (let i = 0; i < this.bodies.length; i++) {
       this.bodies[i].update(dt, sampler);
     }
+  }
+
+  /** Returns every body to its construction pose. See `BuoyantBody.resetToHome`. */
+  resetToHome(): void {
+    for (let i = 0; i < this.bodies.length; i++) this.bodies[i].resetToHome();
   }
 
   dispose(): void {

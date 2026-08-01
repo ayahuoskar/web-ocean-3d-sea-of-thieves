@@ -1,0 +1,165 @@
+# Claims and wiring audit
+
+Every advertised feature, UI control, quality setting, documentation claim and
+gallery screenshot in this repository, mapped to the code that implements it,
+the evidence that it works, and what was done about it.
+
+**Method.** Each row was verified by reading the implementation path and, where
+the claim is visual, by rendering it. The live inspection ran on the hardware
+recorded in `docs/PERFORMANCE.md` at 1600 × 900, DPR 1, WebGPU backend, quality
+High. Grep counts are whole-repository (`src/`) reference counts, so a setting
+that appears only in its own type definition and tier table has **no consumer**.
+
+**Status vocabulary.**
+
+| Status | Meaning |
+|---|---|
+| **WIRED** | Connected to the real render or input path, and observably affects the result |
+| **PARTIAL** | Connected, but does materially less than the claim states |
+| **DEAD** | Declared and never read; no effect at any tier |
+| **ABSENT** | Claimed in documentation, no implementation exists |
+| **UNVERIFIED** | Implemented, but the evidence offered for it does not exist or cannot be trusted |
+
+---
+
+## 1. Quality tier settings
+
+`src/core/QualityManager.ts` — `QualitySettings`, five tiers.
+
+| Setting | Consumer | Status | Evidence | Action |
+|---|---|---|---|---|
+| `fftSize` | `main.ts:312` → `OceanSimulation.resize` | WIRED | Cascade targets reallocate; `peakWaveHeight` readback changes | Keep |
+| `cascades` | `main.ts:312` → `OceanSimulation.resize` | WIRED | `activeCascadeCount` follows the tier | Keep |
+| `meshRings` | `main.ts:328` → `OceanMesh` | WIRED | Triangle count changes in `renderer.info` | Keep |
+| `meshSegments` | `main.ts:329` → `OceanMesh` | WIRED | As above | Keep |
+| `cloudSteps` | `main.ts:334` → `Clouds.setParams` | WIRED | Raymarch bound is a uniform loop count | Keep |
+| `godRaySteps` | `main.ts:401` → `UnderwaterPass.setParams` | WIRED | `uSteps` drives a dynamic `Loop` bound; 0 zeroes strength | Keep |
+| `shadowMapSize` | `main.ts:335`, **as a boolean only** | PARTIAL | `renderer.shadowMap.enabled = size > 0`. The light is hardcoded to `2048` at `Atmosphere.ts:291`, so Low↔Max never changes shadow resolution | **Wire to the light's `shadow.mapSize`, with deterministic shadow-map disposal on change** |
+| `underwaterParticles` | `main.ts:156`, **construction only** | PARTIAL | `UnderwaterParticles.setCount()` exists (`Particles.ts:136`) and is never called. Changing tier at runtime leaves the original count | **Call `setCount` from `applyQuality`** |
+| `ssrEnabled` | none — 6 refs, all self | DEAD | Every reference is inside `QualityManager.ts` | **Deleted.** Reintroduced later by the reflection work as a real tier policy |
+| `causticsEnabled` | none — 6 refs, all self | DEAD | Caustics are unconditionally injected at `main.ts:162` | **Deleted.** Replaced by a real per-tier caustics policy |
+| `bloomEnabled` | none — 6 refs, all self | DEAD | No bloom node exists anywhere in the post chain | **Deleted.** No bloom is claimed after this pass unless one is implemented |
+| `fishCount` | none — 6 refs, all self | DEAD | No fish system exists; `scene/Fish.ts` does not exist | **Deleted**, with the matching `SPEC.md` F19 claim |
+| `renderScale` | none — 6 refs, all self | DEAD | Pixel ratio comes solely from the UI slider (`main.ts:284`) | **Deleted.** A tier-driven render scale would fight the user's explicit slider |
+
+## 2. UI controls
+
+`src/ui/Panel.ts`, `src/ui/Hud.ts`, `src/ui/types.ts`.
+
+| Control | Handler | Status | Evidence | Action |
+|---|---|---|---|---|
+| Quality select | `onStateChange` → `applyQuality` | WIRED | Rebuilds simulation, mesh, material | Keep |
+| Preset select | → `applyPreset` | WIRED | 9 presets each move sun, sea, water, fog, weather | Keep |
+| Wind Speed slider | → `updateSpectrum` | WIRED | Asserted by `sliders drive the simulation` | Keep |
+| Peak Wavelength slider | → `updateSpectrum` | WIRED | As above | Keep |
+| Cloud Coverage slider | → `Clouds.setParams` | WIRED | Visible coverage change | Keep |
+| Pixel Ratio slider | → `renderer.setPixelRatio` | WIRED | Canvas backing store changes | Keep |
+| Buoyancy Probes toggle | → `Ship.setDebugProbesVisible` | WIRED | Four spheres appear | Keep |
+| Wake Probes toggle | → `Wake.setDebugVisible` | WIRED | Magenta overlay appears | Keep |
+| Force WebGL toggle | → reload with `?webgl=1` | WIRED | Asserted by `falls back to WebGL2 and still renders` | Keep |
+| Camera mode 1 / 2 / 3 | → `CameraDirector.setMode` | WIRED | Asserted by `camera modes switch via keyboard` | Keep |
+| HUD hint "Throttle **W S**" (Boat) | **none** | ABSENT | `Hud.ts:41`. Boat mode is a chase camera; `Ship.update()` only billows sails | **Implement the ship controller** (Phase 3) |
+| HUD hint "Steer **A D**" (Boat) | **none** | ABSENT | `Hud.ts:40`. Same | **Implement the ship controller** (Phase 3) |
+| HUD hint "Camera **Mouse**" (Boat) | **none** | ABSENT | `Hud.ts:42`. Chase camera ignores the mouse entirely | **Implement or correct the hint** (Phase 3) |
+| "View Source" button | `href="#"` | DEAD | `Panel.ts:213` | **Point at the repository or remove** |
+| "Documentation" button | `href="#"` | DEAD | `Panel.ts:215` | **Point at `docs/` or remove** |
+
+## 3. Rendering features
+
+| Feature | Implementation | Status | Evidence | Action |
+|---|---|---|---|---|
+| FFT spectral ocean | `OceanSimulation`, `FFT`, `Spectrum` | WIRED | Sea-state readback asserts amplitude, folding, no non-finite values | Keep |
+| Three cascades, no tiling | `CASCADES`, per-cascade tile sizes | WIRED | Visible at range; separate geometry/shading LOD curves | Keep |
+| Jacobian whitecaps | `OceanMaterial.ts:272-311` | PARTIAL | Foam is recomputed per frame from the instantaneous Jacobian. **No persistence, no advection, no dissipation.** Near-field coverage measured at roughly a third of frame as flat white sheets | **Rebuild as a persistent advected foam field** (Phase 2) |
+| Wake foam | `physics/Wake.ts` | PARTIAL | The texture is correct, world-anchored, and updated every frame — and **`OceanMaterial` never samples it**. Only the debug overlay can display it | **Bind `Wake.texture` into the surface shader** (Phase 2/3) |
+| Sky reflection | `OceanMaterial.ts:251-253` | PARTIAL | `mix(horizonColor, skyColor, reflectDir.y)` — an analytic two-colour gradient. Contains no scene geometry, no clouds, no sun disc, no ship | **Replace with real scene reflection** (Phase 2) |
+| Refraction / transmission | none | ABSENT | The surface is an opaque `MeshBasicNodeMaterial` with no backdrop texture. `SPEC.md` F4 claims "refracted seafloor and submerged hull, distorted by surface normals" at P0 | **Implement depth-aware refraction against an opaque-scene backdrop** (Phase 2) |
+| Beer–Lambert depth colour | `OceanMaterial.ts:229-238` | WIRED | Real water-column thickness when `floorDepthNode` is supplied | Keep — but see the bug below |
+| Subsurface scattering | `OceanMaterial.ts:240-248` | WIRED | Backlit crest term | Keep, improve |
+| GGX sun specular | `OceanMaterial.ts:255-263` | PARTIAL | Isotropic GGX. `SPEC.md` §2 requires glitter "anisotropic and stretched toward the viewer, not a round blob" | **Add anisotropic glitter** (Phase 2) |
+| Caustics | `underwater/Caustics.ts` → seafloor only | PARTIAL | Injected into `Seafloor` at `main.ts:162`. `SPEC.md` F6 also claims caustics "on submerged geometry" — no other material receives the node | **Extend to submerged geometry, respond to wave motion and occlusion** (Phase 2) |
+| Underwater fog + god rays | `underwater/UnderwaterPass.ts` | WIRED | Cross-fades on `submersion`; free above water behind a uniform branch | Keep |
+| Underwater particulates + bubbles | `underwater/Particles.ts` | WIRED | Marine snow plus 14 bubble columns | Keep |
+| Snell window / total internal reflection | none | ABSENT | `SPEC.md` §2 claims "looking up shows the surface underside with total internal reflection near the Snell window edge". The ocean material is `DoubleSide` and applies the identical topside shading from below | **Implement the underside** (Phase 2) |
+| Volumetric clouds | `sky/Clouds.ts` | WIRED | Raymarched, `cloudSteps` per tier | Keep; storm framing needs work |
+| Preetham sky, stars, moon | `sky/Atmosphere.ts` | WIRED | Env cube captured to `scene.environment` at `Atmosphere.ts:406` | Keep |
+| Rain / snow | `sky/Weather.ts` | PARTIAL | Instanced camera-following particle volume. Not coupled to the ocean, the surface, the camera lens or the materials. Seeds use `Math.random()` (`Weather.ts:245-248`) so it is **not deterministic** | **Rebuild as a coupled weather system** (Phase 4) |
+| Buoyancy | `physics/Buoyancy.ts` | WIRED | Probe-based rigid body; heave, pitch and roll from wave slope | Keep; extend with external forces |
+| Ship control | none | ABSENT | See the HUD rows above | **Phase 3** |
+| Adaptive quality | `AdaptiveQuality` | WIRED | One-way downgrade on sustained low FPS | Keep; retune against measured frame pressure |
+| WebGL2 fallback | `core/Renderer.ts` | WIRED | Asserted by `falls back to WebGL2 and still renders` | Keep; needs an explicit per-effect policy |
+
+## 4. Defects found during the audit
+
+| # | Defect | Location | Impact |
+|---|---|---|---|
+| D1 | `applyQuality()` rebuilds `OceanMaterial` **without** `floorDepthNode` | `main.ts:318-322`, cf. `126-131` | After any quality change the water silently drops from real water-column thickness to the `1/cos(theta)` approximation. Shallow turquoise and the shelf-break edge are lost for the rest of the session. Invisible to typecheck; no test covers it |
+| D2 | Scene content loads all-or-nothing | `main.ts:216-219` (`Promise.all`) | A single failing asset removes ship, props, buoyancy **and** wake together. Observed live: one `.bin` request failing left an ocean with no scene content at all, reported only as a console error |
+| D3 | `THREE.PostProcessing` is deprecated in r185 | `main.ts:164` | Emits a console **warning** on every boot. `collectConsoleErrors` only captures `error`, so the suite is green while the renderer complains |
+| D4 | Weather particle seeds are non-deterministic | `Weather.ts:245-248` | `Math.random()` at construction, so no two runs render the same rain. Blocks any visual baseline that includes weather |
+| D5 | `Wake` is constructed and driven but never read by the surface | `main.ts:435-438`, `OceanMaterial` | Full per-frame cost of two fullscreen passes for a texture nothing samples |
+| D6 | `npm run typecheck` **fails on a clean checkout** | `tsconfig.test.json` | The README documents it as a standard command. `tests/` probes `navigator.gpu` inside `page.evaluate` bodies but the test config omits `@webgpu/types`, so four `TS2339` errors are raised. Confirmed against unmodified `main` (`c03d73e`). `npm run build` runs `tsc --noEmit` over `src` only and therefore never caught it |
+
+## 5. Documentation claims
+
+### `docs/SPEC.md`
+
+| Claim | Status | Action |
+|---|---|---|
+| Architecture lists `core/Disposer.ts` | ABSENT | **Removed from the tree** |
+| Architecture lists `scene/Fish.ts` | ABSENT | **Removed** |
+| Architecture lists `cameras/OrbitMode.ts`, `FlyMode.ts`, `BoatMode.ts` | ABSENT | **Removed** — one `CameraDirector.ts` owns all three modes |
+| `OceanMesh.ts` described as "clipmap grid, projected/CDLOD" | Inaccurate | **Corrected** — it is a camera-centred radial grid, and the file's own comment explains why clipmaps were rejected |
+| F4 Reflection & refraction, P0 | PARTIAL / ABSENT | Implemented in Phase 2 |
+| F6 caustics "on submerged geometry" | PARTIAL | Implemented in Phase 2 |
+| F7 underwater "muted audio-less ambience" | N/A | **Removed** — there is no audio system and none is planned |
+| F19 "seaweed, grass, fish shoals" | ABSENT | **Claim removed.** Props are buoys, barrels, rocks and cliffs |
+| F20 "touch controls" | PARTIAL | Only the panel sheet toggle and `OrbitControls`' built-in touch handling. **Claim narrowed**; compact touch controls are Phase 3 |
+| §2 "sun glitter is anisotropic" | PARTIAL | Phase 2 |
+| §2 "total internal reflection near the Snell window edge" | ABSENT | Phase 2 |
+| §2 "ship shadow lands on the water and reads through into the shallows" | UNVERIFIED | No test; the ocean surface is `MeshBasicNodeMaterial` and therefore receives no shadow at all. **Claim removed pending implementation** |
+
+### `README.md`
+
+| Claim | Status | Action |
+|---|---|---|
+| "Measured numbers" — buoyancy pitch **r = 0.9869** | UNVERIFIED | No such assertion exists in `tests/`. **Removed or backed by a real test** |
+| "Measured numbers" — seafloor CPU/GPU agreement **3 × 10⁻⁵ m** | UNVERIFIED | As above |
+| "Measured numbers" — wake spread **19.3°** | UNVERIFIED | As above |
+| "Measured numbers" — sky zenith **#256BB5** | UNVERIFIED | As above |
+| "Whitecap coverage 4.6%" / "folded 0.1%" | WIRED | Genuinely asserted (`< 8%` folded) by the sea-state test |
+| Frame work "0.3 / 1.1 / 0.8 ms" | UNVERIFIED | Wall-clock around an asynchronous submit, over 4–5 samples, under rAF throttling. README already says so; the number should not be quoted as a headline | **Replaced by measured GPU time** (Phase 1b) |
+| "No screen-space reflections" | Accurate | Honest limitation, correctly stated |
+| "wake foam does not persist as long as it should" | Understated | The wake is not sampled by the water at all | **Corrected** |
+
+### `docs/PERFORMANCE.md`
+
+| Claim | Status | Action |
+|---|---|---|
+| Test hardware table is `_to be recorded_` | Incomplete | **Filled in from the benchmark harness** |
+| "No true GPU timings" | Accurate | Resolved in Phase 1b — `resolveTimestampsAsync` is available on this hardware |
+| "Material compilation is not prewarmed" | Accurate | `compileAsync` appears nowhere in `src/`. Resolved in Phase 5 |
+| "WebGL2 tiers unmeasured" | Accurate | Resolved in Phase 1b |
+
+## 6. Gallery screenshots
+
+`docs/images/` — seven captures referenced by `README.md`.
+
+| Shot | Status | Note |
+|---|---|---|
+| `hero.png` | Genuine | A real render. Framed wide, where the near-field foam breakdown is not visible |
+| `storm.png` | Genuine | Same framing caveat |
+| `sunset.png`, `moonlit.png`, `waves.png`, `underwater.png` | Genuine | Renders of the stated presets |
+| `interface.png` | Genuine | Panel and HUD with buoyancy probes on |
+
+No screenshot is fabricated or borrowed. They are, however, **hand-picked and undated**, with no way to tell whether they still match the build. Phase 1c replaces them with harness-generated canonical captures that are regenerated and diffed on every visual change.
+
+---
+
+## 7. Summary
+
+- **5 dead quality settings** removed.
+- **2 partially wired settings** (`shadowMapSize`, `underwaterParticles`) connected properly.
+- **5 defects** found, 3 of them invisible to the existing suite.
+- **9 documentation claims** removed or corrected as unimplemented; **4 "measured" numbers** had no measurement behind them.
+- **6 P0/P1 rendering features** are partial or absent and form the Phase 2–4 work: scene reflection, refraction, persistent foam, the wake binding, the underwater surface underside, and coupled weather.

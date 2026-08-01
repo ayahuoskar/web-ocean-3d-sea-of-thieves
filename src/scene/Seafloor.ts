@@ -1,5 +1,6 @@
 import * as THREE from 'three/webgpu';
 import { Fn, float, mix, positionWorld, texture, uniform, vec2, vec3, vec4 } from 'three/tsl';
+import { SEEDS, mulberry32 } from '../core/random';
 
 /**
  * Sandy seafloor.
@@ -34,20 +35,9 @@ type Node = any;
 const NOISE_SIZE = 256;
 const NOISE_MASK = NOISE_SIZE - 1;
 
-/** Deterministic PRNG — the floor must be identical on every run and machine. */
-function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
 const NOISE_BYTES = (() => {
-  const random = mulberry32(0x0cea1f);
+  // Deterministic PRNG — the floor must be identical on every run and machine.
+  const random = mulberry32(SEEDS.seafloorNoise);
   const bytes = new Uint8Array(NOISE_SIZE * NOISE_SIZE * 4);
   for (let i = 0; i < bytes.length; i++) bytes[i] = (random() * 256) | 0;
   return bytes;

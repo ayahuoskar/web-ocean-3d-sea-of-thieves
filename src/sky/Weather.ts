@@ -14,6 +14,7 @@ import {
   vec3,
   vec4,
 } from 'three/tsl';
+import { SEEDS, fillRandom } from '../core/random';
 
 /**
  * Camera-following precipitation.
@@ -72,8 +73,8 @@ export class Weather {
     this.object.frustumCulled = false;
     this.object.visible = false;
 
-    this.rainGeometry = buildParticleGeometry(RAIN_COUNT);
-    this.snowGeometry = buildParticleGeometry(SNOW_COUNT);
+    this.rainGeometry = buildParticleGeometry(RAIN_COUNT, SEEDS.rain);
+    this.snowGeometry = buildParticleGeometry(SNOW_COUNT, SEEDS.snow);
 
     this.rainMaterial = this.buildRainMaterial();
     this.snowMaterial = this.buildSnowMaterial();
@@ -116,6 +117,18 @@ export class Weather {
     this.clock = (this.clock + dt) % CLOCK_WRAP;
     this.uTime.value = this.clock;
     this.object.position.copy(cameraPosition);
+  }
+
+  /**
+   * Rewinds the animation clock.
+   *
+   * Particle positions are a pure function of the per-instance seed and this
+   * clock, so setting it reproduces an exact frame of the curtain — which is what
+   * makes a storm baseline comparable run to run.
+   */
+  resetClock(time = 0): void {
+    this.clock = ((time % CLOCK_WRAP) + CLOCK_WRAP) % CLOCK_WRAP;
+    this.uTime.value = this.clock;
   }
 
   dispose(): void {
@@ -226,8 +239,12 @@ export class Weather {
  * A plain `InstancedBufferGeometry` is used rather than `InstancedMesh` on
  * purpose: `InstancedMesh` would make the node material inject an instance
  * matrix that the sprite path does not use.
+ *
+ * `seed` is drawn from an explicit seed, not `Math.random()`: the scatter of the
+ * rain curtain has to be identical on every load or no storm screenshot can ever
+ * be compared against a baseline.
  */
-function buildParticleGeometry(count: number): THREE.InstancedBufferGeometry {
+function buildParticleGeometry(count: number, seed: number): THREE.InstancedBufferGeometry {
   const geometry = new THREE.InstancedBufferGeometry();
 
   geometry.setAttribute(
@@ -240,13 +257,7 @@ function buildParticleGeometry(count: number): THREE.InstancedBufferGeometry {
   geometry.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2));
   geometry.setIndex([0, 1, 2, 0, 2, 3]);
 
-  const seeds = new Float32Array(count * 4);
-  for (let i = 0; i < count; i++) {
-    seeds[i * 4 + 0] = Math.random();
-    seeds[i * 4 + 1] = Math.random();
-    seeds[i * 4 + 2] = Math.random();
-    seeds[i * 4 + 3] = Math.random();
-  }
+  const seeds = fillRandom(new Float32Array(count * 4), seed);
   geometry.setAttribute('seed', new THREE.InstancedBufferAttribute(seeds, 4));
 
   geometry.instanceCount = 0;

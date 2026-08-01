@@ -61,6 +61,25 @@ export class OceanSampler {
     void this.readback();
   }
 
+  /**
+   * Performs a readback and **waits for it**.
+   *
+   * The fire-and-forget `update()` is the right trade for interactive play — a
+   * frame of staleness on a floating hull is invisible and a pipeline stall is
+   * not — but it makes the physics irreproducible: whether a readback lands on
+   * step 7 or step 9 changes where the ship ends up. Deterministic stepping calls
+   * this instead, accepting the stall in exchange for a repeatable result.
+   */
+  async readNow(): Promise<void> {
+    // Let any in-flight fire-and-forget copy retire first, so this one is not
+    // racing it for the same slices. Yielding to the *macrotask* queue, not the
+    // microtask queue: the outstanding readback resolves on a GPU fence, and
+    // spinning on `Promise.resolve()` would starve the very task that clears it.
+    while (this.pending) await new Promise((resolve) => setTimeout(resolve, 0));
+    this.pending = true;
+    await this.readback();
+  }
+
   private async readback(): Promise<void> {
     try {
       const targets = this.simulation.displacementTargets;

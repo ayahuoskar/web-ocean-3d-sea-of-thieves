@@ -1,6 +1,7 @@
 import * as THREE from 'three/webgpu';
 import type { AssetLoader } from './AssetLoader';
 import { ISLAND, seafloorHeight } from './Seafloor';
+import { SEEDS, mulberry32 } from '../core/random';
 
 /**
  * Scene dressing: floating props near the play area, and the rocky island that
@@ -68,7 +69,7 @@ export class Props {
       loader.load(CLIFF_URL),
     ]);
     for (const group of [buoy, barrel, rock, cliff]) group.updateMatrixWorld(true);
-    return new Props({ buoy, barrel, rock, cliff }, options.seed ?? 0x5eab0a7);
+    return new Props({ buoy, barrel, rock, cliff }, options.seed ?? SEEDS.props);
   }
 
   dispose(): void {
@@ -264,14 +265,3 @@ function firstMesh(root: THREE.Object3D): THREE.Mesh | null {
   return found;
 }
 
-/** Same PRNG as the seafloor uses, for the same reason: reproducibility. */
-function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}

@@ -217,6 +217,18 @@ export class Clouds {
     this.uSunGain.value = SUN_GAIN * above * above * (3 - 2 * above);
   }
 
+  /**
+   * Returns the wind advection to its origin.
+   *
+   * The offset is *accumulated*, not derived from a clock, so unlike the other
+   * animated systems it cannot be reproduced by setting a time — it has to be
+   * rewound explicitly for a capture to be repeatable.
+   */
+  resetWind(): void {
+    this.windOffset.set(0, 0, 0);
+    this.uWindOffset.value.copy(this.windOffset);
+  }
+
   update(dt: number): void {
     if (!this.mesh.visible) return;
     this.windOffset.addScaledVector(this.windVector, dt * this.params.windSpeed);

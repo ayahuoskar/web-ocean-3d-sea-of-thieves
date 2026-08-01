@@ -194,6 +194,12 @@ export class Caustics {
     this.uTime.value = this.clock;
   }
 
+  /** Rewinds the animation clock, for reproducible captures. */
+  resetClock(time = 0): void {
+    this.clock = ((time % CLOCK_WRAP) + CLOCK_WRAP) % CLOCK_WRAP;
+    this.uTime.value = this.clock;
+  }
+
   /**
    * Nothing here owns a GPU resource — the pattern is arithmetic, and the node
    * graph is owned by whichever material referenced it. `dispose` only latches

@@ -172,14 +172,17 @@ frame-identical. Notable checks:
 
 **Measured numbers**, read off the GPU rather than judged by eye:
 
-| Quantity | Measured |
-|---|---|
-| Buoyancy pitch vs. wave slope | **r = 0.9869** |
-| Seafloor CPU/GPU agreement | **max error 3 × 10⁻⁵ m** |
-| Wake spread | **19.3°** (the Kelvin half-angle) |
-| Whitecap coverage at 15 m/s | **4.6%** |
-| Folded surface area | **0.1%** |
-| Sky zenith, Clear Day | **#256BB5** |
+| Quantity | Measured | Asserted by |
+|---|---|---|
+| Whitecap coverage at 15 m/s | **4.6%** | `produces a physically plausible sea state` |
+| Folded surface area | **0.1%** | same (gate: `< 8%`) |
+| Crest amplitude, cascade 0 | **±1.4 m** | same (gate: `0.4 m … 12 m`) |
+
+> An earlier revision of this table also quoted a buoyancy/wave-slope correlation,
+> a seafloor CPU/GPU agreement figure, a wake spread angle and a sky zenith
+> colour. No assertion in the suite produced any of them, so they have been
+> removed rather than left standing as unsourced numbers. See
+> [`docs/CLAIMS_AUDIT.md`](docs/CLAIMS_AUDIT.md).
 
 Two bugs were found by measuring rather than looking, and both were invisible to typecheck:
 
@@ -212,7 +215,17 @@ Full methodology, cost model and the honest list of what remains unmeasured:
   True GPU timings need timestamp queries, which are not implemented.
 - **Material compilation is not prewarmed** — a one-off ~57 ms frame occurs when the ship and
   props finish loading.
-- **No screen-space reflections**, and wake foam does not persist as long as it should.
+- **The surface reflects an analytic sky gradient, not the scene.** No screen-space or planar
+  reflection exists, so the ship and clouds do not appear in the water.
+- **No refraction.** The surface is opaque; depth colour comes from the seafloor heightfield
+  rather than from refracted scene colour.
+- **Wake foam is computed but not displayed.** `physics/Wake.ts` maintains a correct
+  world-anchored foam buffer every frame that the surface shader does not sample; only the
+  Wake Probes debug overlay can show it.
+- **Whitecaps do not persist.** Foam is recomputed each frame from the instantaneous
+  Jacobian, so it neither advects nor dissipates.
+- **Boat mode is a chase camera only.** The HUD advertises W/S throttle and A/D steering that
+  are not implemented.
 - **God rays are subtle** in high-visibility presets, where there is little to scatter.
 - Playwright's bundled Chromium exposes no WebGPU adapter, so it renders through a software
   rasteriser. Screenshot-dependent tests skip there rather than being loosened until they
@@ -224,6 +237,8 @@ Full methodology, cost model and the honest list of what remains unmeasured:
 
 - [`docs/SPEC.md`](docs/SPEC.md) — feature matrix, visual checklist, measured behaviour
 - [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) — methodology, budgets, cost model
+- [`docs/CLAIMS_AUDIT.md`](docs/CLAIMS_AUDIT.md) — every claim in this repository, mapped to
+  its implementation and its evidence
 - [`ASSET_LICENSES.md`](ASSET_LICENSES.md) — every asset, source, author and licence
 
 ---

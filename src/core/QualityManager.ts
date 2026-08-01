@@ -14,18 +14,17 @@ export interface QualitySettings {
   meshRings: number;
   /** Segments around the circle. */
   meshSegments: number;
+  /**
+   * Resolution of the sun's shadow map, per side. 0 disables shadow rendering
+   * entirely. Applied to the light, not just to `renderer.shadowMap.enabled` —
+   * a tier that claims a cheaper shadow has to actually allocate a smaller map.
+   */
   shadowMapSize: 0 | 1024 | 2048 | 4096;
   /** Raymarch steps for the volumetric cloud layer; 0 disables volumetrics. */
   cloudSteps: number;
   /** Raymarch steps for underwater god rays; 0 disables them. */
   godRaySteps: number;
-  ssrEnabled: boolean;
-  causticsEnabled: boolean;
-  bloomEnabled: boolean;
   underwaterParticles: number;
-  fishCount: number;
-  /** Multiplier applied on top of the user's pixel ratio. */
-  renderScale: number;
 }
 
 export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
@@ -37,12 +36,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     shadowMapSize: 0,
     cloudSteps: 0,
     godRaySteps: 0,
-    ssrEnabled: false,
-    causticsEnabled: false,
-    bloomEnabled: false,
     underwaterParticles: 400,
-    fishCount: 0,
-    renderScale: 0.75,
   },
   medium: {
     fftSize: 128,
@@ -52,12 +46,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     shadowMapSize: 1024,
     cloudSteps: 12,
     godRaySteps: 12,
-    ssrEnabled: false,
-    causticsEnabled: true,
-    bloomEnabled: true,
     underwaterParticles: 1200,
-    fishCount: 48,
-    renderScale: 0.9,
   },
   high: {
     fftSize: 256,
@@ -67,12 +56,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     shadowMapSize: 2048,
     cloudSteps: 24,
     godRaySteps: 24,
-    ssrEnabled: true,
-    causticsEnabled: true,
-    bloomEnabled: true,
     underwaterParticles: 2400,
-    fishCount: 120,
-    renderScale: 1,
   },
   ultra: {
     fftSize: 256,
@@ -82,12 +66,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     shadowMapSize: 2048,
     cloudSteps: 40,
     godRaySteps: 40,
-    ssrEnabled: true,
-    causticsEnabled: true,
-    bloomEnabled: true,
     underwaterParticles: 4000,
-    fishCount: 200,
-    renderScale: 1,
   },
   max: {
     fftSize: 512,
@@ -97,12 +76,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     shadowMapSize: 4096,
     cloudSteps: 64,
     godRaySteps: 56,
-    ssrEnabled: true,
-    causticsEnabled: true,
-    bloomEnabled: true,
     underwaterParticles: 6000,
-    fishCount: 320,
-    renderScale: 1,
   },
 };
 

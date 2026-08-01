@@ -247,6 +247,36 @@ export class Wake {
     this.debugObject.position.set(this.centerX_, 0, this.centerZ_);
   }
 
+  /**
+   * Clears the accumulation to empty water and re-anchors it at the current
+   * centre.
+   *
+   * Foam persists for several seconds by design, so without this a capture would
+   * carry in whatever the previous shot deposited. Both ping-pong buffers and the
+   * resolved output are cleared, because the next `update` reads one of them.
+   */
+  reset(renderer: THREE.WebGPURenderer): void {
+    if (this.disposed) return;
+
+    const previousTarget = renderer.getRenderTarget();
+    const previousClear = renderer.getClearColor(new THREE.Color());
+    const previousAlpha = renderer.getClearAlpha();
+
+    renderer.setClearColor(0x000000, 1);
+    for (const target of [this.buffers[0], this.buffers[1], this.output]) {
+      renderer.setRenderTarget(target);
+      renderer.clear(true, false, false);
+    }
+    renderer.setRenderTarget(previousTarget);
+    renderer.setClearColor(previousClear, previousAlpha);
+
+    // Scroll compensation is a delta against the last applied centre; leaving it
+    // stale would resample the freshly cleared buffer by an arbitrary offset.
+    this.appliedX = this.centerX_;
+    this.appliedZ = this.centerZ_;
+    this.queued = 0;
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;

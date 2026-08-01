@@ -16,6 +16,13 @@ import {
   type UiState,
 } from './types.ts';
 
+/**
+ * Panel call-to-action targets. Both buttons previously pointed at `#`, which
+ * looks like a working link and does nothing.
+ */
+const SOURCE_URL = 'https://github.com/2600th/web-ocean-3d';
+const DOCS_URL = 'https://github.com/2600th/web-ocean-3d/tree/main/docs';
+
 type SliderKey = 'windSpeed' | 'peakWavelength' | 'cloudCoverage' | 'pixelRatio';
 type ToggleKey = 'buoyancyProbes' | 'wakeProbes' | 'forceWebGL';
 
@@ -210,9 +217,13 @@ export class Panel {
     // ---- Actions -----------------------------------------------------------
     const actions = el('div', 'panel__actions');
     const primary = el('a', 'btn btn--primary', 'View Source');
-    primary.href = '#';
+    primary.href = SOURCE_URL;
+    primary.rel = 'noopener';
+    primary.target = '_blank';
     const secondary = el('a', 'btn btn--ghost', 'Documentation');
-    secondary.href = '#';
+    secondary.href = DOCS_URL;
+    secondary.rel = 'noopener';
+    secondary.target = '_blank';
     actions.append(primary, secondary);
     body.append(actions);
 
