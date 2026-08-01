@@ -3,18 +3,15 @@ import {
   Fn,
   If,
   Loop,
-  atan,
-  clamp,
   exp,
   float,
-  length,
+  interleavedGradientNoise,
   luminance,
-  max,
+  min,
   mix,
-  mx_noise_float,
+  normalize,
   perspectiveDepthToViewZ,
-  screenSize,
-  smoothstep,
+  screenCoordinate,
   uniform,
   uv,
   vec2,
@@ -87,6 +84,15 @@ export const DEFAULT_UNDERWATER_PARAMS: UnderwaterParams = {
   causticsStrength: 0.35,
 };
 
+/**
+ * The caustics field, as a TSL function of world position.
+ *
+ * Supplied rather than reimplemented so the shafts in the water and the pattern
+ * on the seafloor are the same evaluation of the same field — see
+ * `underwater/Caustics`.
+ */
+export type CausticsField = (worldPosition: unknown) => unknown;
+
 /** Hard ceiling on the tap count, for sanity rather than for compilation. */
 const MAX_GODRAY_STEPS = 64;
 
@@ -95,10 +101,6 @@ const LN10 = 2.302585092994046;
 
 /** Clock wrap, seconds. */
 const CLOCK_WRAP = 3600;
-
-/** Reused scratch — `update` must not allocate. */
-const _sunView = new THREE.Vector3();
-const _sunClip = new THREE.Vector3();
 
 export class UnderwaterPass {
   private readonly params: UnderwaterParams;
@@ -116,24 +118,39 @@ export class UnderwaterPass {
   private readonly uAmbient = uniform(0.95);
   private readonly uCameraDepth = uniform(4);
 
-  // --- god rays ------------------------------------------------------------
+  // --- volumetric shafts ---------------------------------------------------
   private readonly uGodRayStrength = uniform(0.9);
   // Loosely typed: a uniform used as a dynamic `Loop` bound is not modelled by
   // the TSL typings.
   private readonly uSteps: any = uniform(24, 'int');
   private readonly uInvSteps = uniform(1 / 24);
-  private readonly uDecay = uniform(0.965);
-  /** Fraction of the distance to the sun that the march covers. */
-  private readonly uRayDensity = uniform(0.9);
   private readonly uSunColor = uniform(new THREE.Color(DEFAULT_UNDERWATER_PARAMS.sunColor));
-  /** Projected sun position in the pass's uv space. */
-  private readonly uSunScreen = uniform(new THREE.Vector2(0.5, 0.5));
-  /** 1 when the sun is in front of the camera and roughly on screen. */
-  private readonly uSunVisible = uniform(0);
-  /** Depth window over which a shaft is unmasked by the geometry behind it. */
-  private readonly uMaskNear = uniform(13);
-  private readonly uMaskFar = uniform(46);
+  /** How far along the view ray shafts are integrated, metres. */
+  private readonly uShaftRange = uniform(90);
+  /**
+   * Fraction of the light passing through a metre of water that is scattered
+   * toward the viewer — the single-scattering albedo term of the integral.
+   *
+   * Small, and it has to be. The integral runs over tens of metres and the
+   * caustics field averages a few tenths across the cell interiors, not the near
+   * zero its thin bright filaments suggest, so the accumulated path radiance
+   * lands in the single digits before this term is applied. At 0.55 the whole
+   * frame saturated to white. Sea water is a weak forward scatterer and the
+   * number should look like one.
+   */
+  private readonly uShaftDensity = uniform(0.05);
+  /** World Y of the mean water surface the shafts descend from. */
+  private readonly uSeaLevel = uniform(0);
   private readonly uCaustics = uniform(DEFAULT_UNDERWATER_PARAMS.causticsStrength);
+
+  // --- ray reconstruction ---------------------------------------------------
+  // A post pass draws with the post-processor's own orthographic quad camera, so
+  // the built-in camera matrix nodes describe that quad and not the scene. Both
+  // matrices are therefore pushed explicitly, exactly as `uNear`/`uFar` already
+  // are, and for the same reason.
+  private readonly uInvProjection = uniform(new THREE.Matrix4());
+  private readonly uCameraWorld = uniform(new THREE.Matrix4());
+  private readonly uCameraPos = uniform(new THREE.Vector3());
 
   // --- grade ---------------------------------------------------------------
   private readonly uTint = uniform(new THREE.Vector3(0.84, 0.99, 1.08));
@@ -166,9 +183,10 @@ export class UnderwaterPass {
    *                       pre-linearised scalar node cannot support.
    * @returns The graded node to hand to `PostProcessing.outputNode`.
    */
-  build(scenePassColor: unknown, sceneDepth: unknown): unknown {
+  build(scenePassColor: unknown, sceneDepth: unknown, causticsNode: CausticsField): unknown {
     const colorNode: any = scenePassColor;
     const depthNode: any = sceneDepth;
+    const caustics = causticsNode as (worldPosition: any) => any;
 
     if (colorNode === null || colorNode === undefined) {
       throw new Error('UnderwaterPass.build: scenePassColor is required.');
@@ -176,6 +194,13 @@ export class UnderwaterPass {
     if (depthNode === null || depthNode === undefined || typeof depthNode.sample !== 'function') {
       throw new Error(
         'UnderwaterPass.build: sceneDepth must be a texture node, e.g. scenePass.getTextureNode( "depth" ).',
+      );
+    }
+    if (typeof caustics !== 'function') {
+      throw new Error(
+        'UnderwaterPass.build: causticsNode is required — the volumetric shafts are ' +
+          'an integral of the caustics field along the view ray, so there is nothing ' +
+          'to integrate without it.',
       );
     }
 
@@ -207,62 +232,85 @@ export class UnderwaterPass {
 
         const fogged = src.rgb.mul(transmit).add(medium.mul(transmit.oneMinus())).toVar('uwFog');
 
-        // --- 2. god rays -----------------------------------------------------
+        // --- 2. volumetric shafts --------------------------------------------
+        //
+        // Marched along the view ray in world space, not smeared radially out
+        // from the projected sun.
+        //
+        // The radial approach is the standard *atmospheric* sun-shaft effect,
+        // and underwater it is wrong in three separate ways. Light refracts
+        // entering the water, so the apparent sun sits far closer to vertical
+        // than the true one and rays that fan from its unrefracted screen
+        // position point the wrong way. Real shafts are not a fan at all: they
+        // are columns descending from the bright filaments of the surface caustic
+        // pattern, so they stay near-vertical however the viewer turns. And a
+        // screen-space effect anchored to the sun has to fade out when the sun
+        // leaves the frame, whereas shafts are all around a diver and are most
+        // visible looking *across* them.
+        //
+        // So each sample walks back up to the patch of surface that lit it and
+        // asks the caustics field how bright that patch is. Shafts and the
+        // pattern they cast on the seafloor are then the same light, evaluated
+        // in the same place, rather than two effects tuned to resemble each
+        // other.
         const rays = vec3(0, 0, 0).toVar('uwRays');
 
-        If(this.uGodRayStrength.mul(this.uSunVisible).greaterThan(0.0001), () => {
-          const aspect = screenSize.x.div(max(screenSize.y, 1.0));
-          const sun = vec2(this.uSunScreen).toVar('uwSun');
+        If(this.uGodRayStrength.greaterThan(0.0001), () => {
+          // Rebuild the world-space view ray for this pixel.
+          const ndc = suv.mul(2).sub(1).toVar('uwNdc');
+          const viewH = this.uInvProjection.mul(vec4(ndc.x, ndc.y, -1, 1)).toVar('uwViewH');
+          const viewDir = normalize(viewH.xyz.div(viewH.w)).toVar('uwViewDir');
+          const worldDir = normalize(
+            this.uCameraWorld.mul(vec4(viewDir, 0)).xyz,
+          ).toVar('uwWorldDir');
 
-          const delta = sun.sub(suv).mul(this.uInvSteps).mul(this.uRayDensity).toVar('uwDelta');
-          const cur = vec2(suv).toVar('uwCur');
-          const weight = float(1).toVar('uwWeight');
+          // `dist` is measured along the camera's forward axis; the march needs
+          // it along this pixel's ray, which is longer off-centre.
+          const axial = viewDir.z.negate().max(1e-3).toVar('uwAxial');
+          const march = min(dist.div(axial), this.uShaftRange).toVar('uwMarch');
+          const stepLength = march.mul(this.uInvSteps).toVar('uwStep');
+
+          // Start the march at a per-pixel fraction of a step. Without it every
+          // pixel samples the same set of planes and the shafts show up as
+          // concentric bands; the dither trades that for fine noise, which the
+          // eye reads as suspended particulate.
+          const dither = interleavedGradientNoise(screenCoordinate).toVar('uwDither');
+          const t = stepLength.mul(dither).toVar('uwT');
           const acc = float(0).toVar('uwAcc');
 
           Loop(this.uSteps, () => {
-            cur.addAssign(delta);
+            const p = this.uCameraPos.add(worldDir.mul(t)).toVar('uwP');
 
-            // Polar coordinates about the sun, corrected for pixel aspect so the
-            // fan is circular rather than elliptical.
-            const rel = cur.sub(sun).mul(vec2(aspect, 1.0));
-            const r = length(rel);
+            // Above the waterline there is no medium to scatter in. Softened
+            // rather than a hard cut so a sample crossing the surface does not
+            // flicker as the wave moves under it.
+            const submerged = this.uSeaLevel.sub(p.y).smoothstep(-0.4, 0.4).toVar('uwSub');
 
-            // Brightness of the shaft source: a wide glow around the sun...
-            const core = exp(r.mul(r).mul(-3.0));
-            // ...striated into individual blades by an angular noise field. The
-            // slow third axis makes the blades breathe as the surface moves.
-            const angle = atan(rel.y, rel.x);
-            const streak = mx_noise_float(
-              vec3(angle.mul(7.0), r.mul(2.4), this.uTime.mul(0.07)),
-            )
-              .mul(0.5)
-              .add(0.5);
+            // The caustics field already carries its own extinction from the
+            // surface down to the sample, so this is the light *arriving* here.
+            // What it does not know is how much survives the trip back to the
+            // eye, which is the second term.
+            const arriving = caustics(p).mul(submerged);
+            const toEye = exp(this.uSigma.mul(t.negate()));
 
-            // Occlusion: a shaft only exists where nothing near blocks it.
-            const tap = clamp(cur, vec2(0, 0), vec2(1, 1));
-            const open = smoothstep(this.uMaskNear, this.uMaskFar, viewDistance(tap));
-
-            acc.addAssign(core.mul(mix(float(0.22), float(1.0), streak)).mul(open).mul(weight));
-            weight.mulAssign(this.uDecay);
+            acc.addAssign(arriving.mul(toEye.g).mul(stepLength));
+            t.addAssign(stepLength);
           });
 
-          acc.mulAssign(this.uInvSteps);
-
-          // The surface lens focuses and defocuses the shafts; this is the same
-          // phenomenon as the caustics on the floor, so it shares their strength.
-          const flicker = float(1).add(
-            mx_noise_float(vec3(suv.x.mul(6.0), suv.y.mul(6.0), this.uTime.mul(0.5))).mul(
-              this.uCaustics,
-            ),
-          );
-
+          // `acc` is a Riemann sum weighted by `stepLength`, so it is already an
+          // integral over path length and does not get divided by anything —
+          // dividing by the range would turn it back into an average and throw
+          // away the very accumulation that makes a shaft brighter the further
+          // you look along it. What it is missing is the fraction of that light
+          // actually scattered toward the eye per metre, which is what
+          // `uShaftDensity` supplies. Because the sum carries `stepLength`,
+          // changing the tier's step count changes only the sampling noise, not
+          // the brightness.
           rays.assign(
             this.uSunColor
-              .mul(acc)
+              .mul(acc.mul(this.uShaftDensity))
               .mul(this.uGodRayStrength)
-              .mul(this.uSunVisible)
-              .mul(daylight)
-              .mul(max(flicker, 0.0)),
+              .mul(daylight),
           );
         });
 
@@ -327,31 +375,13 @@ export class UnderwaterPass {
     this.uNear.value = camera.near;
     this.uFar.value = camera.far;
 
-    // Project the sun onto the pass's uv space. A direction is transformed into
-    // view space and pushed out along itself; `applyMatrix4` then does the
-    // perspective divide. NDC maps to uv without a Y flip, because the pass
-    // samples with the quad's own uv attribute (origin bottom-left), which is
-    // the same handedness as NDC on both backends.
-    _sunView.copy(this.params.sunDirection).normalize().transformDirection(camera.matrixWorldInverse);
-
-    // The camera looks down -Z in view space, so anything with z >= 0 is behind
-    // it and would project to a mirrored, meaningless point.
-    const facing = -_sunView.z;
-    if (facing <= 1e-4) {
-      this.uSunVisible.value = 0;
-      return;
-    }
-
-    _sunClip.copy(_sunView).multiplyScalar(1000).applyMatrix4(camera.projectionMatrix);
-    const sx = _sunClip.x * 0.5 + 0.5;
-    const sy = _sunClip.y * 0.5 + 0.5;
-    this.uSunScreen.value.set(sx, sy);
-
-    // Fade the shafts out as the sun leaves the frame rather than cutting them.
-    const outside = Math.max(Math.abs(sx - 0.5), Math.abs(sy - 0.5)) * 2;
-    const onScreen = smoothstepNumber(2.1, 0.95, outside);
-    const front = smoothstepNumber(0.0, 0.25, facing);
-    this.uSunVisible.value = onScreen * front;
+    // Everything the shaft march needs to turn a screen uv back into a world ray.
+    // `matrixWorld` is read rather than recomputed: the camera has already been
+    // updated for this frame by the director, and the post pass runs after it.
+    camera.updateMatrixWorld();
+    (this.uInvProjection.value as THREE.Matrix4).copy(camera.projectionMatrixInverse);
+    (this.uCameraWorld.value as THREE.Matrix4).copy(camera.matrixWorld);
+    (this.uCameraPos.value as THREE.Vector3).setFromMatrixPosition(camera.matrixWorld);
   }
 
   /**
@@ -392,18 +422,17 @@ export class UnderwaterPass {
     this.uDesaturate.value = 0.14 + 0.3 * descent;
     this.uContrastLoss.value = 0.08 + 0.24 * descent;
 
-    // Shafts must clear the near geometry; tie the mask window to visibility so
-    // a murkier medium does not simply hide them.
-    this.uMaskNear.value = Math.max(2, p.visibility * 0.34);
-    this.uMaskFar.value = Math.max(4, p.visibility * 1.2);
-
     const steps = Math.max(0, Math.min(MAX_GODRAY_STEPS, Math.round(p.godRaySteps)));
     // steps === 0 is the Low tier: the march must cost nothing at all.
     this.uGodRayStrength.value = steps > 0 ? Math.max(0, p.godRayStrength) : 0;
     this.uSteps.value = Math.max(1, steps);
     this.uInvSteps.value = 1 / Math.max(1, steps);
-    // More taps means each contributes less, so decay has to lengthen with them.
-    this.uDecay.value = Math.pow(0.42, 1 / Math.max(1, steps));
+
+    // How far the shafts are integrated. Tied to visibility because there is no
+    // point marching through water the medium has already made opaque: past
+    // roughly two visibility lengths the transmittance term has closed the
+    // contribution down to nothing and the samples are pure cost.
+    this.uShaftRange.value = Math.max(12, Math.min(180, p.visibility * 2.2));
 
     this.uCaustics.value = Math.max(0, p.causticsStrength);
   }
@@ -413,8 +442,3 @@ function clampNumber(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
-/** GLSL `smoothstep` semantics, including the reversed-edge case. */
-function smoothstepNumber(edge0: number, edge1: number, x: number): number {
-  const t = clampNumber((x - edge0) / (edge1 - edge0 || 1e-6), 0, 1);
-  return t * t * (3 - 2 * t);
-}

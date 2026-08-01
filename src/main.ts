@@ -184,9 +184,13 @@ class App {
     const scenePass = pass(this.scene, this.camera);
     this.post.outputNode = this.underwater.build(
       scenePass.getTextureNode(),
-      // Must be the depth *texture* node: the pass re-samples it at offset
-      // coordinates to mask the shafts, which a view-z node cannot support.
+      // Must be the depth *texture* node: the pass linearises it to find where
+      // the scene stops, which is what bounds the shaft march and gives the
+      // shafts their occlusion for free.
       scenePass.getTextureNode('depth'),
+      // The shafts are an integral of this field along the view ray, so passing
+      // it here is what makes them and the seafloor pattern the same light.
+      (worldPosition) => this.caustics.intensityNode(worldPosition),
     ) as THREE.Node;
 
     boot.set(0.85, 'Wiring controls…');
@@ -584,6 +588,9 @@ class App {
 
     this.caustics.setSunDirection(this.atmosphere.sunDirection);
     this.caustics.update(dt);
+    // Re-bake around the viewer. Must run outside an active render target, so it
+    // sits here in the update rather than inside the post chain.
+    this.caustics.bake(this.renderer, this.camera.position.x, this.camera.position.z);
 
     this.updateSceneContent(dt);
 

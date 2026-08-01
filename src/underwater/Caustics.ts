@@ -7,9 +7,12 @@ import {
   int,
   mx_worley_noise_float,
   pow,
+  texture,
   uniform,
+  uv,
   vec2,
   vec3,
+  vec4,
 } from 'three/tsl';
 
 /**
@@ -87,26 +90,55 @@ export class Caustics {
    * though there is no assign stack yet.
    */
   private readonly fn: any;
+  /** The web as a function of surface xz, before depth shear and extinction. */
+  private readonly surfaceFn: any;
+
+  /** Baked field. Stable reference — safe for materials to bind once. */
+  readonly texture: THREE.Texture;
+  /** World size of the square the baked field covers. */
+  readonly extent: number;
+  /** Texels per side. */
+  readonly resolution: number;
+
+  private readonly target: THREE.RenderTarget;
+  private readonly bakeMaterial: THREE.NodeMaterial;
+  private readonly quad = new THREE.QuadMesh();
+  /** World centre of the baked region. */
+  private readonly uCenter = uniform(new THREE.Vector2());
 
   private clock = 0;
   private disposed = false;
 
-  constructor() {
+  /**
+   * @param resolution Texels per side of the baked field.
+   * @param extent World metres the field spans.
+   *
+   * The pair is chosen for metres-per-texel, not for either number alone. Caustic
+   * filaments are decimetre-scale features; at the first attempt's 512 over 480 m
+   * — nearly a metre per texel — they came out as a soft radial glow rather than
+   * distinct blades. 768 over 320 m is 0.42 m/texel and resolves them. Shrinking
+   * the extent costs nothing real: extinction has closed the pattern down to a
+   * few percent by 50 m of depth, so a region much larger than the water you can
+   * actually see through is texels spent on black.
+   */
+  constructor(resolution = 768, extent = 320) {
     this.params = { ...DEFAULT_CAUSTICS_PARAMS };
+    this.resolution = resolution;
+    this.extent = extent;
 
-    this.fn = Fn(([worldPosition]: any) => {
-      const p = vec3(worldPosition).toVar('causticsP');
-
-      // Depth below the surface; above water there is nothing to cast.
-      const below = this.uSurfaceY.sub(p.y).max(0.0).toVar('causticsDepth');
-
-      // Walk the refracted ray back up to the surface patch that lit this point.
-      const surfaceXZ = vec2(p.x, p.z).add(this.uSunTilt.mul(below)).mul(this.uScale);
-
+    /**
+     * The web itself, as a function of a point *on the surface*.
+     *
+     * Deliberately knows nothing about depth. Depth enters twice — as the
+     * horizontal shear of the refracted ray and as the extinction along it — and
+     * both are cheap closed forms applied at sample time. Keeping them out of
+     * here is what lets the expensive part be evaluated once per surface texel
+     * per frame instead of once per shaded fragment.
+     */
+    this.surfaceFn = Fn(([surfaceXZ]: any) => {
+      const s = vec2(surfaceXZ).mul(this.uScale).toVar('causticsS');
       const t = this.uTime.mul(this.uSpeed);
 
-      // Octave A: the large cells. Time is the third noise axis, so the pattern
-      // boils rather than sliding rigidly.
       // `mx_worley_noise_float` is overloaded on the point type; the typings
       // only model the two-argument form, hence the loose view.
       const worley = mx_worley_noise_float as unknown as (
@@ -115,10 +147,12 @@ export class Caustics {
         metric: unknown,
       ) => any;
 
-      const a = worley(vec3(surfaceXZ.x, surfaceXZ.y, t), 1.0, int(0));
+      // Octave A: the large cells. Time is the third noise axis, so the pattern
+      // boils rather than sliding rigidly.
+      const a = worley(vec3(s.x, s.y, t), 1.0, int(0));
 
       // Octave B: finer, counter-drifting, offset so the lattices never align.
-      const q = surfaceXZ.mul(1.87).add(vec2(13.7, -5.3));
+      const q = s.mul(1.87).add(vec2(13.7, -5.3));
       const b = worley(vec3(q.x, q.y, t.mul(-1.43).add(31.0)), 1.0, int(0));
 
       // The filaments live where the two distance fields agree: `a - b == 0` is
@@ -134,14 +168,89 @@ export class Caustics {
       const ridgeB = clamp(float(1).sub(b), 0.0, 1.0);
       const dapple = pow(ridgeA.mul(ridgeB), 2.5).mul(0.45);
 
-      const web = filament.add(dapple);
+      return filament.add(dapple);
+    });
 
+    // --- the baked field ----------------------------------------------------
+    this.target = new THREE.RenderTarget(resolution, resolution, {
+      type: THREE.HalfFloatType,
+      format: THREE.RGBAFormat,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      // Clamped, not repeated. The pattern is anchored in the world; wrapping it
+      // would tile a visibly identical web onto the far side of the region.
+      wrapS: THREE.ClampToEdgeWrapping,
+      wrapT: THREE.ClampToEdgeWrapping,
+      depthBuffer: false,
+      stencilBuffer: false,
+      generateMipmaps: false,
+    });
+    this.texture = this.target.texture;
+
+    this.bakeMaterial = new THREE.NodeMaterial();
+    this.bakeMaterial.depthTest = false;
+    this.bakeMaterial.depthWrite = false;
+    this.bakeMaterial.fragmentNode = Fn(() => {
+      const world = uv().sub(0.5).mul(this.extent).add(this.uCenter);
+      return vec4(this.surfaceFn(world), 0, 0, 1);
+    })();
+
+    /**
+     * Sampling entry point: the same quantity the old analytic version returned,
+     * but as one texture fetch plus two closed forms.
+     */
+    this.fn = Fn(([worldPosition]: any) => {
+      const p = vec3(worldPosition).toVar('causticsP');
+
+      // Depth below the surface; above water there is nothing to cast.
+      const below = this.uSurfaceY.sub(p.y).max(0.0).toVar('causticsDepth');
+
+      // Walk the refracted ray back up to the surface patch that lit this point.
+      const surfaceXZ = vec2(p.x, p.z).add(this.uSunTilt.mul(below)).toVar('causticsXZ');
+
+      const coord = surfaceXZ.sub(this.uCenter).div(this.extent).add(0.5).toVar('causticsUv');
+
+      // Outside the baked region there is no pattern to read, and clamp-to-edge
+      // would streak the border across the whole seafloor. Fade instead.
+      const edge = coord.min(coord.oneMinus()).toVar();
+      const inside = edge.x.min(edge.y).smoothstep(0, 0.03).clamp(0, 1).toVar();
+
+      const web = texture(this.texture, coord).r.mul(inside).toVar();
       const fade = exp(below.mul(this.uDepthFade).negate());
 
       return web.mul(this.uStrength).mul(fade);
     });
 
     this.setSunDirection(new THREE.Vector3(0.35, 0.62, 0.7));
+  }
+
+  /**
+   * Re-bakes the field around `centerX, centerZ`.
+   *
+   * One 512² pass per frame, against the alternative of evaluating two 3D worley
+   * lattices per shaded fragment. That was affordable while the only consumer
+   * was the seafloor; it stopped being affordable the moment the volumetric
+   * shafts began asking for the same value at every step of a 24-sample march,
+   * which is around fifty hash lookups per step per pixel and took the frame
+   * from milliseconds to seconds.
+   *
+   * Must run outside an active render target; it saves and restores its own.
+   */
+  bake(renderer: THREE.WebGPURenderer, centerX: number, centerZ: number): void {
+    if (this.disposed) return;
+
+    // Quantised to a texel, so the pattern does not crawl sub-texel against the
+    // world as the camera creeps — the same reason the ocean mesh snaps.
+    const texel = this.extent / this.resolution;
+    const centre = this.uCenter.value as THREE.Vector2;
+    centre.x = Math.round(centerX / texel) * texel;
+    centre.y = Math.round(centerZ / texel) * texel;
+
+    const previous = renderer.getRenderTarget();
+    this.quad.material = this.bakeMaterial;
+    renderer.setRenderTarget(this.target);
+    this.quad.render(renderer);
+    renderer.setRenderTarget(previous);
   }
 
   /**
@@ -200,13 +309,12 @@ export class Caustics {
     this.uTime.value = this.clock;
   }
 
-  /**
-   * Nothing here owns a GPU resource — the pattern is arithmetic, and the node
-   * graph is owned by whichever material referenced it. `dispose` only latches
-   * the clock so a stale reference cannot keep animating.
-   */
   dispose(): void {
+    if (this.disposed) return;
     this.disposed = true;
+    this.target.dispose();
+    this.bakeMaterial.dispose();
+    this.quad.geometry.dispose();
   }
 }
 
