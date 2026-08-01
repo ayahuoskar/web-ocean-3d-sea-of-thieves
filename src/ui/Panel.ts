@@ -43,6 +43,30 @@ interface SliderRefs {
   readonly value: HTMLElement;
 }
 
+/**
+ * Which sliders go above the toggles, and which below.
+ *
+ * Named, not sliced. This used to be `SLIDERS.slice(0, 3)` above the toggles and
+ * `SLIDERS[3]` below, on the assumption that index 3 was the pixel-ratio
+ * control — which it was, until `fogDensity` and `timeOfDay` were inserted ahead
+ * of it. After that the "pixel ratio" slot silently rendered the fog slider, and
+ * Time of Day and Pixel Ratio were never built at all. Nothing failed; the
+ * controls simply did not exist, and the day/night cycle had no way to be
+ * reached from the UI.
+ *
+ * `assertSlidersPlaced` below makes the same mistake impossible to repeat: every
+ * entry in `SLIDERS` has to appear in exactly one group or construction throws.
+ */
+const ENVIRONMENT_SLIDERS = [
+  'windSpeed',
+  'peakWavelength',
+  'cloudCoverage',
+  'fogDensity',
+  'timeOfDay',
+] as const satisfies readonly SliderKey[];
+
+const DISPLAY_SLIDERS = ['pixelRatio'] as const satisfies readonly SliderKey[];
+
 const SLIDERS: readonly SliderSpec[] = [
   {
     key: 'windSpeed',
@@ -129,6 +153,36 @@ const PRESET_LABELS: Record<PresetId, string> = {
 
 let instanceCounter = 0;
 
+function sliderSpec(key: SliderKey): SliderSpec {
+  const spec = SLIDERS.find((s) => s.key === key);
+  if (spec === undefined) throw new Error(`Panel: no slider spec for "${key}"`);
+  return spec;
+}
+
+/**
+ * Every declared slider must be placed exactly once.
+ *
+ * Called at construction rather than written as a comment, because the failure
+ * this guards against is invisible: a slider that is never built does not throw,
+ * does not warn, and does not look different from one the designer left out.
+ */
+function assertSlidersPlaced(): void {
+  const placed = [...ENVIRONMENT_SLIDERS, ...DISPLAY_SLIDERS] as readonly SliderKey[];
+  for (const spec of SLIDERS) {
+    const count = placed.filter((key) => key === spec.key).length;
+    if (count !== 1) {
+      throw new Error(
+        `Panel: slider "${spec.key}" is placed ${count} times; it must be placed exactly once`,
+      );
+    }
+  }
+  for (const key of placed) {
+    if (!SLIDERS.some((spec) => spec.key === key)) {
+      throw new Error(`Panel: slider "${key}" is placed but has no spec`);
+    }
+  }
+}
+
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   className?: string,
@@ -162,6 +216,8 @@ export class Panel {
     this.root = root;
     this.callbacks = callbacks;
     this.state = { ...initial };
+
+    assertSlidersPlaced();
 
     const uid = `panel${++instanceCounter}`;
     const signal = this.controller.signal;
@@ -218,8 +274,8 @@ export class Panel {
     );
 
     // ---- Wave / sky sliders ------------------------------------------------
-    for (const spec of SLIDERS.slice(0, 3)) {
-      this.buildSlider(body, `${uid}-${spec.key}`, spec);
+    for (const key of ENVIRONMENT_SLIDERS) {
+      this.buildSlider(body, `${uid}-${key}`, sliderSpec(key));
     }
 
     body.append(el('div', 'panel__divider'));
@@ -229,10 +285,9 @@ export class Panel {
       this.buildToggle(body, toggle.key, toggle.label);
     }
 
-    // ---- Pixel ratio -------------------------------------------------------
-    const pixelSpec = SLIDERS[3];
-    if (pixelSpec !== undefined) {
-      this.buildSlider(body, `${uid}-${pixelSpec.key}`, pixelSpec);
+    // ---- Display sliders ---------------------------------------------------
+    for (const key of DISPLAY_SLIDERS) {
+      this.buildSlider(body, `${uid}-${key}`, sliderSpec(key));
     }
 
     body.append(el('div', 'panel__divider'));

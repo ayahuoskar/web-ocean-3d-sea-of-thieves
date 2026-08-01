@@ -741,6 +741,84 @@ test.describe('responsiveness', () => {
       expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
     });
   }
+
+  /**
+   * Every control the panel offers must be reachable.
+   *
+   * The overflow tests above pass whether or not this holds, and that is not a
+   * hypothetical: the panel body is a flex child, defaulted to `min-height:
+   * auto`, and so refused to shrink to the panel's `max-height`. It grew past its
+   * container, `.panel { overflow: hidden }` cut the bottom off, and the Time of
+   * Day and Pixel Ratio sliders were simply not on screen — while
+   * `document.scrollWidth` stayed exactly equal to `clientWidth`, because clipped
+   * content does not overflow.
+   *
+   * Two assertions, because they fail for different reasons. The body must sit
+   * inside the panel, which catches the clipping directly. And scrolling the body
+   * to its end must bring the last control into the panel's box, which catches
+   * the subtler version where the body scrolls but not far enough.
+   *
+   * 700 px is chosen to be shorter than the panel's natural content height at the
+   * current control count, so the constraint is actually exercised. If controls
+   * are removed until it fits, this test stops proving anything — hence the
+   * assertion that the body really is overflowing to begin with.
+   */
+  test('every panel control is reachable on a short viewport', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 700 });
+    await page.goto('/');
+    await waitForOcean(page, 1200);
+
+    const geometry = await page.evaluate(() => {
+      const panel = document.querySelector('.panel') as HTMLElement;
+      const body = document.querySelector('.panel__body') as HTMLElement;
+      if (!panel || !body) return null;
+      const controls = [...body.querySelectorAll('input[type="range"]')] as HTMLElement[];
+
+      body.scrollTop = body.scrollHeight;
+      const last = controls[controls.length - 1];
+      return {
+        controlCount: controls.length,
+        // Ids are `panelN-<key>`, so the key is what follows the first dash.
+        controlKeys: controls.map((c) => c.id.replace(/^panel\d+-/, '')),
+        bodyScrolls: body.scrollHeight > body.clientHeight + 1,
+        bodyBottom: body.getBoundingClientRect().bottom,
+        panelBottom: panel.getBoundingClientRect().bottom,
+        lastControlBottom: last?.getBoundingClientRect().bottom ?? 0,
+        lastControlLabel: last?.getAttribute('aria-label') ?? last?.id ?? '(unnamed)',
+      };
+    });
+
+    expect(geometry, '.panel or .panel__body is missing').not.toBeNull();
+    const g = geometry!;
+
+    // Named rather than counted. The panel used to place its sliders by array
+    // index — `SLIDERS.slice(0, 3)` and `SLIDERS[3]` — so inserting `fogDensity`
+    // and `timeOfDay` ahead of `pixelRatio` pushed both of the last two off the
+    // end: they were declared, they had labels and formatters, and they were
+    // never built. A count would have caught that only by accident.
+    expect(
+      g.controlKeys.sort(),
+      'a declared slider is missing from the panel',
+    ).toEqual(
+      ['cloudCoverage', 'fogDensity', 'peakWavelength', 'pixelRatio', 'timeOfDay', 'windSpeed'],
+    );
+    expect(
+      g.bodyScrolls,
+      'the panel fits this viewport without scrolling, so the constraint this test ' +
+        'exists for is not being exercised — shorten the viewport or it is vacuous',
+    ).toBe(true);
+
+    expect(
+      g.bodyBottom,
+      'the panel body extends past the panel, so overflow:hidden is clipping controls',
+    ).toBeLessThanOrEqual(g.panelBottom + 1);
+
+    expect(
+      g.lastControlBottom,
+      `scrolled to the end, the last control (${g.lastControlLabel}) is still below ` +
+        'the panel and cannot be reached',
+    ).toBeLessThanOrEqual(g.panelBottom + 1);
+  });
 });
 
 // ---------------------------------------------------------------------- utils
