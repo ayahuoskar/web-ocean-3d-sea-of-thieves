@@ -1,0 +1,5 @@
+# Benchmark output. Every run describes one machine on one day, so runs are not
+# checked in — except `reference.json`, which is the run docs/PERFORMANCE.md
+# quotes and must stay next to the numbers it is the evidence for.
+*.json
+!reference.json

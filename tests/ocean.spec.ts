@@ -7,6 +7,9 @@ import {
   setState,
   waitForOcean,
 } from './helpers';
+import { capture } from './lib/capture';
+import { compareImages } from './lib/compare';
+import type { RgbaImage } from './lib/png';
 
 test.describe('boot and rendering', () => {
   test('boots with no console errors and draws a non-empty frame', async ({ page }) => {
@@ -158,37 +161,69 @@ test.describe('wave simulation', () => {
 });
 
 test.describe('interaction', () => {
-  test('every preset applies without error and changes the image', async ({ page }) => {
+  /**
+   * Every preset must produce a *distinguishable* image, pairwise.
+   *
+   * The previous version of this test hashed bytes sampled out of the compressed
+   * PNG that `page.screenshot()` returns and called the result an average colour.
+   * It is not one: PNG is entropy-coded, so those bytes are deflate output and
+   * the number means nothing about what is on screen. It went unnoticed because
+   * the test also required a WebGPU adapter, which Playwright's Chromium did not
+   * have until the launch flags were fixed — so it skipped rather than ran, and
+   * the first time it actually executed all nine presets "fingerprinted"
+   * identically.
+   *
+   * This compares real decoded pixels through the same CIE94 metric the visual
+   * suite gates on, and checks every pair rather than counting distinct hashes —
+   * a hash count cannot tell you *which* two looks collapsed together.
+   */
+  test('every preset applies without error and produces a distinct image', async ({ page }) => {
     const errors = collectConsoleErrors(page);
     await page.goto('/');
     await waitForOcean(page);
-    await setCamera(page, [0, 14, 48], [0, 2, 0]);
+
+    test.skip(
+      !(await hasGpuAdapter(page)),
+      'no GPU adapter: the software path cannot render these frames in time',
+    );
 
     const presets = [
       'skyPro', 'arctic', 'blackFlag', 'dusk', 'foggy',
       'moonlit', 'seaOfThieves', 'storm', 'sunset',
-    ];
+    ] as const;
 
-    test.skip(
-      !(await hasGpuAdapter(page)),
-      'no GPU adapter: software rasterisation cannot deliver a screenshot in time',
-    );
-
-    const fingerprints = new Map<string, string>();
+    const images = new Map<string, RgbaImage>();
     for (const preset of presets) {
       await setState(page, { preset });
-      const shot = await page.screenshot();
-      // Average colour is a stable fingerprint despite per-frame wave motion.
-      fingerprints.set(preset, await averageColor(shot));
+      // Pinned time and camera, so what separates two captures is the preset and
+      // nothing else — otherwise a pair could differ merely by wave phase.
+      await page.evaluate(() => window.__ocean.resetDeterministic(30, 60));
+      await setCamera(page, [0, 14, 48], [0, 2, 0]);
+      images.set(preset, await capture(page));
     }
 
     expect(errors, `console errors:\n${errors.join('\n')}`).toEqual([]);
 
-    // Distinct presets must not collapse to the same look.
-    const unique = new Set(fingerprints.values());
-    expect(unique.size, `presets produced duplicate imagery: ${[...fingerprints]}`).toBeGreaterThan(
-      presets.length - 3,
-    );
+    // Well clear of the measured run-to-run noise floor, which tops out around
+    // mean ΔE 0.04 — two presets an order of magnitude apart in appearance
+    // should be separated by far more than that.
+    const MIN_SEPARATION = 1.0;
+    const collapsed: string[] = [];
+    for (let i = 0; i < presets.length; i++) {
+      for (let j = i + 1; j < presets.length; j++) {
+        const a = presets[i];
+        const b = presets[j];
+        const score = compareImages(images.get(a)!, images.get(b)!);
+        if (score.meanDeltaE < MIN_SEPARATION) {
+          collapsed.push(`${a} vs ${b}: mean ΔE ${score.meanDeltaE.toFixed(3)}`);
+        }
+      }
+    }
+
+    expect(
+      collapsed,
+      `preset pairs that render too similarly (mean ΔE < ${MIN_SEPARATION}):\n${collapsed.join('\n')}`,
+    ).toEqual([]);
   });
 
   test('camera modes switch via keyboard', async ({ page }) => {
@@ -333,21 +368,6 @@ test.describe('responsiveness', () => {
 });
 
 // ---------------------------------------------------------------------- utils
-
-async function averageColor(png: Buffer): Promise<string> {
-  // Cheap, dependency-free fingerprint: hash a coarse downsample of the bytes.
-  let r = 0;
-  let g = 0;
-  let b = 0;
-  let n = 0;
-  for (let i = 0; i < png.length - 3; i += 997) {
-    r += png[i];
-    g += png[i + 1];
-    b += png[i + 2];
-    n++;
-  }
-  return `${Math.round(r / n / 8)}-${Math.round(g / n / 8)}-${Math.round(b / n / 8)}`;
-}
 
 async function peakWaveHeight(page: import('@playwright/test').Page): Promise<number> {
   return page.evaluate(async () => {

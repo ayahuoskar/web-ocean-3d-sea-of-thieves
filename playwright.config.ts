@@ -18,11 +18,11 @@ export default defineConfig({
   reporter: process.env.CI ? [['github'], ['html', { open: 'never' }]] : [['list']],
   /**
    * Generous, because this is a GPU-bound scene and the runner is not always on
-   * a GPU. On a machine with a real adapter the whole suite is quick; on one
-   * without, Chromium falls back to a software rasteriser and a single frame of
-   * this scene can take tens of seconds. Measured: 21.7 minutes for 16 tests on
-   * a software-only runner, with most failures being timeouts rather than
-   * assertion failures.
+   * a GPU. With the adapter flags below the whole suite is quick; on a machine
+   * that genuinely has no GPU, Chromium falls back to a software rasteriser and
+   * a single frame of this scene can take tens of seconds. Measured on a
+   * software-only runner: 33 minutes, with the failures being timeouts rather
+   * than assertion failures.
    *
    * See docs/PERFORMANCE.md — the suite is meaningful on GPU hardware; on a
    * software runner only the non-visual assertions are trustworthy.
@@ -38,8 +38,30 @@ export default defineConfig({
   },
 
   projects: [
+    /**
+     * Functional suite.
+     *
+     * The GPU flags matter more here than they look. Without `--enable-gpu`,
+     * Playwright's headless Chromium exposes no WebGPU adapter at all, so the
+     * app correctly falls back to WebGL2 — on a *software* rasteriser. Measured
+     * on this machine, that turned a 33-minute suite with three skips and two
+     * timeouts into the default experience, and the two timeouts were the tier
+     * and leak tests, which cycle quality six and eight times respectively and
+     * simply cannot finish when a frame takes seconds. The same two sequences
+     * complete in 4.2 s and 5.3 s against a real adapter.
+     *
+     * `--disable-dawn-features=use_dxc` is required alongside it: with
+     * `--enable-gpu` alone the adapter appears and `requestDevice()` then fails
+     * with `DynamicLib.Open: dxil.dll Windows Error 87`, because Chromium's
+     * bundled DXC will not load. Falling back to FXC on the same D3D12 backend
+     * brings the device up, and is harmless where DXC does load.
+     *
+     * `--enable-features=Vulkan` was removed: on Windows the backend is D3D12,
+     * and asking for Vulkan here bought nothing.
+     */
     {
       name: 'chromium-webgpu',
+      testIgnore: 'visual.spec.ts',
       use: {
         ...devices['Desktop Chrome'],
         viewport: { width: 1600, height: 900 },
@@ -47,8 +69,48 @@ export default defineConfig({
         launchOptions: {
           args: [
             '--enable-unsafe-webgpu',
-            '--enable-features=Vulkan',
+            '--enable-gpu',
+            '--disable-dawn-features=use_dxc',
             // Deterministic frame pacing for the performance assertions.
+            '--disable-frame-rate-limit',
+            '--disable-gpu-vsync',
+          ],
+        },
+      },
+    },
+    /**
+     * The visual regression suite. Separate from the functional project because
+     * it needs three things that project does not:
+     *
+     * **A real GPU.** Playwright's Chromium runs headless on SwiftShader unless
+     * `--enable-gpu` is passed, and without it there is no WebGPU adapter at all
+     * — measured on this machine, `requestAdapter()` returns null, the app falls
+     * back to WebGL2 on a CPU rasteriser, and every shot skips. That is the
+     * honest outcome, but it is not a useful default for a suite whose whole
+     * purpose is comparing GPU output.
+     *
+     * **A working Dawn device.** With `--enable-gpu` alone the adapter appears
+     * and then `requestDevice()` fails with `DynamicLib.Open: dxil.dll Windows
+     * Error 87` — Chromium's bundled DXC shader compiler will not load here.
+     * Turning off the `use_dxc` Dawn feature falls back to FXC on the same D3D12
+     * backend and the device comes up. Harmless where DXC does load.
+     *
+     * **The canonical shot resolution**, which is 1280x720 — see
+     * `SHOT_VIEWPORT` in `tests/lib/shots.ts` for why it is not the 1600x900 the
+     * performance budget is quoted at.
+     */
+    {
+      name: 'visual',
+      testMatch: 'visual.spec.ts',
+      use: {
+        ...devices['Desktop Chrome'],
+        viewport: { width: 1280, height: 720 },
+        deviceScaleFactor: 1,
+        launchOptions: {
+          args: [
+            '--enable-unsafe-webgpu',
+            '--enable-gpu',
+            '--disable-dawn-features=use_dxc',
             '--disable-frame-rate-limit',
             '--disable-gpu-vsync',
           ],

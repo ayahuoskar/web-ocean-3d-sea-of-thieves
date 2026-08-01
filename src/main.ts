@@ -260,8 +260,11 @@ class App {
    * not arrive at all. Reading the render target is the same pixels the shader
    * wrote, on demand, with no frame-pacing dependency.
    *
-   * The returned buffer is RGBA8, bottom-up (render-target origin), which the
-   * harness flips when it encodes.
+   * The returned buffer is RGBA8, **top-down** — row 0 is the top of the image,
+   * ready to hand to a PNG encoder without flipping. That is the WebGPU
+   * backend's readback order, and it is worth stating because the opposite is
+   * the reasonable guess: render-target space is conventionally bottom-up, and
+   * assuming so here produces an ocean above a sky.
    */
   async capturePixels(): Promise<{ width: number; height: number; data: Uint8Array }> {
     const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
@@ -576,7 +579,17 @@ class App {
     this.updateSceneContent(dt);
 
     this.hud.setFps(this.loop.stats.fps);
-    this.adaptive.update(dt, this.loop.stats.fps, this.state.quality, elapsed);
+
+    // Adaptive quality answers sustained *real-time* frame pressure, so it has
+    // no business running while the clock is detached. `Loop.step` deliberately
+    // does not write `stats.fps` — there is no wall-clock rate to report when
+    // frames are being issued on demand — so the value here would be whatever
+    // the live loop last saw. A capture taken after a heavy moment would then
+    // inherit that reading and downgrade the tier partway through, quietly
+    // changing the thing being measured.
+    if (!this.loop.isPaused) {
+      this.adaptive.update(dt, this.loop.stats.fps, this.state.quality, elapsed);
+    }
   };
 
   /** Physics, wake and chase camera. No-ops cleanly until the models land. */

@@ -1,0 +1,28 @@
+{
+  "shot": "boat-chase",
+  "capturedAt": "2026-08-01T10:06:57.326Z",
+  "width": 1280,
+  "height": 720,
+  "definition": {
+    "state": {
+      "quality": "high",
+      "cameraMode": "boat",
+      "windSpeed": 13,
+      "peakWavelength": 40,
+      "cloudCoverage": 0.4,
+      "preset": "seaOfThieves"
+    },
+    "camera": null,
+    "time": 55.5,
+    "settleSteps": 90
+  },
+  "stack": {
+    "backend": "webgpu",
+    "gpu": "ANGLE (NVIDIA, NVIDIA GeForce RTX 5090 (0x00002B85) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    "adapter": "nvidia/blackwell",
+    "browser": "Chrome/151.0.7922.34",
+    "width": 1280,
+    "height": 720,
+    "devicePixelRatio": 1
+  }
+}

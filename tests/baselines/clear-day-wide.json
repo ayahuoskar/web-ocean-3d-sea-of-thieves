@@ -1,0 +1,39 @@
+{
+  "shot": "clear-day-wide",
+  "capturedAt": "2026-08-01T10:06:48.439Z",
+  "width": 1280,
+  "height": 720,
+  "definition": {
+    "state": {
+      "quality": "high",
+      "cameraMode": "orbit",
+      "windSpeed": 15,
+      "peakWavelength": 47,
+      "cloudCoverage": 0.32,
+      "preset": "skyPro"
+    },
+    "camera": {
+      "position": [
+        -42,
+        21,
+        63
+      ],
+      "target": [
+        0,
+        3,
+        0
+      ]
+    },
+    "time": 12,
+    "settleSteps": 90
+  },
+  "stack": {
+    "backend": "webgpu",
+    "gpu": "ANGLE (NVIDIA, NVIDIA GeForce RTX 5090 (0x00002B85) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    "adapter": "nvidia/blackwell",
+    "browser": "Chrome/151.0.7922.34",
+    "width": 1280,
+    "height": 720,
+    "devicePixelRatio": 1
+  }
+}

@@ -1,0 +1,165 @@
+import type { Page } from '@playwright/test';
+import type { RgbaImage } from './png';
+import type { Shot } from './shots';
+
+/**
+ * Drives the app's deterministic hooks and turns a frame into pixels Node can
+ * work with.
+ *
+ * The capture path is `__ocean.capturePixels()`, never `page.screenshot()`. A
+ * screenshot is whatever the compositor last presented: it can be a frame stale,
+ * it goes through the browser's own colour management, and under automation —
+ * where requestAnimationFrame is throttled to around 1 Hz — it may simply not
+ * arrive before the test times out. `capturePixels` renders the post chain into
+ * an offscreen target and reads it straight back, so it is the pixels the shader
+ * wrote, on demand, with no dependence on frame pacing.
+ */
+
+interface CapturedPixels {
+  width: number;
+  height: number;
+  /**
+   * RGBA8. Pinned to a plain `ArrayBuffer` rather than the default
+   * `ArrayBufferLike`, because `Blob` will not accept a view that might be
+   * backed by a `SharedArrayBuffer` — and this one never is. Row order is
+   * discussed on `capture` below; it is not what the hook's own docs say.
+   */
+  data: Uint8Array<ArrayBuffer>;
+}
+
+/** Only the parts of `window.__ocean` this harness uses. */
+interface OceanHooks {
+  backend: 'webgpu' | 'webgl';
+  director: { snapToTarget(): void };
+  isReady(): boolean;
+  shadersReady(): boolean;
+  setState(partial: Record<string, unknown>): void;
+  setCamera(px: number, py: number, pz: number, tx: number, ty: number, tz: number): void;
+  resetDeterministic(time?: number, settleSteps?: number): Promise<void>;
+  capturePixels(): Promise<CapturedPixels>;
+}
+
+declare global {
+  interface Window {
+    __ocean: OceanHooks;
+  }
+}
+
+/** Waits for the scene to have loaded, prewarmed and drawn at least one frame. */
+export async function bootOcean(page: Page): Promise<void> {
+  await page.goto('/');
+  await page.waitForFunction(() => '__ocean' in window, undefined, { timeout: 60_000 });
+  await page.waitForFunction(() => window.__ocean.isReady(), undefined, { timeout: 180_000 });
+  // Without this a first capture can be taken while pipelines are still being
+  // built, and the frame it produces is not the frame the same call produces a
+  // second later.
+  await page.waitForFunction(() => window.__ocean.shadersReady(), undefined, { timeout: 180_000 });
+}
+
+/**
+ * Puts the world into the state a shot describes and leaves it there, settled.
+ *
+ * Order matters and is not arbitrary:
+ *
+ * 1. `preset` is applied **last** in the state object. `applyPreset` rebuilds
+ *    the whole wave spectrum from the preset's sea parameters merged with the
+ *    current wind values, so applying it after the wind sliders gives one
+ *    complete spectrum update instead of a preset update followed by a partial
+ *    one.
+ * 2. The camera is pinned **before** the settle, because the underwater pass,
+ *    the fog and the particle field all read the camera during `update()`.
+ * 3. `resetDeterministic` rewinds every clock and clears the wake buffer, then
+ *    settles by stepping, so the frame does not depend on what ran before it.
+ */
+export async function applyShot(page: Page, shot: Shot): Promise<void> {
+  await page.evaluate((state) => {
+    window.__ocean.setState({
+      quality: state.quality,
+      cameraMode: state.cameraMode,
+      windSpeed: state.windSpeed,
+      peakWavelength: state.peakWavelength,
+      cloudCoverage: state.cloudCoverage,
+      preset: state.preset,
+    });
+  }, shot.state);
+
+  if (shot.camera) {
+    await page.evaluate(
+      ({ position, target }) => {
+        window.__ocean.setCamera(
+          position[0], position[1], position[2],
+          target[0], target[1], target[2],
+        );
+      },
+      { position: shot.camera.position, target: shot.camera.target },
+    );
+  }
+
+  await page.evaluate(
+    ({ time, settleSteps }) => window.__ocean.resetDeterministic(time, settleSteps),
+    { time: shot.time, settleSteps: shot.settleSteps },
+  );
+
+  if (!shot.camera) {
+    // The chase rig damps toward its ideal pose, so after a settle it is close
+    // but not equal to it. `snapToTarget` places it exactly.
+    await page.evaluate(() => window.__ocean.director.snapToTarget());
+  }
+
+  // Warm-up frames, discarded.
+  //
+  // These are the single largest lever on how sensitive this harness can be, and
+  // the count is measured rather than guessed. Re-applying a shot five times and
+  // scoring all ten pairs:
+  //
+  //   1 warm-up capture   storm mean ΔE 1.346, waterline 1.103
+  //   2 warm-up captures  storm mean ΔE 0.035, waterline 0.000
+  //   3 warm-up captures  storm mean ΔE 0.037, waterline 0.000
+  //
+  // — a factor of about thirty, and it flattens out immediately after. So the
+  // frame right after a state change is not converged, the one after that is,
+  // and what looked like irreducible chaos in the specular glitter was mostly
+  // this. Three, because the second and third measure the same and the extra
+  // costs about ten milliseconds a shot.
+  //
+  // `capturePixels` already renders twice internally to settle the wave-texture
+  // mip chains, so this is six further full renders of the post chain.
+  await page.evaluate(async () => {
+    await window.__ocean.capturePixels();
+    await window.__ocean.capturePixels();
+    await window.__ocean.capturePixels();
+  });
+}
+
+/**
+ * Reads back the current frame as a top-down RGBA8 image.
+ *
+ * No vertical flip, despite `capturePixels` documenting its buffer as bottom-up
+ * "render-target origin". On the WebGPU backend it is not: three's WebGPU
+ * readback copies texture rows in texture order, which puts row 0 at the top,
+ * and flipping produced an ocean above a sky. The claim may well hold on the
+ * WebGL2 path — but this suite only compares WebGPU captures, so rather than
+ * carry a conditional flip that nothing here can exercise, this asserts the one
+ * orientation it has actually observed.
+ */
+export async function capture(page: Page): Promise<RgbaImage> {
+  const frame = await page.evaluate(async () => {
+    const { width, height, data } = await window.__ocean.capturePixels();
+    // Base64 through a Blob so the browser does the encoding in native code.
+    // Building the string in JS with String.fromCharCode over 3.7 MB is roughly
+    // an order of magnitude slower, and this runs once per capture per shot.
+    const url = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(new Blob([data]));
+    });
+    return { width, height, base64: url.slice(url.indexOf(',') + 1) };
+  });
+
+  return {
+    width: frame.width,
+    height: frame.height,
+    data: new Uint8Array(Buffer.from(frame.base64, 'base64')),
+  };
+}

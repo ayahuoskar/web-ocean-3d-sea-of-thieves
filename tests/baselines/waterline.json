@@ -1,0 +1,39 @@
+{
+  "shot": "waterline",
+  "capturedAt": "2026-08-01T10:06:59.697Z",
+  "width": 1280,
+  "height": 720,
+  "definition": {
+    "state": {
+      "quality": "high",
+      "cameraMode": "orbit",
+      "windSpeed": 5,
+      "peakWavelength": 22,
+      "cloudCoverage": 0.3,
+      "preset": "skyPro"
+    },
+    "camera": {
+      "position": [
+        34,
+        1.6,
+        -30
+      ],
+      "target": [
+        52,
+        1.4,
+        -48
+      ]
+    },
+    "time": 63.75,
+    "settleSteps": 90
+  },
+  "stack": {
+    "backend": "webgpu",
+    "gpu": "ANGLE (NVIDIA, NVIDIA GeForce RTX 5090 (0x00002B85) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    "adapter": "nvidia/blackwell",
+    "browser": "Chrome/151.0.7922.34",
+    "width": 1280,
+    "height": 720,
+    "devicePixelRatio": 1
+  }
+}

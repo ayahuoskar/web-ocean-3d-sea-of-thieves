@@ -1,102 +1,270 @@
 # Performance
 
-## Method
+Two different things measure this project, and they answer different questions.
 
-All figures come from the assertions in `tests/ocean.spec.ts` and the helpers in
-`tests/helpers.ts`, not from eyeballing the FPS counter.
+- **`npm run bench`** — `scripts/benchmark.mjs`. A headed, focused Chrome window
+  with vsync off, real WebGPU timestamp queries, and hundreds of samples per
+  configuration. This is the only source of performance truth here.
+- **`npm test`** — the Playwright suite. Functional and regression assertions.
+  It runs in automated Chromium, which paces `requestAnimationFrame`
+  independently of load, so it cannot settle a frame budget and does not try to.
 
-- The renderer is driven by `Loop`, which records a smoothed FPS and a per-frame
-  wall-clock cost. `measureFrameRate` discards a 1.5 s settling window (shader
-  compilation, mip chain construction, first GC) and then reports the **median**
-  over a 4 s sample. Median rather than mean: a single compositor hitch moves a
-  mean by several FPS and tells you nothing about the steady state.
-- Playwright runs with `workers: 1`. Parallel WebGPU contexts contend for one
-  device, which turns any frame-rate assertion into a coin flip.
-### rAF throttling — read this before trusting any FPS number
+Everything in the Results section below comes from the benchmark. The raw run is
+checked in at [`bench-results/reference.json`](../bench-results/reference.json).
 
-**Automated Chromium throttles `requestAnimationFrame` independently of load.**
-This project was measured at **1.1 FPS while spending 0.8 ms per frame** — work
-that corresponds to roughly 1250 FPS. The same ~1.00 fps appears with god rays
-off, particles off and submersion zero, which is the tell: the number does not
-respond to workload at all, so it is describing the harness, not the renderer.
-
-Consequently the suite asserts on **per-frame work (`frameMs`)**, not on
-delivered frame rate. `measureFrameRate` returns a `rafThrottled` flag, and the
-FPS assertion is only applied when that flag is false — so a genuine regression
-on an interactive run still fails the gate, while a throttled CI run does not
-produce a meaningless failure.
-
-Two further caveats on `frameMs`:
-
-- It measures the wall-clock cost of the render call. On WebGPU much of the GPU
-  work is submitted asynchronously, so this **undercounts true GPU time**. It is
-  a sound regression signal and an upper bound on CPU-side cost, not a GPU
-  profile. Real GPU timings need timestamp queries, which this project does not
-  yet implement.
-- Take measurements with nothing else using the GPU.
-
-Reproduce with:
+## Running the benchmark
 
 ```bash
-npm run build
-npm run preview
-npx playwright test --grep performance
+npm run bench
 ```
 
-## Test hardware
+That is the whole thing: it type-checks and builds, starts a `vite preview`
+server on a free port, launches Chrome, and measures the matrix. Nothing needs to
+be running first, and it does not reuse a server it did not start — an earlier
+version of this harness silently benchmarked a stale `dist/` that another process
+had left on port 4173.
 
-> Fill in for the machine under test — figures are meaningless without it.
+Useful variations:
+
+```bash
+node scripts/benchmark.mjs --only webgpu-high,webgl-low   # just the gated pair
+node scripts/benchmark.mjs --frames 1200 --warmup 300     # longer sample
+node scripts/benchmark.mjs --dpr 2                        # 3200 x 1800
+node scripts/benchmark.mjs --help
+```
+
+The run exits non-zero unless **every gated configuration is a measured PASS**.
+An UNVERIFIED gate is not a pass and does not exit zero.
+
+Take the measurement with nothing else on the GPU, and do not click away from the
+window: the harness checks `document.hasFocus()` and refuses to report a pass
+from a background window.
+
+## What the harness does that the test suite cannot
+
+**It gets real GPU time.** Three.js only allocates a timestamp query pool when
+the backend's `trackTimestamp` flag is set, and this project constructs its
+renderer without it. The flag does not have to be set at construction, though:
+`WebGPUBackend` requests its device with *every* feature the adapter advertises,
+so `timestamp-query` is already enabled on the device, and the pool is built
+lazily on the first instrumented render pass. The harness therefore sets
+`renderer.backend.trackTimestamp = true` at runtime, before the first sampled
+frame, and no change to `src/` is required. (`renderer.trackTimestamp` is *not*
+the flag — assigning it creates a stray property and changes nothing. The
+property lives on the backend.)
+
+Each sampled frame issues ~110 render passes at High. `resolveTimestampsAsync`
+returns the summed GPU duration of the most recent frame's passes; the pool holds
+2048 queries, so it has to be resolved every frame regardless.
+
+**It pins the world.** Before sampling, the harness calls the deterministic reset
+hook: every clock is rewound and every accumulation buffer cleared, and the world
+is settled at simulation time 0 before being stepped forward at a fixed 1/60 s.
+Without this the sampled scene is wherever the session happened to drift to.
+Measured, before this was added: two runs of the Max tier differed by 505 000
+triangles and 2.4 ms of GPU time, because the ship had wandered far enough
+between them to change what the 4096² shadow frustum contained. With it, repeat
+runs of Max produce byte-identical triangle counts and GPU medians within 1 %.
+
+**It knows when the frame boundary is.** The harness pauses the app's own loop
+and drives one frame per rAF tick through `Loop.step`, which runs the identical
+update and render path and *awaits* the render. Owning the frame boundary is what
+makes the rest possible: draw-call counters can be read before three.js resets
+them, and a frame's timestamps can be resolved knowing the pool contains that
+frame's passes and nothing else.
+
+**It refuses to lie.** A configuration is reported UNVERIFIED, never PASS and
+never FAIL, if any of these hold — a harness problem is not a regression:
+
+| Condition | Why it invalidates the number |
+|---|---|
+| No WebGPU adapter | there is nothing to measure |
+| `isFallbackAdapter`, or adapter/ANGLE strings naming SwiftShader, llvmpipe, lavapipe or a basic renderer | software rasterisation |
+| Timestamp queries unavailable, or never returning a usable duration | no GPU time, only a CPU upper bound |
+| rAF throttling detected | the browser is pacing the page, not the renderer |
+| Window not focused, or page not visible | background tabs are throttled and descheduled |
+| Fewer than 200 samples | percentiles over a handful of frames are noise |
+| The requested backend is not the one that booted | measuring something else |
+| The quality tier drifted mid-sample | `AdaptiveQuality` changed the thing under test |
+| The ship did not load | a frame cost without the hero object is not this project's frame cost |
+| The deterministic reset failed | the sample is not reproducible, so it cannot be a regression baseline |
+| `--headless` | headless pacing and GPU scheduling are not representative |
+
+Throttling is detected by comparing the delivered rAF interval against the
+*measured* frame cost, not against the app's own `loop.stats.frameMs`. The app
+times its render call, and on WebGPU that call returns once the work is
+submitted — in the reference run it reads 0.5 ms for a High frame that costs
+2.42 ms on the GPU. Compare a 7.1 ms delivered interval against 0.5 ms and a
+perfectly healthy 141 FPS run is classified as throttled.
+
+### Chrome flags, and what they change
+
+| Flag | Effect on the measurement |
+|---|---|
+| `--disable-gpu-vsync`, `--disable-frame-rate-limit` | rAF is not paced to the display refresh, so the delivered rate reflects the page rather than the monitor |
+| `--disable-dawn-features=timestamp_quantization` | Chrome otherwise rounds every WebGPU timestamp to 100 µs. Rounding ~110 passes independently and then summing them puts several milliseconds of noise into the frame total — more than the gap between two quality tiers |
+| `--enable-unsafe-webgpu`, `--enable-dawn-features=allow_unsafe_apis` | timestamp queries |
+| `--enable-features=Vulkan` | matches the Playwright project configuration |
+
+The full flag list is recorded in every results file, because each of them
+changes what the numbers mean relative to a stock browser.
+
+### Deliberate distortions
+
+Both of these make the numbers slightly *cleaner* than the app achieves
+unaided, and both are recorded in the output:
+
+- Frames are stepped at a fixed 1/60 s rather than wall clock, so the simulation
+  advances identically in every configuration.
+- Resolving timestamps maps a buffer back every frame, which drains the pipeline
+  between frames. GPU time is measured on the GPU and is unaffected; **CPU** frame
+  time loses the overlap it would normally get with the previous frame's GPU work.
+
+And one caveat on the reported delivered FPS: it is the rate at which the browser
+delivered rAF callbacks during a three-second observation of the app's own loop,
+which is an *upper bound* on presented frames rather than a count of them. It is
+recorded to prove the browser was not throttling, and for nothing else. The
+headline is GPU frame time.
+
+## Recorded hardware
+
+Detected by the browser at runtime, not read off the OS — this machine has two
+GPUs and only the browser knows which one it bound.
 
 | | |
 |---|---|
-| GPU | _to be recorded_ |
-| Driver | _to be recorded_ |
-| OS | Windows 11 Pro 26200 |
-| Browser | Chrome 151 |
+| WebGPU adapter | vendor `nvidia`, architecture `blackwell` (Chrome blanks `device`/`description`) |
+| ANGLE renderer | `ANGLE (NVIDIA, NVIDIA GeForce RTX 5090 (0x00002B85) Direct3D11 vs_5_0 ps_5_0, D3D11)` |
+| Driver | 32.0.16.1062 — OS-reported, for provenance only |
+| Also present | AMD Radeon(TM) Graphics (integrated); not the adapter Chrome selected |
+| CPU | AMD Ryzen 7 9800X3D, 16 threads |
+| OS | Windows 11 Pro 10.0.26200 |
+| Browser | Chrome 150.0.7871.187, headed, focused, driven by Playwright 1.62.1 |
 | Resolution | 1600 × 900 @ DPR 1 |
 
 ## Budgets
 
-The gates the suite enforces:
-
 | Configuration | Gate | Rationale |
 |---|---|---|
-| WebGPU, High | frame work < 16.7 ms | the 60 FPS target desktop budget |
-| WebGL2, Low | frame work < 33.3 ms | the 30 FPS fallback floor |
+| WebGPU, High | GPU p50 < 16.7 ms | the 60 FPS target desktop budget |
+| WebGL2, Low | GPU p50 < 33.3 ms | the 30 FPS fallback floor |
 
-FPS is additionally asserted (> 55 and > 30 respectively) only when the browser
-is not throttling rAF.
+Those two are the gates from the brief. Every other tier is measured against its
+backend's budget as well, but a failure there is informational: `max` is
+deliberately allowed to cost more than 60 FPS on hardware that is not this.
+
+The gate is on GPU frame time rather than on delivered FPS deliberately. Frame
+time is a property of the renderer; delivered FPS is a property of the renderer,
+the compositor, the display and the browser's scheduling policy, and this project
+has already been burned once by treating the second as if it were the first.
 
 ## Results
 
-Full scene — ocean, sky, volumetric clouds, seafloor, ship, island, buoys,
-barrels, wake and underwater pass — at 1600 × 900, DPR 1, WebGPU, in an
-instrumented interactive session.
+Run of 2026-08-01, `bench-results/reference.json`. Full scene — ocean, sky,
+volumetric clouds, seafloor, ship, island, buoys, barrels, wake and the
+post-processing chain — at 1600 × 900, DPR 1, `skyPro` preset, camera pinned to
+the canonical wide shot, world reset to simulation time 0. **600 samples per
+configuration** after 150 discarded warm-up frames.
 
-| Configuration | Median frame work | Max | Samples |
-|---|---|---|---|
-| WebGPU · Low | 0.3 ms | 0.6 ms | 4 |
-| WebGPU · High | 1.1 ms | 4.6 ms | 5 |
-| WebGPU · Max | 0.8 ms | 0.9 ms | 5 |
+GPU frame time, milliseconds, from timestamp queries:
 
-**Read these with the caveats above, not as a clean benchmark.** Specifically:
+| Configuration | p50 | p90 | p95 | p99 | min | max | implied FPS | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| WebGPU · Low | 0.26 | 0.65 | 0.73 | 0.83 | 0.24 | 3.09 | 3861 | PASS |
+| WebGPU · Medium | 1.30 | 1.35 | 1.59 | 1.98 | 1.24 | 4.78 | 770 | PASS |
+| **WebGPU · High** | **2.42** | 2.94 | 3.15 | 4.83 | 2.29 | 5.51 | **413** | **PASS** |
+| WebGPU · Ultra | 3.82 | 4.18 | 4.28 | 4.58 | 3.59 | 8.29 | 262 | PASS |
+| WebGPU · Max | 5.79 | 6.14 | 6.23 | 6.39 | 5.49 | 6.64 | 173 | PASS |
+| **WebGL2 · Low** | **0.94** | 1.42 | 1.66 | 2.76 | 0.29 | 5.00 | **1064** | **PASS** |
+| WebGL2 · High | 3.99 | 4.80 | 5.10 | 7.42 | 3.11 | 135.51 | 251 | PASS |
 
-- The sample counts are 4–5 over a four-second window. That is the rAF throttle
-  again: the browser delivered roughly one frame per second, so these are a
-  handful of real measurements rather than a distribution.
-- `frameMs` is wall-clock around the render call, and WebGPU submits most work
-  asynchronously, so it **undercounts GPU time**. Max scoring lower than High is
-  not physically meaningful — it is noise at this sample size, and a reminder
-  that these numbers cannot resolve differences of under a millisecond.
-- A one-off **57.6 ms** frame was observed immediately after the ship and props
-  finished loading, which is pipeline compilation for the newly added materials,
-  not steady-state cost. It is the strongest argument for compiling scene
-  materials during the boot overlay rather than on first draw — see Known gaps.
+Scene cost and CPU frame time for the same runs:
 
-What these figures *do* support: CPU-side cost per frame is far below the 16.7 ms
-budget at every tier, and nothing in the scene produces a sustained stall. What
-they do **not** establish is the true GPU frame time, which needs timestamp
-queries and a browser that is not pacing rAF.
+| Configuration | CPU p50 | CPU p99 | Draw calls | Render passes | Triangles | Textures | Render targets | Programs | Texture bytes |
+|---|---|---|---|---|---|---|---|---|---|
+| WebGPU · Low | 1.0 | 8.5 | 47 | 36 | 282 961 | 38 | 14 | 39 | 273 MB |
+| WebGPU · Medium | 1.9 | 5.4 | 94 | 69 | 485 569 | 47 | 21 | 47 | 283 MB |
+| WebGPU · High | 2.7 | 8.4 | 138 | 113 | 633 229 | 54 | 27 | 51 | 323 MB |
+| WebGPU · Ultra | 2.6 | 8.5 | 138 | 113 | 817 677 | 54 | 27 | 51 | 323 MB |
+| WebGPU · Max | 2.9 | 33.5 | 150 | 125 | 1 161 945 | 54 | 27 | 51 | 476 MB |
+| WebGL2 · Low | 0.7 | 1.6 | 47 | 36 | 282 961 | 38 | 14 | 39 | 273 MB |
+| WebGL2 · High | 1.8 | 5.2 | 138 | 113 | 633 229 | 54 | 27 | 51 | 323 MB |
+
+Reading these:
+
+- **Both gates pass with a wide margin on this GPU.** WebGPU High costs 2.42 ms
+  against a 16.7 ms budget — 7× headroom; WebGL2 Low costs 0.94 ms against
+  33.3 ms. That is an RTX 5090 result and it should be read as one; see
+  Limitations.
+- **GPU time tracks the tier cleanly**, 0.26 → 1.30 → 2.42 → 3.82 → 5.79 ms, a 22×
+  span. Whatever else is true of these numbers, they are responding to the thing
+  the quality tiers change.
+- **CPU frame time does not track the tier**, staying between 2.6 and 2.9 ms from
+  Medium to Max. CPU cost here is JS update work plus command submission, both
+  roughly tier-independent. The renderer is GPU-bound at every WebGPU tier, which
+  is what the tier system is supposed to arrange.
+- **Ultra costs 58 % more GPU time than High for 29 % more triangles and the same
+  draw-call count.** Ultra raises mesh density and raymarch step counts, not
+  texture resolution — hence identical texture bytes and render-target counts.
+- **Max is the only tier that moves memory**, 323 → 476 MB of textures: 512² FFT
+  cascades and a 4096² shadow map, for 12 extra render passes.
+- **WebGL2 High costs 65 % more GPU time than WebGPU High** for an identical
+  scene, and WebGL2 Low costs 3.6× WebGPU Low. That is the price of the fallback
+  path, measured rather than assumed.
+- **Distributions are tight from Medium up.** p99/p50 sits between 1.1 and 2.0
+  with no long tail — no compilation stalls, no periodic hitch. The two Low
+  configurations look noisier in relative terms (2.9–3.2) simply because a
+  0.3 ms frame is near the floor of what this instrumentation resolves. Two
+  outliers are worth naming rather than smoothing away: one 135 ms WebGL2 High
+  frame — p99 is 7.4 ms, so it is exactly one frame in 600 — and a 33.5 ms CPU
+  p99 at Max. Neither reproduced in a repeat run.
+
+### Cross-check: the number responds to workload
+
+A GPU timer that does not move with load is not measuring anything. WebGPU High
+re-run at DPR 2 (3200 × 1800, four times the pixels) costs **6.41 ms** against
+2.42 ms — 2.6×, which is what a mix of resolution-independent FFT passes and
+fragment-bound surface shading should do. Reproduce with:
+
+```bash
+node scripts/benchmark.mjs --only webgpu-high --dpr 2
+```
+
+## Results file format
+
+Every run writes `bench-results/bench-<timestamp>.json` and overwrites
+`bench-results/latest.json`. Schema id `web-ocean-3d/bench@1`:
+
+| Field | Contents |
+|---|---|
+| `schema`, `startedAt`, `finishedAt`, `durationMs`, `command`, `argv` | provenance |
+| `host` | platform, OS release, CPU model, RAM, Node version |
+| `osReportedGpus` | `Win32_VideoController` — driver versions, for provenance only |
+| `browser` | channel, version, the full flag list, headless flag |
+| `budgets`, `minSamples` | the thresholds this run was judged against |
+| `configurations[]` | one entry per `{backend, tier, resolution, dpr}` |
+| `summary` | pass/fail/unverified counts, plus per-gate verdicts and reasons |
+
+Each `configurations[]` entry carries:
+
+| Field | Contents |
+|---|---|
+| `id`, `gate`, `requestedBackend`, `backend`, `tier`, `preset`, `camera` | what was measured |
+| `resolution`, `drawingBuffer` | requested size and DPR, and the buffer actually allocated |
+| `adapter` | browser-reported WebGPU adapter, its feature list, `isFallbackAdapter` |
+| `gl` | WebGL2 version and the unmasked ANGLE vendor/renderer strings |
+| `focus` | `hasFocus`, `visibilityState` at the end of the sample |
+| `gpuTiming` | whether timestamps were enabled, by what route, and any error |
+| `pacing` | classification, delivered FPS, rAF interval percentiles, the app loop's own `frameMs` |
+| `sampling` | warm-up and sample counts, GPU-sample count and misses, truncation flag, step size, deterministic-reset outcome, simulation time at the end of the sample |
+| `cpuFrameMs`, `gpuFrameMs` | `{samples, min, p50, p90, p95, p99, max, mean}` |
+| `fps` | delivered p50, and the rates implied by GPU p50 and CPU p50 |
+| `render`, `memory` | `renderer.info.render` and `renderer.info.memory` snapshots |
+| `sceneContent` | whether the ship loaded, and which binaries the harness served |
+| `budget`, `verdict`, `reasons`, `consoleErrors` | the judgement and its evidence |
+
+The schema is additive-stable: fields may be added at `@1`, and anything that
+changes or removes a field bumps the id.
 
 ## Cost model
 
@@ -118,6 +286,11 @@ raster pass. The transform is deliberately *not* the bottleneck; surface shading
 is, which is why the quality tiers move mesh density and post effects more
 aggressively than they move `fftSize`.
 
+The measured render-pass counts agree: 36 passes at Low (one cascade), 113 at
+High (three cascades at 256²), 125 at Max (three at 512²). The jump from High to
+Max costs 2.4× the GPU time for 12 extra passes, so it is the 512² transform, the
+denser surface mesh and the 4096² shadow map paying, not the pass count.
+
 ## Adaptive quality
 
 `AdaptiveQuality` steps the tier down when the smoothed rate stays below 75 % of
@@ -126,16 +299,61 @@ debounce and a 4 s startup grace period: oscillating between tiers is more
 distracting than running one notch below optimal, and the first seconds of a
 session are dominated by compilation rather than by steady-state cost.
 
+It also has to be neutralised during a benchmark. It reads `loop.stats.fps`,
+which `Loop.step` never writes, so on a slow configuration it would otherwise act
+on a stale rAF-era number and change the tier *during* the sample. The harness
+pins the value it watches, and then asserts afterwards that the tier did not
+move — a drifted tier is an UNVERIFIED result, not a quiet one.
+
 ## Memory
 
-`does not leak GPU memory across quality changes` cycles Low↔High four times and
-asserts the renderer's texture and geometry counts have not grown beyond a small
-allowance. Every tier change disposes the previous FFT targets, surface material
-and ocean geometry before allocating replacements.
+The suite cycles Low↔High and asserts the renderer's texture and geometry counts
+have not grown beyond a small allowance. Every tier change disposes the previous
+FFT targets, surface material and ocean geometry before allocating replacements.
 
-## Running the suite: hardware matters
+The benchmark records `renderer.info.memory` per configuration, so the tier cost
+is visible directly: 273 MB of textures at Low, 323 MB at High and Ultra, 476 MB
+at Max, with render-target counts of 14/27/27 respectively.
 
-The suite is only fully meaningful on a machine with a real GPU adapter.
+## Limitations, and what is still unverified
+
+- **One machine.** Every number here is from an RTX 5090, and a 2.42 ms frame on
+  that part says very little about a laptop iGPU. The budgets are *met*, not
+  *stressed*: nothing in this run establishes where the tiers stop working. The
+  harness is the deliverable; the numbers describe one host, which is why the
+  hardware block above is as detailed as it is.
+- **Adaptive downgrade is untested against real pressure.** On this GPU no tier
+  gets close to the trigger, so the downgrade path has not been exercised by a
+  genuine frame-rate drop here.
+- **Delivered frame rate is not presented frame rate.** With vsync disabled the
+  rAF callback rate runs ahead of what the compositor puts on screen — the WebGL2
+  Low run reports 1000 delivered FPS, which is a main-thread spin rate, not 1000
+  images. Only GPU frame time is treated as a measurement.
+- **Timestamp quantisation is disabled by a flag.** These GPU numbers are not
+  what a stock browser would report; a stock browser would report the same frames
+  rounded to 100 µs per pass.
+- **The camera is never underwater.** The canonical shot is above the waterline,
+  so the submerged branch — god rays at full strength, the underwater particle
+  system, which is skipped entirely while dry — contributes nothing to these
+  numbers. A submerged benchmark configuration is the obvious next addition.
+- **Environment quirk on this host: `.bin` responses return HTTP 204.** In a
+  *headed* browser on this machine, every glTF binary payload served by
+  `vite preview` arrives as `204, zero bytes`, while `curl` and the same Chrome
+  build in headless mode both receive the full 200 from the same server and port.
+  Something outside the browser is eating `application/octet-stream` on visible
+  sessions. Untreated, `GLTFLoader` reports `Failed to load buffer`, the ship and
+  props are absent, and the benchmark measures an empty ocean — 113 draw calls
+  and 394 493 triangles at High instead of 138 and 633 229, which is a 38 % lie
+  in the direction nobody notices. `scripts/benchmark.mjs` therefore fulfils those requests from
+  `dist/` itself, records every interception in `sceneContent.binariesServedFromDisk`,
+  and reports UNVERIFIED if the ship is missing anyway. This is an observation
+  about this host, not a defect in the application — but it is exactly the kind
+  of thing that turns a benchmark into fiction, so it is written down.
+
+## Running the test suite: hardware matters
+
+The Playwright suite is only fully meaningful on a machine with a real GPU
+adapter.
 
 Observed on a software-only runner (Playwright's bundled Chromium, no WebGPU
 adapter, so WebGL2 backed by a software rasteriser): **9 failed, 6 passed,
@@ -149,23 +367,11 @@ Which is which:
   via `readRenderTargetPixelsAsync`), the WebGL fallback boot, and typecheck.
   These passed on the software runner.
 - **Needs a GPU** — everything that waits on presented frames: screenshots,
-  preset comparison, frame-budget assertions, and the interaction tests that
-  poll after a state change. These time out on a software runner and their
-  failure says nothing about the code.
+  preset comparison and the interaction tests that poll after a state change.
+  These time out on a software runner and their failure says nothing about the
+  code.
 
 Timeouts are set to 240 s to give a software runner a chance, but the honest
 recommendation is to run on GPU hardware and treat a software-runner result as
-inconclusive rather than as a regression.
-
-## Known gaps
-
-- **No true GPU timings.** Needs timestamp queries; `frameMs` is a CPU-side upper
-  bound only.
-- **No clean benchmark run.** Every measurement so far was taken in a browser
-  that was throttling rAF. A headed, focused browser with vsync disabled would
-  give a real distribution.
-- **Material compilation is not prewarmed.** The 57.6 ms spike after asset load
-  should be removed by compiling scene materials behind the boot overlay
-  (`renderer.compileAsync`) instead of on first draw.
-- **WebGL2 tiers unmeasured.** The fallback renders correctly and is exercised by
-  the suite, but no frame-cost figures have been collected for it.
+inconclusive rather than as a regression. Frame budgets are not the suite's job
+at all — that is `npm run bench`.

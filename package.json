@@ -10,7 +10,8 @@
     "preview": "vite preview --port 4173",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "test": "playwright test",
-    "test:headed": "playwright test --headed"
+    "test:headed": "playwright test --headed",
+    "bench": "npm run build && node scripts/benchmark.mjs"
   },
   "dependencies": {
     "three": "^0.185.1"

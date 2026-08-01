@@ -1,0 +1,39 @@
+{
+  "shot": "underwater",
+  "capturedAt": "2026-08-01T10:07:02.317Z",
+  "width": 1280,
+  "height": 720,
+  "definition": {
+    "state": {
+      "quality": "high",
+      "cameraMode": "orbit",
+      "windSpeed": 10,
+      "peakWavelength": 36,
+      "cloudCoverage": 0.32,
+      "preset": "skyPro"
+    },
+    "camera": {
+      "position": [
+        -16,
+        -7,
+        16
+      ],
+      "target": [
+        -6,
+        2,
+        2
+      ]
+    },
+    "time": 72.5,
+    "settleSteps": 90
+  },
+  "stack": {
+    "backend": "webgpu",
+    "gpu": "ANGLE (NVIDIA, NVIDIA GeForce RTX 5090 (0x00002B85) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    "adapter": "nvidia/blackwell",
+    "browser": "Chrome/151.0.7922.34",
+    "width": 1280,
+    "height": 720,
+    "devicePixelRatio": 1
+  }
+}
