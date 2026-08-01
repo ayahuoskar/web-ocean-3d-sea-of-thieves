@@ -119,10 +119,24 @@ export default defineConfig({
     },
   ],
 
+  /**
+   * Always rebuilt, never reused.
+   *
+   * `reuseExistingServer: !process.env.CI` is the usual default and it is wrong
+   * for this project. A preview server left running from an earlier invocation
+   * keeps serving the `dist/` it was started with, so a local run silently tests
+   * whatever was built minutes ago. That is bad anywhere; here it is corrosive,
+   * because the visual baselines are *generated* by this harness — a stale
+   * server bakes yesterday's renderer into the images every later run is
+   * measured against. It happened twice while this suite was being written, and
+   * the second time it cost a full set of baselines.
+   *
+   * The build is a couple of seconds. Correctness is worth more.
+   */
   webServer: {
     command: 'npm run build && npm run preview',
     url: 'http://127.0.0.1:4173',
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
     timeout: 180_000,
     stdout: 'pipe',
     stderr: 'pipe',

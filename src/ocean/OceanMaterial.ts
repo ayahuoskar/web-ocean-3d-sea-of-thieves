@@ -60,6 +60,16 @@ export interface OceanMaterialInputs {
    * turquoise-over-sand shallows and the hard read of a drop-off.
    */
   floorDepthNode?: ((worldPosition: any) => any) | null;
+  /**
+   * World-anchored foam accumulation buffer, from `physics/Wake`.
+   *
+   * `texture` is the resolved output target, whose reference is stable for the
+   * lifetime of the buffer, so it is safe to bind once here at build time. The
+   * buffer's *centre* moves every frame and is pushed in through
+   * `setFoamCenter`; `extent` is the world size of the square it covers and is
+   * fixed, so it is baked in as a constant rather than carried as a uniform.
+   */
+  foam?: { texture: THREE.Texture; extent: number } | null;
 }
 
 /**
@@ -102,6 +112,11 @@ export class OceanMaterial {
   // stable world-space sample coordinate for the wave field.
   private readonly uOffsetX = uniform(0);
   private readonly uOffsetZ = uniform(0);
+
+  /** World centre of the foam accumulation buffer. See `setFoamCenter`. */
+  private readonly uFoamCenter = uniform(new THREE.Vector2());
+  /** How strongly accumulated foam reads against the surface, 0..1. */
+  private readonly uFoamStrength = uniform(1);
 
   constructor(inputs: OceanMaterialInputs) {
     this.material = new THREE.MeshBasicNodeMaterial();
@@ -147,6 +162,25 @@ export class OceanMaterial {
     this.uOffsetZ.value = z;
   }
 
+  /**
+   * Must be called with the foam buffer's world centre every frame.
+   *
+   * The buffer is anchored in the world and scrolls under a moving centre, so
+   * the surface can only find the right texel if it is told where the buffer
+   * currently sits. Getting this wrong does not fail loudly — the wake simply
+   * slides around relative to the hull, which is the one thing a wake must
+   * never do.
+   */
+  setFoamCenter(x: number, z: number): void {
+    const centre = this.uFoamCenter.value as THREE.Vector2;
+    centre.x = x;
+    centre.y = z;
+  }
+
+  setFoamStrength(value: number): void {
+    this.uFoamStrength.value = value;
+  }
+
   dispose(): void {
     this.material.dispose();
   }
@@ -157,6 +191,7 @@ export class OceanMaterial {
     const { displacementTextures, derivativeTextures, tileSizes } = inputs;
     const cascadeCount = displacementTextures.length;
     const floorDepth = inputs.floorDepthNode ?? null;
+    const foam = inputs.foam ?? null;
 
     // ------------------------------------------------------------- vertex stage
     this.material.positionNode = Fn(() => {
@@ -302,11 +337,51 @@ export class OceanMaterial {
 
       // A wide smoothstep keeps the boundary soft; the noise decides *where* that
       // boundary falls, which reads as texture rather than as a fading blob.
-      const foamMask = biased
+      const crestFoam = biased
         .add(perturb.mul(0.45))
         .smoothstep(0.12, 0.78)
         .clamp(0, 1)
         .toVar();
+
+      // --- accumulated foam ---------------------------------------------------
+      // Wake and any other persistent deposit, read from the world-anchored
+      // buffer. Unlike the crest mask above this is *history*: it was laid down
+      // on earlier frames and has been decaying since, which is what lets a wake
+      // trail behind a moving hull instead of being a decal under it.
+      const accumulated = float(0).toVar();
+      if (foam !== null) {
+        const foamUvw = worldPos.xz.sub(this.uFoamCenter).div(foam.extent).add(0.5).toVar();
+
+        // The buffer covers a finite square. Outside it there is no information,
+        // and clamp-to-edge would smear the border across the whole ocean, so
+        // fade out just inside the edge instead.
+        const edge = foamUvw.min(foamUvw.oneMinus()).toVar();
+        const inside = edge.x.min(edge.y).smoothstep(0, 0.02).clamp(0, 1).toVar();
+
+        accumulated.assign(
+          texture(foam.texture, foamUvw).r.clamp(0, 1).mul(inside).mul(this.uFoamStrength),
+        );
+
+        // Broken up by the same noise as the crest foam so the two read as one
+        // material. Without this the wake is a smooth airbrushed streak against
+        // bubbly whitecaps and the eye separates them immediately.
+        //
+        // The breakup is *gated on there being foam here at all*. Added
+        // unconditionally it is a signed term, so on empty water the positive
+        // half of the noise alone clears the threshold and sprays foam across an
+        // ocean that has none — the mask has to be able to return exactly zero.
+        const present = accumulated.smoothstep(0.02, 0.2).toVar();
+        accumulated.assign(
+          accumulated
+            .mul(1.35)
+            .add(perturb.mul(0.3).mul(present))
+            .smoothstep(0.1, 0.65)
+            .clamp(0, 1)
+            .mul(present),
+        );
+      }
+
+      const foamMask = crestFoam.max(accumulated).toVar();
 
       const withFoam = mix(surface, this.uFoamColor, foamMask).toVar();
 

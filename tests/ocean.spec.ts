@@ -226,6 +226,65 @@ test.describe('interaction', () => {
     ).toEqual([]);
   });
 
+  /**
+   * The wake buffer must reach the water.
+   *
+   * `physics/Wake` maintained a correct, world-anchored foam accumulation every
+   * frame that `OceanMaterial` never sampled — two fullscreen passes of cost for
+   * a texture nothing read, visible only through the debug overlay. Nothing
+   * failed when it was disconnected, which is exactly why this test exists: it
+   * deposits a wake and requires the rendered surface to change because of it.
+   *
+   * Deliberately not asserting on the wake's own texture. That would pass just as
+   * happily with the binding removed again — the claim under test is that the
+   * *water* shows it.
+   */
+  test('a deposited wake changes the rendered water', async ({ page }) => {
+    await page.goto('/');
+    await waitForOcean(page);
+
+    test.skip(
+      !(await hasGpuAdapter(page)),
+      'no GPU adapter: the software path cannot render these frames in time',
+    );
+
+    await setState(page, { preset: 'seaOfThieves', quality: 'high' });
+
+    // Looking down at open water well clear of the hull, so the only thing that
+    // can differ between the two captures is the deposit.
+    const look = async () => {
+      await setCamera(page, [-30, 40, 55], [-25, 0, 0]);
+      return capture(page);
+    };
+
+    await page.evaluate(() => window.__ocean.resetDeterministic(20, 60));
+    const clean = await look();
+
+    // Drive an emitter along a track, stepping between deposits so the buffer
+    // accumulates a trail rather than a single stamp.
+    await page.evaluate(async () => {
+      const ocean = window.__ocean;
+      for (let i = 0; i < 90; i++) {
+        const x = -60 + i * (8 / 60);
+        ocean.wake.emit(x, 0, 0, 8, 7);
+        await ocean.step(1 / 60, 1);
+      }
+    });
+    const withWake = await look();
+
+    const score = compareImages(clean, withWake);
+
+    // A Kelvin wedge across open water is a large, bright, unmistakable feature.
+    // The bar is set far above the measured run-to-run noise floor (mean ΔE
+    // around 0.04) but well below what the wedge actually produces, so this fails
+    // on the binding being lost rather than on the foam being retuned.
+    expect(
+      score.meanDeltaE,
+      `depositing a wake changed the water by mean ΔE ${score.meanDeltaE.toFixed(3)}; ` +
+        'a value near zero means OceanMaterial is not sampling the wake buffer',
+    ).toBeGreaterThan(0.5);
+  });
+
   test('camera modes switch via keyboard', async ({ page }) => {
     await page.goto('/');
     await waitForOcean(page);

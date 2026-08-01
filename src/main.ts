@@ -134,6 +134,16 @@ class App {
     this.seafloor = new Seafloor(4000);
     this.scene.add(this.seafloor.mesh);
 
+    // The foam buffer must exist before the water material too, and for the same
+    // reason as the seafloor: the surface samples it, and that binding is baked
+    // into the node graph. It used to be created during the async asset load,
+    // which is why nothing could ever sample it — by the time it existed the
+    // shader had already been built without it. It owns no assets, so there is
+    // nothing to wait for.
+    this.buoyancy = new BuoyancySystem();
+    this.wake = new Wake();
+    this.scene.add(this.wake.debugObject);
+
     boot.set(0.5, 'Compiling water shaders…');
     this.water = this.buildWaterMaterial();
     this.oceanMesh = new OceanMesh(this.water.material, {
@@ -334,9 +344,6 @@ class App {
 
   private async loadSceneContent(): Promise<void> {
     this.assets = new AssetLoader();
-    this.buoyancy = new BuoyancySystem();
-    this.wake = new Wake();
-    this.scene.add(this.wake.debugObject);
 
     // Settled, not `Promise.all`. The ship and the scene dressing are separate
     // features and must fail separately: one unreachable prop asset previously
@@ -458,6 +465,7 @@ class App {
       derivativeTextures: this.simulation.derivativeTextures,
       tileSizes: this.simulation.tileSizes,
       floorDepthNode: (worldPosition) => this.seafloor.depthNode(worldPosition),
+      foam: { texture: this.wake.texture, extent: this.wake.extent },
     });
   }
 
@@ -548,6 +556,7 @@ class App {
 
     this.oceanMesh.recenter(this.camera.position);
     this.water.setWorldOffset(this.oceanMesh.mesh.position.x, this.oceanMesh.mesh.position.z);
+    this.water.setFoamCenter(this.wake.centerX, this.wake.centerZ);
 
     // --- underwater state -----------------------------------------------------
     // `submersion` is a soft band around the surface rather than a boolean, so
@@ -594,29 +603,36 @@ class App {
 
   /** Physics, wake and chase camera. No-ops cleanly until the models land. */
   private updateSceneContent(dt: number): void {
-    if (!this.buoyancy) return;
-
     // Safe before the sampler's first readback resolves: it reports height 0 and
     // bodies simply settle to flat water rather than producing NaN.
     this.buoyancy.update(dt, this.sampler);
 
     const ship = this.ship;
-    if (!ship) return;
+    if (ship) {
+      ship.update(dt);
 
-    ship.update(dt);
+      const position = ship.object.position;
+      const speed = this.previousShipPosition.distanceTo(position) / Math.max(dt, 1e-4);
+      this.previousShipPosition.copy(position);
 
-    const position = ship.object.position;
-    const speed = this.previousShipPosition.distanceTo(position) / Math.max(dt, 1e-4);
-    this.previousShipPosition.copy(position);
+      // The buffer stays anchored on the hull rather than on the viewer. It is
+      // the ship's wake, the ship is what deposits into it, and re-centring on a
+      // camera that can fly across the ocean in seconds would scroll the whole
+      // history out through the edge of a footprint the hull never left.
+      this.wake.setCenter(position.x, position.z);
+      this.wake.emit(position.x, position.z, ship.heading, speed, ship.hullBeam);
 
-    this.wake.setCenter(position.x, position.z);
-    this.wake.emit(position.x, position.z, ship.heading, speed, ship.hullBeam);
+      this.chaseTarget.position.copy(position);
+      this.chaseTarget.heading = ship.heading;
+      this.director.setChaseTarget(this.chaseTarget);
+    }
+
+    // Outside the `ship` branch: the foam has to keep decaying whether or not
+    // anything is depositing into it, or a wake left by a ship that has since
+    // been disposed would hang on the water forever.
+    //
     // Must run outside an active render target; it saves and restores its own.
     this.wake.update(dt, this.renderer);
-
-    this.chaseTarget.position.copy(position);
-    this.chaseTarget.heading = ship.heading;
-    this.director.setChaseTarget(this.chaseTarget);
   }
 
   private onResize = (): void => {
@@ -645,6 +661,8 @@ class App {
         atmosphere: this.atmosphere,
         loop: this.loop,
         backend: this.backend,
+        wake: this.wake,
+        water: this.water,
         /**
          * Readiness signals. `sceneContentLoaded` settles whether or not the
          * models arrived, so a harness can distinguish "still loading" from

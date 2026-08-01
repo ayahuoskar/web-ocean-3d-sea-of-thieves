@@ -27,15 +27,23 @@ interface CapturedPixels {
   data: Uint8Array<ArrayBuffer>;
 }
 
-/** Only the parts of `window.__ocean` this harness uses. */
+/** Only the parts of `window.__ocean` the tests use. */
 interface OceanHooks {
   backend: 'webgpu' | 'webgl';
-  director: { snapToTarget(): void };
+  director: { snapToTarget(): void; currentMode: string };
+  wake: {
+    emit(x: number, z: number, heading: number, speed: number, width: number): void;
+    setCenter(x: number, z: number): void;
+    readonly centerX: number;
+    readonly centerZ: number;
+    readonly extent: number;
+  };
   isReady(): boolean;
   shadersReady(): boolean;
   setState(partial: Record<string, unknown>): void;
   setCamera(px: number, py: number, pz: number, tx: number, ty: number, tz: number): void;
   resetDeterministic(time?: number, settleSteps?: number): Promise<void>;
+  step(dt: number, steps?: number): Promise<void>;
   capturePixels(): Promise<CapturedPixels>;
 }
 

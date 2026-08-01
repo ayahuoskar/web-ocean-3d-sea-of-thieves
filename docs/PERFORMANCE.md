@@ -94,7 +94,7 @@ Throttling is detected by comparing the delivered rAF interval against the
 *measured* frame cost, not against the app's own `loop.stats.frameMs`. The app
 times its render call, and on WebGPU that call returns once the work is
 submitted — in the reference run it reads 0.5 ms for a High frame that costs
-2.42 ms on the GPU. Compare a 7.1 ms delivered interval against 0.5 ms and a
+2.89 ms on the GPU. Compare a 10.0 ms delivered interval against 0.5 ms and a
 perfectly healthy 141 FPS run is classified as throttled.
 
 ### Chrome flags, and what they change
@@ -170,33 +170,33 @@ GPU frame time, milliseconds, from timestamp queries:
 
 | Configuration | p50 | p90 | p95 | p99 | min | max | implied FPS | Verdict |
 |---|---|---|---|---|---|---|---|---|
-| WebGPU · Low | 0.26 | 0.65 | 0.73 | 0.83 | 0.24 | 3.09 | 3861 | PASS |
-| WebGPU · Medium | 1.30 | 1.35 | 1.59 | 1.98 | 1.24 | 4.78 | 770 | PASS |
-| **WebGPU · High** | **2.42** | 2.94 | 3.15 | 4.83 | 2.29 | 5.51 | **413** | **PASS** |
-| WebGPU · Ultra | 3.82 | 4.18 | 4.28 | 4.58 | 3.59 | 8.29 | 262 | PASS |
-| WebGPU · Max | 5.79 | 6.14 | 6.23 | 6.39 | 5.49 | 6.64 | 173 | PASS |
-| **WebGL2 · Low** | **0.94** | 1.42 | 1.66 | 2.76 | 0.29 | 5.00 | **1064** | **PASS** |
-| WebGL2 · High | 3.99 | 4.80 | 5.10 | 7.42 | 3.11 | 135.51 | 251 | PASS |
+| WebGPU · Low | 0.26 | 0.27 | 0.28 | 0.70 | 0.25 | 2.64 | 3802 | PASS |
+| WebGPU · Medium | 1.32 | 1.71 | 1.84 | 3.74 | 1.26 | 4.44 | 756 | PASS |
+| **WebGPU · High** | **2.89** | 3.39 | 5.21 | 5.52 | 2.34 | 5.89 | **347** | **PASS** |
+| WebGPU · Ultra | 4.10 | 6.29 | 6.50 | 6.94 | 3.49 | 7.37 | 244 | PASS |
+| WebGPU · Max | 6.25 | 8.32 | 8.60 | 9.00 | 5.55 | 9.97 | 160 | PASS |
+| **WebGL2 · Low** | **0.66** | 1.42 | 1.73 | 2.98 | 0.28 | 3.54 | **1506** | **PASS** |
+| WebGL2 · High | 4.29 | 5.40 | 5.77 | 6.47 | 3.18 | 7.04 | 233 | PASS |
 
 Scene cost and CPU frame time for the same runs:
 
 | Configuration | CPU p50 | CPU p99 | Draw calls | Render passes | Triangles | Textures | Render targets | Programs | Texture bytes |
 |---|---|---|---|---|---|---|---|---|---|
-| WebGPU · Low | 1.0 | 8.5 | 47 | 36 | 282 961 | 38 | 14 | 39 | 273 MB |
-| WebGPU · Medium | 1.9 | 5.4 | 94 | 69 | 485 569 | 47 | 21 | 47 | 283 MB |
-| WebGPU · High | 2.7 | 8.4 | 138 | 113 | 633 229 | 54 | 27 | 51 | 323 MB |
-| WebGPU · Ultra | 2.6 | 8.5 | 138 | 113 | 817 677 | 54 | 27 | 51 | 323 MB |
-| WebGPU · Max | 2.9 | 33.5 | 150 | 125 | 1 161 945 | 54 | 27 | 51 | 476 MB |
-| WebGL2 · Low | 0.7 | 1.6 | 47 | 36 | 282 961 | 38 | 14 | 39 | 273 MB |
-| WebGL2 · High | 1.8 | 5.2 | 138 | 113 | 633 229 | 54 | 27 | 51 | 323 MB |
+| WebGPU · Low | 1.0 | 3.0 | 47 | 36 | 282 961 | 38 | 14 | 39 | 273 MB |
+| WebGPU · Medium | 1.8 | 4.9 | 94 | 69 | 485 569 | 47 | 21 | 47 | 283 MB |
+| WebGPU · High | 2.5 | 7.3 | 138 | 113 | 633 229 | 54 | 27 | 51 | 323 MB |
+| WebGPU · Ultra | 2.5 | 6.9 | 138 | 113 | 817 677 | 54 | 27 | 51 | 323 MB |
+| WebGPU · Max | 2.7 | 7.3 | 150 | 125 | 1 161 945 | 54 | 27 | 51 | 476 MB |
+| WebGL2 · Low | 0.7 | 1.7 | 47 | 36 | 282 961 | 38 | 14 | 39 | 273 MB |
+| WebGL2 · High | 1.6 | 3.0 | 138 | 113 | 633 229 | 54 | 27 | 51 | 323 MB |
 
 Reading these:
 
-- **Both gates pass with a wide margin on this GPU.** WebGPU High costs 2.42 ms
-  against a 16.7 ms budget — 7× headroom; WebGL2 Low costs 0.94 ms against
+- **Both gates pass with a wide margin on this GPU.** WebGPU High costs 2.89 ms
+  against a 16.7 ms budget — 5.8× headroom; WebGL2 Low costs 0.66 ms against
   33.3 ms. That is an RTX 5090 result and it should be read as one; see
   Limitations.
-- **GPU time tracks the tier cleanly**, 0.26 → 1.30 → 2.42 → 3.82 → 5.79 ms, a 22×
+- **GPU time tracks the tier cleanly**, 0.26 → 1.32 → 2.89 → 4.10 → 6.25 ms, a 24×
   span. Whatever else is true of these numbers, they are responding to the thing
   the quality tiers change.
 - **CPU frame time does not track the tier**, staying between 2.6 and 2.9 ms from
@@ -222,8 +222,8 @@ Reading these:
 ### Cross-check: the number responds to workload
 
 A GPU timer that does not move with load is not measuring anything. WebGPU High
-re-run at DPR 2 (3200 × 1800, four times the pixels) costs **6.41 ms** against
-2.42 ms — 2.6×, which is what a mix of resolution-independent FFT passes and
+re-run at DPR 2 (3200 × 1800, four times the pixels) costs **6.76 ms** against
+2.89 ms — 2.3×, which is what a mix of resolution-independent FFT passes and
 fragment-bound surface shading should do. Reproduce with:
 
 ```bash
@@ -317,7 +317,7 @@ at Max, with render-target counts of 14/27/27 respectively.
 
 ## Limitations, and what is still unverified
 
-- **One machine.** Every number here is from an RTX 5090, and a 2.42 ms frame on
+- **One machine.** Every number here is from an RTX 5090, and a 2.89 ms frame on
   that part says very little about a laptop iGPU. The budgets are *met*, not
   *stressed*: nothing in this run establishes where the tiers stop working. The
   harness is the deliverable; the numbers describe one host, which is why the
