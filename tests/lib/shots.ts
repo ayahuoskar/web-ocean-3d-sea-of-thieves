@@ -212,25 +212,36 @@ export const SHOTS: readonly Shot[] = [
   },
   {
     id: 'waterline',
-    title: 'Waterline, grazing',
+    title: 'Waterline, split',
     purpose:
-      'The camera low enough that crests pass through its height: silhouette ' +
-      'of the near surface against the sky, and the horizon where the two meet.',
+      'The eye *at* the surface: water below the line and sky above it in one ' +
+      'frame, with the line following the crests rather than lying flat.',
     state: {
       quality: 'high',
       cameraMode: 'orbit',
-      // Calm on purpose. The director pushes the camera out of a 0.35 m band
-      // around the surface to stop the underwater state flickering, so a shot
-      // this low is only reproducible if the crests near the camera cannot
-      // reach it. At 5 m/s they stay under a metre.
+      // Calm on purpose, but no longer because the camera is fenced out of the
+      // surface — that clamp is gone, and it was a wall that made diving
+      // impossible. Calm because a shot with the eye a few centimetres under is
+      // only reproducible if the crests near it are gentle; at 5 m/s they stay
+      // under a metre.
       windSpeed: 5,
-      peakWavelength: 22,
+      peakWavelength: 20,
       cloudCoverage: 0.3,
       preset: 'skyPro',
     },
-    // Low, pointed away from the ship and up-sun, so the specular track runs
-    // along the surface and out to the horizon.
-    camera: { position: [34, 1.6, -30], target: [52, 1.4, -48] },
+    /**
+     * Eight centimetres under, looking very slightly up.
+     *
+     * This is the shot the spec always asked for and the renderer could not
+     * produce. `submersion` used to cross-fade the *whole frame* on one scalar,
+     * so a camera here rendered a uniformly half-tinted image rather than water
+     * and air in the same picture. The underwater pass now integrates each eye
+     * ray's own path below the surface: a ray angled down crosses metres of water
+     * and comes back attenuated, a ray angled up leaves after eight centimetres
+     * and does not, and the boundary between them is where the wave field crosses
+     * the eye.
+     */
+    camera: { position: [-46, 0.02, 44], target: [-76, 1.0, 24] },
     time: 63.75,
     settleSteps: 90,
   },

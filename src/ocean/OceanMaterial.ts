@@ -152,6 +152,19 @@ const MAX_CASCADES = 3;
  */
 const GRAZING_SLOPE_SIGMA = 0.16;
 
+/**
+ * Refractive index of water relative to air, for the underside.
+ *
+ * 1.333 is the sodium-D value at 20 degrees and the number every optics text
+ * quotes. What matters here is the critical angle it implies: `asin(1/1.333)` is
+ * 48.6 degrees, so the whole sky arrives inside a cone of that half-angle and
+ * everything outside it is total internal reflection.
+ */
+const WATER_IOR = 1.333;
+
+/** cos(48.6 degrees) — the edge of Snell's window. */
+const COS_CRITICAL_ANGLE = Math.sqrt(1 - 1 / (WATER_IOR * WATER_IOR));
+
 export class OceanMaterial {
   readonly material: THREE.MeshBasicNodeMaterial;
 
@@ -988,6 +1001,64 @@ export class OceanMaterial {
         .toVar();
 
       const withFoam = mix(surface, foamColor, foamMask).toVar();
+
+      // --- the surface seen from below: Snell's window and TIR ------------------
+      //
+      // Looking up from underwater does not show the topside shading. Light
+      // arriving from the whole sky hemisphere is refracted into a cone of half
+      // angle asin(1/1.333) = 48.6 degrees, so the entire sky — horizon to
+      // zenith, in every direction — is compressed into one bright disc directly
+      // overhead. Outside that disc nothing from the air can reach the eye at
+      // all, and the surface becomes a perfect mirror of the water below it.
+      //
+      // Until now the material rendered its topside model on the back face, so
+      // the underside came out as flat pale facets: no window, no mirror, and a
+      // waterline shot from the surface showed the wave field as opaque
+      // polygons. This is the one item the claims audit has carried as unbuilt
+      // since it was written.
+      //
+      // The branch is on the *sign* of `n . v`, which is exactly "is this a back
+      // face". It is coherent over large regions of the screen, so the cost above
+      // water is a compare.
+      const facingSign = n.dot(viewDir).toVar();
+      If(facingSign.lessThan(0), () => {
+        const cosI = facingSign.abs().clamp(0, 1).toVar();
+
+        // Snell: sin(t) = ior * sin(i). Past sin(t) = 1 there is no transmitted
+        // ray and everything is reflected.
+        const sinT2 = float(1)
+          .sub(cosI.mul(cosI))
+          .mul(WATER_IOR * WATER_IOR)
+          .toVar();
+        const insideWindow = smoothstepDownClamped(sinT2, 0.88, 1.0).toVar();
+
+        // Where in the sky this ray came from. At the centre of the window the
+        // eye is looking at the zenith; at its edge, at the horizon — the whole
+        // vertical sweep of the sky lives in those 48.6 degrees, which is why a
+        // real Snell window has a bright rim of horizon light around it.
+        const skyT = cosI
+          .sub(COS_CRITICAL_ANGLE)
+          .div(1 - COS_CRITICAL_ANGLE)
+          .clamp(0, 1)
+          .toVar();
+        const windowColor = mix(this.uHorizonColor, this.uSkyColor, skyT)
+          .mul(this.uLightLevel.mul(0.85).add(0.15))
+          .mul(1.9)
+          .toVar();
+
+        // Outside the window: the surface is a mirror, and what it mirrors is
+        // the water underneath. `litBody` is exactly that — the transmitted and
+        // scattered colour of the column below — so the reflection is the scene
+        // the viewer is already in, which is what makes a real underwater ceiling
+        // read as liquid rather than as a lid.
+        const mirrored = litBody.mul(0.88).add(scatter.mul(0.35)).toVar();
+
+        // Foam floats *on* the surface and is visible from beneath as a dark
+        // patch against the window, because it scatters the sky away before it
+        // can be refracted through.
+        const underside = mix(mirrored, windowColor, insideWindow).toVar();
+        withFoam.assign(mix(underside, foamColor.mul(0.55), foamMask.mul(0.8)));
+      });
 
       // --- aerial perspective --------------------------------------------------------
       const fogFactor = float(1)

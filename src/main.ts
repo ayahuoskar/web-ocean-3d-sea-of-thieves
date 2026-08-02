@@ -68,6 +68,14 @@ class App {
   private director!: CameraDirector;
 
   private simulation!: OceanSimulation;
+  /**
+   * Surface elevation as a TSL function, bound once at build time.
+   *
+   * Rebound by `applyQuality` after `resize` recreates the displacement targets,
+   * for the same reason the surface material re-points its cascades: the node
+   * graph holds the binding, and a stale one samples a disposed texture.
+   */
+  private waveHeightNode!: (worldXZ: any) => any;
   private water!: OceanMaterial;
   /** Planar reflection. Null on the WebGL2 path, which keeps the analytic sky. */
   private reflections: Reflections | null = null;
@@ -147,6 +155,9 @@ class App {
     this.backend = bootstrap.backend;
     console.info(`[ocean] renderer backend: ${this.backend}`);
 
+    // Set once, never toggled — see `applyQuality` for why toggling it crashes.
+    this.renderer.shadowMap.enabled = true;
+
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(
       55,
@@ -165,6 +176,7 @@ class App {
       params: DEFAULT_SPECTRUM,
     });
     this.sampler = new OceanSampler(this.renderer, this.simulation);
+    this.waveHeightNode = this.simulation.heightNode();
 
     boot.set(0.4, 'Building seafloor…');
     // The seafloor must exist before the water material: the surface samples its
@@ -263,6 +275,9 @@ class App {
         // passing it here is what makes them and the seafloor pattern the same
         // light.
         (worldPosition) => this.caustics.intensityNode(worldPosition),
+        // And this is what makes the waterline per-pixel: the pass can ask where
+        // the surface actually is along each eye ray instead of assuming a plane.
+        this.waveHeightNode,
       ),
       sceneDepth,
     );
@@ -651,6 +666,10 @@ class App {
     );
     // The foam buffer reads the same fields to find breaking crests.
     this.wake.setCascades(this.simulation.derivativeTextures, this.simulation.tileSizes);
+    // The height field the underwater pass traces against is re-pointed by
+    // `resize` itself; this call is only here to assert that, by failing loudly
+    // if the slots were never created.
+    this.waveHeightNode = this.simulation.heightNode();
 
     this.scene.remove(this.oceanMesh.mesh);
     this.oceanMesh.dispose();
@@ -662,9 +681,19 @@ class App {
 
     this.clouds.setParams({ steps: quality.cloudSteps });
 
-    // Shadows: the renderer flag alone only stops the pass from running. The
-    // light owns the map, so the tier's resolution has to reach it too.
-    this.renderer.shadowMap.enabled = quality.shadowMapSize > 0;
+    // Shadows are a *light* setting here, never a renderer one.
+    //
+    // `renderer.shadowMap.enabled` looks like the natural tier switch and is a
+    // trap. Three builds a light's shadow node lazily inside `setup()`, and that
+    // setup returns early while the flag is false — so switching it off and back
+    // on leaves the node cached with a null `shadowMap`, and the next thing to
+    // render the scene reads `depthTexture` off it. The planar reflector renders
+    // the scene from its own `updateBefore`, so it got there first and the crash
+    // landed on a Low-to-Medium transition.
+    //
+    // The flag is therefore set true once at startup and never touched. The tier
+    // expresses "no shadows" as `castShadow = false`, which three handles on the
+    // light rather than on the renderer.
     this.atmosphere.setShadowMapSize(quality.shadowMapSize);
 
     // Particle budget is a live setting, not a construction-time one; `setCount`
@@ -922,6 +951,9 @@ class App {
 
     this.underwater.setParams({
       submersion,
+      // Signed, and the sign is the point: it tells the pass which side of the
+      // surface each ray starts on, which is what a per-pixel waterline needs.
+      eyeHeight: this.camera.position.y - surface,
       cameraDepth: Math.max(0, surface - this.camera.position.y),
       sunDirection: this.atmosphere.sunDirection,
       sunColor: this.atmosphere.sunColor,

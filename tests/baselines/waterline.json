@@ -1,6 +1,6 @@
 {
   "shot": "waterline",
-  "capturedAt": "2026-08-02T00:01:53.887Z",
+  "capturedAt": "2026-08-02T07:13:04.412Z",
   "width": 1280,
   "height": 720,
   "definition": {
@@ -8,20 +8,20 @@
       "quality": "high",
       "cameraMode": "orbit",
       "windSpeed": 5,
-      "peakWavelength": 22,
+      "peakWavelength": 20,
       "cloudCoverage": 0.3,
       "preset": "skyPro"
     },
     "camera": {
       "position": [
-        34,
-        1.6,
-        -30
+        -46,
+        0.02,
+        44
       ],
       "target": [
-        52,
-        1.4,
-        -48
+        -76,
+        1,
+        24
       ]
     },
     "time": 63.75,

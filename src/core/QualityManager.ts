@@ -19,7 +19,22 @@ export interface QualitySettings {
    * entirely. Applied to the light, not just to `renderer.shadowMap.enabled` —
    * a tier that claims a cheaper shadow has to actually allocate a smaller map.
    */
-  shadowMapSize: 0 | 1024 | 2048 | 4096;
+  /**
+   * Sun shadow map resolution per side.
+   *
+   * Never zero, and that is a deliberate policy change rather than an oversight.
+   * Turning a light's `castShadow` off and on at runtime makes three rebuild the
+   * light's node graph, and its shadow node is created lazily inside `setup()` —
+   * so a transition can leave a cached node holding a null render target that the
+   * next thing to draw the scene reads `depthTexture` from. The planar reflector
+   * renders the scene from its own `updateBefore`, so it reliably got there
+   * first, and the result was a crash on a tier change.
+   *
+   * The class of bug disappears if the light simply always casts. Low pays one
+   * 512-map shadow pass for it, which against 0.33 ms of a 16.7 ms budget is a
+   * cost worth taking to make tier changes unable to crash.
+   */
+  shadowMapSize: 512 | 1024 | 2048 | 4096;
   /** Raymarch steps for the volumetric cloud layer; 0 disables volumetrics. */
   cloudSteps: number;
   /** Raymarch steps for underwater god rays; 0 disables them. */
@@ -89,7 +104,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     cascades: 1,
     meshRings: 128,
     meshSegments: 192,
-    shadowMapSize: 0,
+    shadowMapSize: 512,
     cloudSteps: 0,
     godRaySteps: 0,
     underwaterParticles: 400,

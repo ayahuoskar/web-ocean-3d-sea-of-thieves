@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { Fn, float, ivec2, textureLoad, uniform, uv, vec2, vec4 } from 'three/tsl';
+import { Fn, float, ivec2, texture, textureLoad, uniform, uv, vec2, vec4 } from 'three/tsl';
 import { butterflyPassNode, cMul, createFFTResources, type FFTResources } from './FFT';
 import {
   CASCADES,
@@ -55,6 +55,12 @@ interface Cascade {
   assembleDerivatives: THREE.NodeMaterial;
 }
 
+/**
+ * Height-field binding slots, fixed so a tier change re-points rather than
+ * rebuilds. Matches `MAX_CASCADES` in `OceanMaterial`.
+ */
+const HEIGHT_SLOTS = 3;
+
 export interface OceanSimulationOptions {
   size: 128 | 256 | 512;
   cascadeCount: 1 | 2 | 3;
@@ -88,6 +94,71 @@ export class OceanSimulation {
   // ---------------------------------------------------------------- public API
 
   /** Displacement textures, one per active cascade, for the surface material. */
+  /**
+   * Surface elevation at a world XZ, as a TSL function.
+   *
+   * The same displacement fields the ocean mesh is built from, summed over the
+   * cascades — so a consumer asking "where is the water here" gets the answer the
+   * viewer can see rather than a plane at sea level.
+   *
+   * Deliberately vertical-only. The horizontal (choppy) components displace a
+   * vertex sideways as well as up, so the true surface is not a heightfield and
+   * inverting it needs iteration. For finding where an eye ray crosses the
+   * surface, the vertical term carries essentially all of the answer and the
+   * lateral error is a fraction of a wavelength.
+   *
+   * Safe to bake into a node graph and keep. The bindings are fixed slots that
+   * `resize` re-points, exactly as `OceanMaterial.setCascades` does — a consumer
+   * that rebuilt its graph after every tier change would be recompiling a shader
+   * mid-session, which is the thing the whole cascade-slot arrangement exists to
+   * avoid.
+   */
+  heightNode(): (worldXZ: any) => any {
+    this.ensureHeightBindings();
+    const nodes = this.heightNodes;
+    const tiles = this.heightTiles;
+    const weights = this.heightWeights;
+    return (worldXZ: any) => {
+      let sum: any = float(0);
+      for (let i = 0; i < nodes.length; i++) {
+        sum = sum.add(nodes[i].sample(vec2(worldXZ).div(tiles[i])).y.mul(weights[i]));
+      }
+      return sum;
+    };
+  }
+
+  /** Creates the fixed height-field slots on first use, and points them. */
+  private ensureHeightBindings(): void {
+    if (this.heightNodes.length === 0) {
+      for (let i = 0; i < HEIGHT_SLOTS; i++) {
+        const source = Math.min(i, this.displacementTextures.length - 1);
+        this.heightNodes.push(texture(this.displacementTextures[source]) as any);
+        this.heightTiles.push(uniform(this.tileSizes[source]));
+        this.heightWeights.push(uniform(i < this.displacementTextures.length ? 1 : 0));
+      }
+      return;
+    }
+    this.repointHeightBindings();
+  }
+
+  /** Re-points the height slots at the current targets. Called after `resize`. */
+  private repointHeightBindings(): void {
+    if (this.heightNodes.length === 0) return;
+    const textures = this.displacementTextures;
+    const active = Math.min(textures.length, HEIGHT_SLOTS);
+    for (let i = 0; i < HEIGHT_SLOTS; i++) {
+      const source = Math.min(i, active - 1);
+      this.heightNodes[i].value = textures[source];
+      this.heightTiles[i].value = this.tileSizes[source];
+      this.heightWeights[i].value = i < active ? 1 : 0;
+    }
+  }
+
+  // Fixed height-field slots, re-pointed rather than rebuilt. See `heightNode`.
+  private readonly heightNodes: any[] = [];
+  private readonly heightTiles: any[] = [];
+  private readonly heightWeights: any[] = [];
+
   get displacementTextures(): THREE.Texture[] {
     return this.cascades.map((c) => c.displacement.texture);
   }
@@ -141,6 +212,7 @@ export class OceanSimulation {
     this.fft.butterfly.dispose();
     this.fft = createFFTResources(size);
     this.build();
+    this.repointHeightBindings();
   }
 
   update(elapsed: number): void {

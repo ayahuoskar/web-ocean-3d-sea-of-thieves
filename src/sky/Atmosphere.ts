@@ -344,31 +344,23 @@ export class Atmosphere {
    * no effect at all. Disposing forces reallocation at the requested size on the
    * next shadow pass.
    */
+  /**
+   * Sun shadow map resolution per side.
+   *
+   * `castShadow` is never toggled — see `QualitySettings.shadowMapSize`. Only the
+   * resolution moves, and three's `ShadowNode.renderShadow` resizes its target
+   * from `shadow.mapSize` every frame, so setting the size is the whole job.
+   */
   setShadowMapSize(size: number): void {
-    const enabled = size > 0;
-    const side = enabled ? Math.max(256, Math.round(size)) : this.sunLight.shadow.mapSize.x;
-
-    if (this.sunLight.castShadow === enabled && this.sunLight.shadow.mapSize.x === side) return;
-
-    this.sunLight.castShadow = enabled;
-    if (enabled && this.sunLight.shadow.mapSize.x !== side) {
-      // Set the size and stop there. Three's `ShadowNode.renderShadow` calls
-      // `shadowMap.setSize(shadow.mapSize.width, ...)` every frame, so the
-      // target follows `mapSize` on its own.
-      //
-      // The `shadow.dispose()` that used to follow was not just redundant, it
-      // was a crash: it nulls the node's `shadowMap`, and the planar reflector
-      // renders the scene from its own `updateBefore` — so on the frame after a
-      // tier change the reflection pass reached `updateShadow` first and read
-      // `depthTexture` off null. It only showed up when cycling tiers, because
-      // that is the only thing that changes the resolution.
-      this.sunLight.shadow.mapSize.set(side, side);
-    }
+    const side = Math.max(256, Math.round(size));
+    this.sunLight.castShadow = true;
+    if (this.sunLight.shadow.mapSize.x === side) return;
+    this.sunLight.shadow.mapSize.set(side, side);
   }
 
-  /** Current sun shadow map resolution per side; 0 when shadows are off. */
+  /** Current sun shadow map resolution per side. */
   get shadowMapSize(): number {
-    return this.sunLight.castShadow ? this.sunLight.shadow.mapSize.x : 0;
+    return this.sunLight.shadow.mapSize.x;
   }
 
   get sunDirection(): THREE.Vector3 {

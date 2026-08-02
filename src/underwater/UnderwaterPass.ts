@@ -18,6 +18,7 @@ import {
   vec3,
   vec4,
 } from 'three/tsl';
+import { smoothstepDown } from '../core/tslMath';
 
 /**
  * The submerged look, as a post-processing node graph.
@@ -55,6 +56,8 @@ import {
 export interface UnderwaterParams {
   /** 0 = fully above water, 1 = fully submerged. Cross-fade, never a hard cut. */
   submersion: number;
+  /** Signed height of the eye above the surface beneath it, metres. */
+  eyeHeight: number;
   /** Hue of the medium. */
   waterColor: THREE.Color;
   /** Beer–Lambert extinction per metre, per channel. */
@@ -73,6 +76,7 @@ export interface UnderwaterParams {
 
 export const DEFAULT_UNDERWATER_PARAMS: UnderwaterParams = {
   submersion: 0,
+  eyeHeight: 1,
   waterColor: new THREE.Color(0x1a5e7a),
   extinction: new THREE.Vector3(0.115, 0.031, 0.021),
   visibility: 38,
@@ -93,6 +97,15 @@ export const DEFAULT_UNDERWATER_PARAMS: UnderwaterParams = {
  */
 export type CausticsField = (worldPosition: unknown, lod?: unknown) => unknown;
 
+/**
+ * Wave surface elevation at a world XZ, as a TSL function.
+ *
+ * Supplied by the app from the same displacement cascades the ocean mesh is
+ * built from, so the waterline this pass finds is the surface the viewer can see
+ * — not a plane at y = 0 that the crests pass through.
+ */
+export type WaveHeightField = (worldXZ: unknown) => unknown;
+
 /** Hard ceiling on the tap count, for sanity rather than for compilation. */
 const MAX_GODRAY_STEPS = 64;
 
@@ -110,7 +123,33 @@ export class UnderwaterPass {
   private disposed = false;
 
   // --- medium --------------------------------------------------------------
+  /**
+   * How submerged the *camera* is, 0..1. Still a global scalar, because the eye
+   * is a point — but it no longer decides how much water each pixel looks
+   * through. See `uEyeDepth`.
+   */
   private readonly uSubmersion = uniform(0);
+  /**
+   * Signed height of the camera above the wave surface directly beneath it,
+   * metres. Negative means submerged.
+   *
+   * This is what makes the waterline per-pixel. The medium is not a screen-wide
+   * tint that fades up as the viewer sinks; it is an integral along each eye ray
+   * of however much of that ray lies below the surface. A ray pointing down from
+   * an eye 10 cm under a crest crosses metres of water; a ray pointing up crosses
+   * ten centimetres and leaves. Those are different pixels in the same frame,
+   * and the old whole-frame cross-fade could not express the difference.
+   */
+  private readonly uEyeHeight = uniform(1);
+  /**
+   * Band, in metres, over which a pixel hands over from air to water.
+   *
+   * Not a fudge: the eye has physical extent, and a real camera at the surface
+   * shows a meniscus a centimetre or two thick rather than a mathematical line.
+   * It also keeps the transition from aliasing along the waterline, which a hard
+   * step through a wave-shaped boundary certainly would.
+   */
+  private readonly uWaterlineBand = uniform(0.06);
   private readonly uWaterColor = uniform(new THREE.Color(DEFAULT_UNDERWATER_PARAMS.waterColor));
   /** Total extinction per metre per channel: absorption + the visibility floor. */
   private readonly uSigma = uniform(new THREE.Vector3(0.2, 0.09, 0.08));
@@ -208,10 +247,16 @@ export class UnderwaterPass {
    *                       pre-linearised scalar node cannot support.
    * @returns The graded node to hand to `PostProcessing.outputNode`.
    */
-  build(scenePassColor: unknown, sceneDepth: unknown, causticsNode: CausticsField): unknown {
+  build(
+    scenePassColor: unknown,
+    sceneDepth: unknown,
+    causticsNode: CausticsField,
+    waveHeightNode: WaveHeightField | null = null,
+  ): unknown {
     const colorNode: any = scenePassColor;
     const depthNode: any = sceneDepth;
     const caustics = causticsNode as (worldPosition: any, lod?: any) => any;
+    const waveHeight = waveHeightNode as ((worldXZ: any) => any) | null;
 
     if (colorNode === null || colorNode === undefined) {
       throw new Error('UnderwaterPass.build: scenePassColor is required.');
@@ -241,7 +286,10 @@ export class UnderwaterPass {
       const src = colorNode.sample(suv).toVar('uwSrc');
       const outRgb = vec3(src.rgb).toVar('uwOut');
 
-      // Uniform-coherent branch: above water the whole effect costs one compare.
+      // Uniform-coherent branch: well clear of the surface the whole effect costs
+      // one compare. The gate is `uSubmersion`, which the app ramps over a band
+      // around the waterline — so it opens slightly *before* the eye goes under,
+      // which is exactly when the per-pixel split starts to matter.
       If(this.uSubmersion.greaterThan(0.001), () => {
         // Sky pixels come back at `far`, which is exactly right here: looking at
         // "nothing" underwater means looking at an infinite column of water.
@@ -264,10 +312,72 @@ export class UnderwaterPass {
         const viewH0 = this.uInvProjection.mul(vec4(ndc0.x, ndc0.y, -1, 1)).toVar('uwViewH0');
         const viewDir0 = normalize(viewH0.xyz.div(viewH0.w)).toVar('uwViewDir0');
         const axialCos = viewDir0.z.negate().max(1e-3).toVar('uwAxialCos');
+        // Hoisted out of the god-ray branch: the waterline needs it too, and
+        // rebuilding the same ray twice in one fragment is a straight waste.
+        const worldRay = normalize(
+          this.uCameraWorld.mul(vec4(viewDir0, 0)).xyz,
+        ).toVar('uwWorldRay');
         const dist = axialDist.div(axialCos).toVar('uwDist');
 
-        // --- 1. transmission -------------------------------------------------
-        const transmit = exp(this.uSigma.mul(dist.negate())).toVar('uwT');
+        // --- 1. how much of this ray is under water ---------------------------
+        //
+        // The eye is a point, so whether *it* is submerged is a per-frame scalar.
+        // What is not scalar is how much water each ray crosses, and that is the
+        // quantity Beer-Lambert wants.
+        //
+        // With the eye at signed height `h` above the surface and the ray's
+        // vertical component `dy`, the ray crosses the surface at `t = -h / dy`.
+        // From an eye below the surface, an upward ray leaves the water there and
+        // a downward ray never does; from an eye above it, a downward ray enters
+        // there and an upward ray never does. Four cases, one expression.
+        //
+        // The surface is taken as the wave field evaluated where the ray meets
+        // it, refined once from a first guess at the eye's own column — so the
+        // waterline follows the crests rather than sitting on a flat plane at the
+        // camera's height. Without the refinement, a camera in a trough draws its
+        // waterline through the wave in front of it.
+        const rayY = worldRay.y.toVar('uwRayY');
+        const eyeH = float(0).toVar('uwEyeH');
+        eyeH.assign(this.uEyeHeight);
+
+        if (waveHeight !== null) {
+          // First guess: the plane at the eye's own local surface height.
+          const guessT = eyeH.negate().div(rayY.abs().max(1e-3).mul(rayY.sign())).toVar('uwGuessT');
+          const guessP = this.uCameraPos.add(worldRay.mul(guessT.clamp(0, 400))).toVar('uwGuessP');
+          // Refined: the eye's height above the surface *there*.
+          eyeH.assign(this.uCameraPos.y.sub(waveHeight(guessP.xz)));
+        }
+
+        // Distance at which this ray meets the surface. Negative or huge means
+        // it never does in the direction it is travelling.
+        const crossT = eyeH.negate().div(rayY).toVar('uwCrossT');
+        const submergedStart = float(0).toVar('uwStart');
+        const submergedEnd = dist.toVar('uwEnd');
+
+        // Eye under water: submerged from 0 until the ray leaves (upward rays
+        // only). Eye above: submerged from where the ray enters (downward rays
+        // only) to the scene.
+        const eyeUnder = smoothstepDown(eyeH, this.uWaterlineBand.negate(), this.uWaterlineBand)
+          .toVar('uwEyeUnder');
+        const leaves = rayY.greaterThan(0).select(crossT.max(0), float(1e6)).toVar('uwLeaves');
+        const enters = rayY.lessThan(0).select(crossT.max(0), float(1e6)).toVar('uwEnters');
+
+        submergedEnd.assign(mix(dist, dist.min(leaves), eyeUnder));
+        submergedStart.assign(mix(dist.min(enters), float(0), eyeUnder));
+
+        const waterPath = submergedEnd.sub(submergedStart).max(0).toVar('uwPath');
+
+        // How much this *pixel* is a view through water, for the grade and the
+        // shafts. A ray that crosses centimetres of water is not an underwater
+        // image; one that crosses metres is.
+        const pixelSubmersion = float(1)
+          .sub(waterPath.mul(-1.4).exp())
+          .clamp(0, 1)
+          .mul(this.uSubmersion)
+          .toVar('uwPixelSub');
+
+        // --- 2. transmission --------------------------------------------------
+        const transmit = exp(this.uSigma.mul(waterPath.negate())).toVar('uwT');
 
         // How much daylight is left at the camera's own depth. Drives both the
         // inscatter brightness and the shaft brightness, so diving gets darker.
@@ -309,14 +419,13 @@ export class UnderwaterPass {
           // absorb. Taking `suv.y * 2 - 1` builds a ray pointing *down* wherever
           // the pixel looks up, which sent every shaft the wrong way and was the
           // reason the god rays never converged on the sun.
-          const worldDir = normalize(
-            this.uCameraWorld.mul(vec4(viewDir0, 0)).xyz,
-          ).toVar('uwWorldDir');
+          const worldDir = worldRay;
 
           // `dist` is already along this pixel's ray — see the transmission term
           // above, which now makes the same correction rather than leaving the
           // two describing different path lengths.
-          const march = min(dist, this.uShaftRange).toVar('uwMarch');
+          // Shafts exist only in the submerged part of the ray.
+        const march = min(waterPath, this.uShaftRange).toVar('uwMarch');
           const stepLength = march.mul(this.uInvSteps).toVar('uwStep');
 
           // Mip level matched to the march's own sampling rate.
@@ -402,7 +511,7 @@ export class UnderwaterPass {
         const lifted = mix(flat, medium.mul(1.2), this.uContrastLoss);
         const tinted = lifted.mul(this.uTint);
 
-        outRgb.assign(mix(src.rgb, tinted, this.uSubmersion));
+        outRgb.assign(mix(src.rgb, tinted, pixelSubmersion));
       });
 
       return vec4(outRgb, src.a);
@@ -416,6 +525,7 @@ export class UnderwaterPass {
     if (params.sunDirection !== undefined) p.sunDirection.copy(params.sunDirection);
     if (params.sunColor !== undefined) p.sunColor.copy(params.sunColor);
     if (params.submersion !== undefined) p.submersion = params.submersion;
+    if (params.eyeHeight !== undefined) p.eyeHeight = params.eyeHeight;
     if (params.visibility !== undefined) p.visibility = params.visibility;
     if (params.godRayStrength !== undefined) p.godRayStrength = params.godRayStrength;
     if (params.godRaySteps !== undefined) p.godRaySteps = params.godRaySteps;
@@ -484,6 +594,7 @@ export class UnderwaterPass {
     const p = this.params;
 
     this.uSubmersion.value = clampNumber(p.submersion, 0, 1);
+    this.uEyeHeight.value = p.eyeHeight;
     this.uWaterColor.value.copy(p.waterColor);
     this.uSunColor.value.copy(p.sunColor);
 
