@@ -131,15 +131,24 @@ export interface OceanMaterialInputs {
 const MAX_CASCADES = 3;
 
 /**
- * Slope scale for the grazing-angle reflection masking, dimensionless.
+ * Slope scale for the grazing-angle reflection fade, dimensionless.
  *
- * Cox & Munk's classic sun-glitter measurements give a wind-driven RMS surface
- * slope of about 0.28 at 15 m/s. Using that value directly in the masking term
- * removes almost the whole reflection at the horizon, which overshoots — the
- * derivative fields still carry real slope at mid distances, so the correction
- * would be applied twice there. 0.16 is the working value: the far field keeps
- * roughly half its reflection and stops reading as a white sheet, and the near
- * field, where the normals are genuine, is barely touched.
+ * Motivated by Cox & Munk's sun-glitter measurements, which give a wind-driven
+ * RMS surface slope near 0.28 at 15 m/s — but **this is not a Smith masking
+ * term** and should not be read as one. A real Smith function goes to zero at
+ * grazing incidence and depends on the chosen NDF; the fade below bottoms out at
+ * 0.45, and it multiplies the Fresnel *blend* rather than acting as the geometry
+ * factor of the microfacet BRDF. It is an art-directed approximation of what
+ * masking would do, with the right shape and the wrong limit.
+ *
+ * The value is not Cox & Munk's either. At 0.28 the fade removes nearly the
+ * whole horizon reflection, which overshoots: the derivative fields still carry
+ * real slope at mid distances, so the correction would be applied twice there.
+ * 0.16 leaves the far field about half its reflection, which stops it reading as
+ * a white sheet, and barely touches the near field where the normals are genuine.
+ *
+ * Doing this properly means a slope-variance-driven roughness feeding a
+ * prefiltered reflection probe, which this renderer does not have.
  */
 const GRAZING_SLOPE_SIGMA = 0.16;
 
@@ -594,22 +603,21 @@ export class OceanMaterial {
       const fresnelPow = oneMinus.mul(oneMinus).mul(oneMinus).mul(oneMinus).mul(oneMinus).toVar();
       const fresnel = f0.add(float(1).sub(f0).mul(fresnelPow)).clamp(0, 1).toVar();
 
-      // Masking for the slope the normal no longer carries.
+      // Grazing fade, standing in for the slope the normal no longer carries.
       //
       // Schlick's Fresnel describes one flat interface, and at a grazing angle it
       // is very close to 1 — from 5 m up, water 400 m away is seen at under a
       // degree, so a flat sea reflects 94% of the sky there. That is correct for
-      // a flat sea and wrong for this one. The surface has a slope distribution
-      // (Cox & Munk put the RMS slope near 0.28 at 15 m/s), and the mipmapped
-      // derivative fields plus the explicit distance flattening deliberately
-      // average that away — so the normal a distant pixel gets is the *mean*
-      // normal, which has none of the masking and shadowing the real facets do.
+      // a flat sea and wrong for this one. The surface has a slope distribution,
+      // and the mipmapped derivative fields plus the explicit distance flattening
+      // deliberately average it away — so the normal a distant pixel gets is the
+      // *mean* normal, which has none of the masking and shadowing the real
+      // facets do.
       //
       // The consequence was that everything past the near field went to a sheet
-      // of white sky, and it reads as foam even though the foam mask there is
-      // empty. This is the Smith G1 masking term's behaviour in a cheap form:
-      // full reflection head-on, roughly halved at the horizon, with the
-      // crossover set by the slope scale.
+      // of white sky, and it read as foam even though the foam mask there is
+      // empty. See `GRAZING_SLOPE_SIGMA` for why this is not the Smith term it
+      // resembles.
       const maskedGrazing = nDotV
         .div(nDotV.add(GRAZING_SLOPE_SIGMA))
         .mul(0.55)

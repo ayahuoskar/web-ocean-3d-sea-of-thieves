@@ -93,8 +93,8 @@ never FAIL, if any of these hold — a harness problem is not a regression:
 Throttling is detected by comparing the delivered rAF interval against the
 *measured* frame cost, not against the app's own `loop.stats.frameMs`. The app
 times its render call, and on WebGPU that call returns once the work is
-submitted — in the reference run it reads 0.5 ms for a High frame that costs
-2.89 ms on the GPU. Compare a 10.0 ms delivered interval against 0.5 ms and a
+submitted — in the reference run it reads well under a millisecond for a High
+frame that costs 3.09 ms on the GPU. Compare a 10.0 ms delivered interval against 0.5 ms and a
 perfectly healthy 141 FPS run is classified as throttled.
 
 ### Chrome flags, and what they change
@@ -160,7 +160,7 @@ has already been burned once by treating the second as if it were the first.
 
 ## Results
 
-Run of 2026-08-01, `bench-results/reference.json`. Full scene — ocean, sky,
+Run of 2026-08-02, `bench-results/reference.json`. Full scene — ocean, sky,
 volumetric clouds, seafloor, ship, island, buoys, barrels, wake and the
 post-processing chain — at 1600 × 900, DPR 1, `skyPro` preset, camera pinned to
 the canonical wide shot, world reset to simulation time 0. **600 samples per
@@ -170,35 +170,41 @@ GPU frame time, milliseconds, from timestamp queries:
 
 | Configuration | p50 | p90 | p95 | p99 | min | max | implied FPS | Verdict |
 |---|---|---|---|---|---|---|---|---|
-| WebGPU · Low | 0.32 | 0.33 | 0.34 | 0.35 | 0.30 | 1.23 | 3155 | PASS |
-| WebGPU · Medium | 1.62 | 1.84 | 2.60 | 5.84 | 1.55 | 9.28 | 618 | PASS |
-| **WebGPU · High** | **3.98** | 7.35 | 7.73 | 9.95 | 2.78 | 13.58 | **251** | **PASS** |
-| WebGPU · Ultra | 4.17 | 4.39 | 4.59 | 5.54 | 4.02 | 6.05 | 240 | PASS |
-| WebGPU · Max | 6.45 | 7.25 | 8.56 | 9.04 | 6.10 | 9.31 | 155 | PASS |
-| **WebGL2 · Low** | **3.85** | 5.07 | 5.46 | 6.03 | 0.67 | 6.83 | **260** | **PASS** |
-| WebGL2 · High | 5.00 | 6.28 | 6.66 | 7.85 | 3.47 | 12.21 | 200 | PASS |
+| WebGPU · Low | 0.33 | 0.33 | 0.34 | 0.35 | 0.32 | 0.72 | 3058 | PASS |
+| WebGPU · Medium | 1.66 | 1.88 | 1.90 | 2.15 | 1.60 | 2.19 | 602 | PASS |
+| **WebGPU · High** | **3.09** | 3.32 | 3.35 | 3.43 | 2.80 | 3.59 | **323** | **PASS** |
+| WebGPU · Ultra | 4.22 | 4.52 | 4.58 | 4.70 | 4.02 | 4.89 | 237 | PASS |
+| WebGPU · Max | 6.50 | 6.84 | 6.95 | 7.14 | 6.19 | 7.66 | 154 | PASS |
+| **WebGL2 · Low** | **1.29** | 2.39 | 2.69 | 3.99 | 0.78 | 5.09 | **773** | **PASS** |
+| WebGL2 · High | 4.10 | 4.60 | 4.84 | 5.28 | 3.61 | 6.40 | 244 | PASS |
 
 Scene cost and CPU frame time for the same runs:
 
-| Configuration | CPU p50 | CPU p99 | Draw calls | Render passes | Triangles | Textures | Render targets | Programs | Texture bytes |
-|---|---|---|---|---|---|---|---|---|---|
-| WebGPU · Low | 1.3 | 3.0 | 61 | 39 | 565 889 | 71 | 17 | 51 | 408 MB |
-| WebGPU · Medium | 2.2 | 5.6 | 109 | 72 | 831 873 | 74 | 24 | 53 | 379 MB |
-| WebGPU · High | 3.1 | 7.8 | 153 | 116 | 1 127 149 | 75 | 30 | 57 | 417 MB |
-| WebGPU · Ultra | 2.5 | 7.9 | 153 | 116 | 1 496 045 | 75 | 30 | 57 | 419 MB |
-| WebGPU · Max | 3.2 | 9.4 | 165 | 128 | 2 184 569 | 81 | 30 | 57 | 579 MB |
-| WebGL2 · Low | 1.2 | 3.0 | 50 | 38 | 332 307 | 60 | 16 | 49 | 378 MB |
-| WebGL2 · High | 1.9 | 3.2 | 141 | 115 | 891 727 | 67 | 29 | 57 | 395 MB |
+| Configuration | CPU p50 | CPU p99 | Draw calls | Triangles | Textures | Render targets | Programs |
+|---|---|---|---|---|---|---|---|
+| WebGPU · Low | 1.0 | 2.1 | 63 | 3 237 809 | 74 | 17 | 55 |
+| WebGPU · Medium | 1.7 | 3.3 | 111 | 3 503 793 | 77 | 24 | 57 |
+| WebGPU · High | 2.3 | 5.3 | 155 | 3 799 069 | 78 | 30 | 61 |
+| WebGPU · Ultra | 2.2 | 4.9 | 155 | 4 167 965 | 78 | 30 | 61 |
+| WebGPU · Max | 2.4 | 5.3 | 167 | 4 856 489 | 84 | 30 | 61 |
+| WebGL2 · Low | 0.6 | 1.1 | 51 | 1 668 267 | 63 | 16 | 52 |
+| WebGL2 · High | 1.4 | 2.1 | 142 | 2 227 687 | 70 | 29 | 60 |
 
 Reading these:
 
-- **Both gates pass with a wide margin on this GPU.** WebGPU High costs 3.98 ms
-  against a 16.7 ms budget — 5.8× headroom; WebGL2 Low costs 0.66 ms against
+- **Both gates pass with a wide margin on this GPU.** WebGPU High costs 3.09 ms
+  against a 16.7 ms budget — 5.4× headroom; WebGL2 Low costs 1.29 ms against
   33.3 ms. That is an RTX 5090 result and it should be read as one; see
   Limitations.
-- **GPU time tracks the tier cleanly**, 0.26 → 1.32 → 2.89 → 4.10 → 6.25 ms, a 24×
-  span. Whatever else is true of these numbers, they are responding to the thing
-  the quality tiers change.
+- **GPU time tracks the tier cleanly**, 0.33 → 1.66 → 3.09 → 4.22 → 6.50 ms, a
+  20× span. Whatever else is true of these numbers, they are responding to the
+  thing the quality tiers change.
+- **The gate is on p50 alone, and that is weaker than a shipping frame-time
+  target.** A median says nothing about hitches, and a game that misses vsync
+  every twentieth frame is a game that stutters. The p95 and p99 columns are
+  recorded and are within 15% of the median on every WebGPU configuration here,
+  but nothing *fails* on them. An independent review raised this and it is a real
+  gap in the harness rather than in the renderer.
 - **CPU frame time does not track the tier**, staying between 2.6 and 2.9 ms from
   Medium to Max. CPU cost here is JS update work plus command submission, both
   roughly tier-independent. The renderer is GPU-bound at every WebGPU tier, which
@@ -224,7 +230,9 @@ Reading these:
 A GPU timer that does not move with load is not measuring anything. WebGPU High
 re-run at DPR 2 (3200 × 1800, four times the pixels) costs **6.76 ms** against
 2.89 ms — 2.3×, which is what a mix of resolution-independent FFT passes and
-fragment-bound surface shading should do. Reproduce with:
+fragment-bound surface shading should do. Both figures are from the run that
+established the ratio; the tier's absolute cost has moved since (3.09 ms), and
+the ratio is the claim here, not the absolute. Reproduce with:
 
 ```bash
 node scripts/benchmark.mjs --only webgpu-high --dpr 2
@@ -322,6 +330,28 @@ disposed per tier; that was corrected after an independent review.
 The benchmark records `renderer.info.memory` per configuration, so the tier cost
 is visible directly: 273 MB of textures at Low, 323 MB at High and Ultra, 476 MB
 at Max, with render-target counts of 14/27/27 respectively.
+
+## What these numbers do not establish
+
+An independent review pushed back on the framing, correctly. "All seven
+configurations pass on this RTX 5090 under the harness's p50 rules" is supported
+by the checked artifact. "The renderer meets a broadly meaningful AAA performance
+target" is not, for four reasons:
+
+- **The gate is a median.** Nothing fails on p95 or p99, and a game that misses
+  vsync every twentieth frame stutters however good its median is. The
+  percentiles are recorded and are within 15% of the median on every WebGPU
+  configuration here, but that is an observation, not a gate.
+- **One preset, one camera.** The matrix measures `skyPro` from the canonical
+  wide shot. It does not establish the cost of the storm, of near-water SSR at a
+  grazing angle, or of the underwater state — all of which are more expensive.
+- **The underwater pass is never sampled.** It is behind a uniform branch that is
+  false above the surface, so the benchmark measures the compare and nothing else.
+- **One GPU, and a large one.** High already issues 155 draws over 3.8 million
+  triangles with 30 render targets. Full-resolution single-ray SSR, the cloud
+  march, the fog march and the shaft march are all serial fragment loops; they
+  will scale far worse on a laptop or integrated GPU, at high DPR, or on a
+  tile-based mobile renderer than the headroom here suggests.
 
 ## Limitations, and what is still unverified
 

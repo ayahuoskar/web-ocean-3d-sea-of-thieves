@@ -195,12 +195,18 @@ checks:
 
 **Measured numbers**, read off the GPU rather than judged by eye:
 
-| Quantity | Measured | Asserted by |
+| Quantity | Measured | Source |
 |---|---|---|
-| Whitecap coverage at 15 m/s | **4.6%** | `produces a physically plausible sea state` |
-| Folded surface area (J < 0) | **3.8%** | same (gate: `< 8%`) |
-| Surface below the break threshold (J < 0.14) | **5.5%** | drives the deposit rate |
+| Folded surface area (J < 0), cascade 0 at 15 m/s | **3.8%** | `produces a physically plausible sea state` (gate: `< 8%`) |
 | Crest amplitude, cascade 0 | **±1.4 m** | same (gate: `0.4 m … 12 m`) |
+| Surface below the break threshold (J < 0.14) | **5.5%** | one-off histogram of the Jacobian readback; drives the deposit rate |
+
+> This table previously quoted "whitecap coverage 4.6%, asserted by
+> `produces a physically plausible sea state`". That test reads displacement
+> Jacobians and asserts only `foldedPercent < 8`; it never reads the foam buffer
+> and never measures rendered whitecap coverage. The figure was a plausible number
+> attached to the wrong source, which is exactly what
+> [`docs/CLAIMS_AUDIT.md`](docs/CLAIMS_AUDIT.md) exists to catch. Removed.
 
 > An earlier revision of this table also quoted a buoyancy/wave-slope correlation,
 > a seafloor CPU/GPU agreement figure, a wake spread angle and a sky zenith
@@ -253,8 +259,31 @@ Full methodology, cost model and the honest list of what remains unmeasured:
 - **No Snell window or total internal reflection.** Looking up from below shows the surface
   underside shaded like the topside, not the compressed disc of sky and mirrored water that
   real water produces.
-- **Sun glitter is isotropic.** It should stretch toward the viewer rather than reading as a
-  round highlight.
+- **Sun glitter is isotropic.** The BRDF is a complete GGX — D, Smith visibility and Fresnel
+  on the half-vector — but with a single scalar roughness. Real glitter stretches toward the
+  viewer because the slope distribution is anisotropic along the wind, which needs an
+  anisotropic NDF driven by directional slope variance.
+- **Reflections are sharp, single-ray and non-temporal.** Planar and screen-space reflection
+  are both sampled as mirrors regardless of roughness. There is no prefiltered probe, no
+  stochastic sampling with a temporal resolve, and no slope-variance antialiasing — so a rough
+  sea reflects as if it were polished, and MSAA cannot touch shader-frequency sparkle.
+- **The grazing reflection fade is art-directed, not a Smith term.** It bottoms out at 0.45
+  where a real masking function goes to zero, and it multiplies the Fresnel blend rather than
+  acting as the BRDF's geometry factor. See `GRAZING_SLOPE_SIGMA`.
+- **Refraction is a normal-driven UV offset, not a refracted ray.** Snell's law is not solved
+  and the offset ray is not intersected with scene geometry; the depth read that follows it is
+  real, and drives real absorption, but the displacement itself is an approximation.
+- **The wake is Kelvin-*inspired*.** The dispersion relations are right, which is what makes it
+  scale correctly with speed, but it is an authored sum of two cosines and some envelopes — no
+  hull pressure distribution, no stationary-phase cusp, no Froude-number response, no finite
+  depth, and no propagation of history at the group velocity.
+- **Monahan's law drives foam generation, not measured coverage.** The deposit rate follows
+  `W = 3.84e-6 U^3.41`, but nothing measures the resulting rendered coverage and compares it
+  against the law.
+- **No cloud shadows on the water**, and no sun-path occlusion for the underwater shafts — a
+  hull can block the sun and still have caustic shafts beneath it.
+- **No temporal antialiasing or reconstruction.** Every stochastic effect here — the fog march,
+  the cloud march, the shaft march — resolves spatially within one frame.
 - **Rain wetting is uniform over an object.** The hull darkens and glosses in a squall and
   dries out over the following half-minute, but a real hull wets from *above* — the deck soaks
   while the underside of a beam stays dry, and water runs down and pools. Expressing that needs

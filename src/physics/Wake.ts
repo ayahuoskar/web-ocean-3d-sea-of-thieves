@@ -21,13 +21,22 @@ import { smoothstepDown } from '../core/tslMath';
  * Anything shifted off the edge is gone, which is correct: it is out of the
  * region the shader can sample anyway.
  *
- * **The full Kelvin V is stamped every frame, not accumulated from a point.**
+ * **The pattern is stamped every frame, not accumulated from a point.**
  * Depositing a dot at the hull and letting motion draw the trail gives a
  * straight line, not a wake. Real ship wakes are a fixed pattern in the hull's
  * frame — two arms at the Kelvin half-angle of ~19.5 degrees plus the turbulent
  * band astern — so that pattern is what gets deposited. Accumulation and decay
  * then do what they are actually good at: persistence, and the smearing that
  * makes a turning wake curve.
+ *
+ * **Kelvin-inspired, not a Kelvin solution.** The dispersion is right — the
+ * transverse system's `k = g/V^2` and the divergent system's `k0/cos^2(psi)` are
+ * the deep-water relations for waves stationary in the hull's frame — and that is
+ * what makes the pattern scale correctly with speed. Everything else is authored:
+ * one parabolically warped cosine, one fixed-angle cosine, Gaussian envelopes and
+ * a bow mound. It does not integrate a hull pressure distribution, reproduce the
+ * stationary-phase cusp where the two systems meet, respond to Froude number,
+ * handle finite depth, or propagate history at the group velocity.
  *
  * **Foam accumulates; elevation does not.** Foam is history — it is deposited
  * and then decays, and adding this frame's deposit to last frame's remainder is

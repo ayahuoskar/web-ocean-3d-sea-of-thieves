@@ -182,6 +182,38 @@ Rain is no longer an uncoupled overlay. It disturbs the surface, aerates it into
 foam, beads on the lens and wets the hull, and each of those has a test that
 fails if the coupling is removed.
 
+## 10. Third pass — an adversarial quality review
+
+The second pass was still a review of *this* codebase against *its own* claims. A
+third was run against external references instead: does the rendering hold up
+next to a shipping AAA ocean, and are the physics claims true?
+
+Six substantive errors, all now fixed (`4eca54e`):
+
+| Claim | What was actually there |
+|---|---|
+| "GGX sun specular" | The normal *distribution* function alone — no Fresnel, no masking-shadowing, no `1/(4 (N·L)(N·V))`. The NDF is not a reflectance; its peak scales as `1/(pi·a2)`, which at 0.075 roughness is ~10,000 before the sun's intensity. The single largest reason the water read as white foil. |
+| Underwater absorption | Used axial depth-buffer distance as path length, so absorption weakened toward the frame edges and depended on the field of view |
+| World-anchored wake | The anchor was published to the surface one frame before the buffer was recentred, so the wake slid against the hull while the camera moved |
+| "Bow wave and shoulder trough" | Only the mound existed |
+| Monahan whitecap law | Scaled the surface's *read strength*, not the deposit rate — the empirical coverage law was decorating opacity while generation was a constant |
+| Caustics mip footprint | Used the full 3D march step for a 2D map indexed by world XZ, over-blurring the near-vertical rays that carry the shafts |
+
+Four claims were overstated rather than wrong, and are now worded accurately: the
+grazing reflection fade is not a Smith term, the wake is Kelvin-*inspired* rather
+than a Kelvin solution, the fog transmittance is exact only for the uncapped
+profile, and the overcast model is authored rather than derived from cloud
+optical depth.
+
+Two documentation figures were unsupported: a "whitecap coverage 4.6%" attributed
+to a test that never measures it, and a performance headline that contradicted the
+checked benchmark artifact. Both corrected.
+
+The gaps the review names as still open — no prefiltered or temporal reflection,
+no anisotropic glitter, no cloud shadows, no sun occlusion for shafts, a global
+rather than per-pixel waterline, no temporal reconstruction — are recorded under
+Known Limitations in `README.md` rather than closed.
+
 ## 9. Second pass
 
 A later audit, prompted by a viewer looking at the running app rather than at the
@@ -218,4 +250,9 @@ described in the commits that fixed them.
 - **6 defects** found (D1–D6), 3 of them invisible to the existing suite. This said "5" while
   the table above listed six — corrected after an independent review caught the contradiction.
 - **9 documentation claims** removed or corrected as unimplemented; **4 "measured" numbers** had no measurement behind them.
-- **6 P0/P1 rendering features** were partial or absent at the time of the audit: scene reflection, refraction, persistent foam, the wake binding, the underwater surface underside, and coupled weather. All but the surface underside have since been implemented — see §7.
+- **6 P0/P1 rendering features** were partial or absent at the time of the audit: scene reflection, refraction, persistent foam, the wake binding, the underwater surface underside, and coupled weather. All but the surface underside have since been *wired and tested* — see §7.
+  **"Wired" is not "working at the claimed fidelity"**, and an independent review
+  pointed out that saying "implemented" here repeats the exact confusion §9 exists
+  to prevent. Each of those five works and has a test that fails if it is
+  disconnected; each is also a first-generation implementation with named
+  shortfalls, listed under Known Limitations in `README.md`.
