@@ -208,6 +208,12 @@ class App {
       this.ssr.setCamera(this.camera);
     }
 
+    // Before the water material, and for the same reason as the seafloor and the
+    // foam buffer: the surface samples the cloud shadow field, and that binding
+    // is baked into its node graph. Built here rather than with the rest of the
+    // sky purely so the ordering is impossible to get wrong.
+    this.clouds = new Clouds();
+
     boot.set(0.5, 'Compiling water shaders…');
     this.water = this.buildWaterMaterial();
     this.oceanMesh = new OceanMesh(this.water.material, {
@@ -220,7 +226,6 @@ class App {
     this.atmosphere = new Atmosphere(this.renderer);
     this.scene.add(this.atmosphere.mesh, this.atmosphere.sunLight, this.atmosphere.ambientLight);
 
-    this.clouds = new Clouds();
     this.scene.add(this.clouds.mesh);
 
     this.weather = new Weather();
@@ -636,6 +641,9 @@ class App {
         resolution: this.wake.resolution,
       },
       reflectionNode: this.reflections?.node ?? null,
+      // Same field the cloud march samples, so the shade lands under the cloud
+      // that casts it rather than merely correlating with it.
+      cloudShadowNode: this.clouds.shadowNode(),
       ssrNode: this.ssr
         ? (worldPosition, worldNormal, fallback) =>
             this.ssr!.reflectionNode(worldPosition, worldNormal, fallback)
@@ -802,6 +810,8 @@ class App {
     });
 
     this.water.setAppearance(preset.water);
+    // The surface needs the wind to stretch its glitter along the crests.
+    this.water.setWind(preset.sea.windDirection, this.state.windSpeed);
 
     // --- whitecaps ----------------------------------------------------------
     //
@@ -925,6 +935,14 @@ class App {
     // Agitation: heavy rain whitens a sea surface on its own, independently of
     // whether the waves are steep enough to break.
     this.wake.setRainAgitation(raining);
+    // Foam floats, and floating things move. Wind drift plus Stokes drift carries
+    // surface material downwind at roughly 3% of the wind speed.
+    const driftBearing = getPreset(this.state.preset).sea.windDirection;
+    const driftSpeed = this.state.windSpeed * 0.03;
+    this.wake.setDrift(
+      Math.cos(driftBearing) * driftSpeed,
+      Math.sin(driftBearing) * driftSpeed,
+    );
     // Wood and canvas darken and gloss in a squall, and stay damp well after it
     // passes — see `SurfaceWetness` for the asymmetric time constants.
     this.wetness.update(dt, raining);

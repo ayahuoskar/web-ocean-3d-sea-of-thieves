@@ -159,6 +159,14 @@ export class Clouds {
   private readonly uShadowColor: any = uniform(new THREE.Color(0.34, 0.38, 0.47));
   private readonly uSunDir = uniform(new THREE.Vector3(0, 1, 0));
   private readonly uWindOffset = uniform(new THREE.Vector3());
+  /**
+   * Extinction per metre of cloud for the ground shadow.
+   *
+   * Small, because it multiplies the *whole slab thickness*: at 700 m and a
+   * density of 1 this gives exp(-1.05), so a solid cloud puts the sea at about a
+   * third of full sun. That is roughly what a cumulus shadow measures.
+   */
+  private readonly uShadowStrength = uniform(0.0015);
   /** Extinction per metre of unit density. */
   private readonly uExtinction = uniform(0.006);
   private readonly uLightStep = uniform(175);
@@ -302,6 +310,50 @@ export class Clouds {
    *   shimmer. Widening the density edge in step with the step size band-limits
    *   the field instead — distant decks go smooth rather than hatched.
    */
+  /**
+   * How much sunlight reaches a world point on the ground, 0..1.
+   *
+   * The single largest thing a cloud deck does to a landscape is put moving
+   * patches of shade on it, and a sky with no shadow under it reads as a
+   * backdrop rather than as weather. It is also nearly free here: walk from the
+   * point along the sun direction to the middle of the cloud slab, ask the same
+   * density function the march uses, and attenuate.
+   *
+   * One sample, not a march. A shadow through a kilometre of cloud does not need
+   * an integral to look right — what it needs is to be *the same field* the
+   * clouds are drawn from, so the shadow lands where the cloud is. Sampling the
+   * slab's mid-height gives that for one lookup.
+   *
+   * Bound against the same uniforms as the cloud node, including the wind offset,
+   * so the shade drifts with the deck that casts it.
+   */
+  shadowNode(): (worldPosition: any) => any {
+    return (worldPosition: any) => {
+      const p = vec3(worldPosition).toVar('cloudShadowP');
+      // Distance along the sun ray to the middle of the slab. Floored on the sun
+      // elevation: at a grazing sun the true path is enormous and the plane-
+      // parallel approximation stops meaning anything, so the shadow is allowed
+      // to soften out rather than stretch to the horizon.
+      const mid = this.uAltitude.add(this.uThickness.mul(0.5));
+      const t = mid.sub(p.y).div(this.uSunDir.y.max(0.25)).max(0).toVar('cloudShadowT');
+      const hit = p.add(this.uSunDir.mul(t)).toVar('cloudShadowHit');
+
+      // `softness` 1: the shadow is a low-frequency feature by nature and the
+      // detail octave would only alias across the sea surface.
+      const d = this.densityAt(hit, float(1)).toVar('cloudShadowD');
+
+      // Beer-Lambert through the slab, with the strength as the knob. Never to
+      // zero: a shaded sea is darker, not black, because the sky around the cloud
+      // still lights it.
+      return d
+        .mul(this.uThickness)
+        .mul(this.uShadowStrength)
+        .negate()
+        .exp()
+        .clamp(0.25, 1);
+    };
+  }
+
   private densityAt(p: any, softness: any): any {
     const h = p.y.sub(this.uAltitude).div(this.uThickness);
 

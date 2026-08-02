@@ -9,6 +9,8 @@ import {
   normalize,
   positionLocal,
   positionWorld,
+  dFdx,
+  dFdy,
   screenUV,
   texture,
   uniform,
@@ -107,6 +109,14 @@ export interface OceanMaterialInputs {
    * variables, so it cannot be built ahead of time like the planar texture can.
    */
   ssrNode?: ((worldPosition: any, worldNormal: any, fallback: any) => any) | null;
+  /**
+   * Fraction of sunlight reaching a world point through the cloud deck, 0..1.
+   *
+   * From `sky/Clouds`, so the shade lands where the cloud that casts it is drawn.
+   * Omitted rather than defaulted to 1: a scene with no cloud layer should not
+   * pay a noise lookup per fragment to be told the sun is out.
+   */
+  cloudShadowNode?: ((worldPosition: any) => any) | null;
 }
 
 /**
@@ -165,6 +175,31 @@ const WATER_IOR = 1.333;
 /** cos(48.6 degrees) — the edge of Snell's window. */
 const COS_CRITICAL_ANGLE = Math.sqrt(1 - 1 / (WATER_IOR * WATER_IOR));
 
+/**
+ * Screen-space variance scale for specular antialiasing.
+ *
+ * Kaplanyan's paper derives 0.5 for a box filter over the pixel; a real
+ * rasteriser's derivatives are finite differences between neighbouring pixels,
+ * which already spans that footprint, so the published value is used as-is.
+ */
+const SPECULAR_AA_SCREEN_SPACE_VARIANCE = 0.5;
+
+/**
+ * Ceiling on how much the filter may widen `alpha^2`.
+ *
+ * The paper suggests 0.18, and that is wildly wrong here. It assumes a material
+ * whose base roughness is in the usual 0.1-0.5 range; water's is 0.075, so
+ * `alpha^2` is 3.2e-5 and a ceiling of 0.18 is five thousand times the base — it
+ * does not filter the lobe, it replaces it, and the whole up-sun half of the
+ * frame turns into one white sheet.
+ *
+ * 0.004 caps the filtered roughness near 0.08, about ten times the base. That is
+ * enough to integrate away the single-pixel spikes on a wave face and nowhere
+ * near enough to lose the glitter's structure. The lesson generalises: a
+ * published constant carries the material it was tuned on.
+ */
+const SPECULAR_AA_VARIANCE_CEIL = 0.004;
+
 export class OceanMaterial {
   readonly material: THREE.MeshBasicNodeMaterial;
 
@@ -182,6 +217,19 @@ export class OceanMaterial {
   private readonly uExtinction = uniform(new THREE.Vector3().copy(DEFAULT_APPEARANCE.extinction));
   private readonly uScatterStrength = uniform(DEFAULT_APPEARANCE.scatterStrength);
   private readonly uRoughness = uniform(DEFAULT_APPEARANCE.roughness);
+  /**
+   * Unit wind vector in world XZ, and the slope-variance ratio across it.
+   *
+   * Sun glitter on real water is not a round highlight. Cox & Munk measured the
+   * slope distribution from aerial photographs of the glitter itself and found it
+   * *anisotropic*: the variance along the wind is roughly twice the variance
+   * across it, because the waves are longer-crested than they are steep. A
+   * highlight rendered through that distribution stretches perpendicular to the
+   * crests — which is the elongated track everyone recognises, and which an
+   * isotropic roughness cannot produce at any value.
+   */
+  private readonly uWindAxis = uniform(new THREE.Vector2(1, 0));
+  private readonly uSlopeAnisotropy = uniform(1.9);
   private readonly uFoamThreshold = uniform(DEFAULT_APPEARANCE.foamThreshold);
   private readonly uFoamSoftness = uniform(DEFAULT_APPEARANCE.foamSoftness);
 
@@ -334,6 +382,23 @@ export class OceanMaterial {
     if (a.foamSoftness !== undefined) this.uFoamSoftness.value = a.foamSoftness;
   }
 
+  /**
+   * Wind bearing in radians and the along/across slope-variance ratio.
+   *
+   * The ratio is Cox & Munk's: `sigma_u^2 = 0.00316 U` upwind against
+   * `sigma_c^2 = 0.003 + 0.00192 U` crosswind, so at 15 m/s the two are 0.047 and
+   * 0.032 — a ratio near 1.5 that rises with wind. Passing it here rather than
+   * hard-coding it is what lets a glassy dusk have a round highlight and a gale
+   * have a long one.
+   */
+  setWind(bearingRadians: number, speed: number): void {
+    const axis = this.uWindAxis.value as THREE.Vector2;
+    axis.set(Math.cos(bearingRadians), Math.sin(bearingRadians));
+    const upwind = 0.00316 * Math.max(0, speed);
+    const crosswind = 0.003 + 0.00192 * Math.max(0, speed);
+    this.uSlopeAnisotropy.value = Math.min(4, Math.max(1, upwind / Math.max(1e-4, crosswind)));
+  }
+
   setDisplacementScale(value: number): void {
     this.uDisplacementScale.value = value;
   }
@@ -454,6 +519,7 @@ export class OceanMaterial {
     const { displacementTextures, derivativeTextures, tileSizes } = inputs;
     const floorDepth = inputs.floorDepthNode ?? null;
     const foam = inputs.foam ?? null;
+    const cloudShadow = inputs.cloudShadowNode ?? null;
     if (foam !== null) this.wakeNode = texture(foam.texture) as any;
     const planar = (inputs.reflectionNode ?? null) as any;
     const ssr = inputs.ssrNode ?? null;
@@ -761,7 +827,29 @@ export class OceanMaterial {
           .div(viewDistance.mul(0.05).add(1))
           .toVar();
         const rawUv = screenUV.add(offset).toVar();
-        const mirrored = planar.sample(viewportSafeUV(rawUv)).toVar();
+
+        // Sampled at a roughness-driven mip level, not as a sharp mirror.
+        //
+        // A mirror is what a *flat* interface does. This surface has a slope
+        // distribution the shading normal has already averaged over — a pixel a
+        // few hundred metres out covers many wavelengths — so the reflection it
+        // should show is the average over that cone of directions, which is a
+        // blurred reflection. Taking level 0 everywhere is what makes a rough sea
+        // reflect like polished metal, and it is one of the clearest tells that
+        // water is being rendered by a mirror plane.
+        //
+        // Level from the base roughness and from distance, since both widen the
+        // cone: a metre of surface at 400 m subtends far less than a pixel.
+        // Capped low on purpose. The reflection target is already at half
+        // resolution, so level 3 is sampling an 80x45 image — and averaging a
+        // bright sky into that produces visible blobs where a blurred reflection
+        // should be. Two levels is enough to take the mirror off it.
+        const reflectionLod = this.uRoughness
+          .mul(12)
+          .add(viewDistance.mul(0.004))
+          .clamp(0, 2)
+          .toVar();
+        const mirrored = planar.sample(viewportSafeUV(rawUv)).level(reflectionLod).toVar();
 
         // Faded out where the lookup leaves the reflection, rather than clamped
         // into it. A mirrored camera only covers what is in front of it, so near
@@ -821,12 +909,71 @@ export class OceanMaterial {
       const nDotL = n.dot(sunDir).clamp(0, 1).toVar();
       const vDotH = viewDir.dot(halfVector).clamp(0, 1).toVar();
 
-      const alpha = this.uRoughness.mul(this.uRoughness).toVar();
-      const a2 = alpha.mul(alpha).toVar();
+      // Specular antialiasing (Kaplanyan et al., "Filtering Distributions of
+      // Normals for Shading Antialiasing").
+      //
+      // Sun glitter on water is the hardest case there is for a narrow specular
+      // lobe. The surface carries metre-scale slope detail, a pixel a hundred
+      // metres out covers many wavelengths of it, and the shading normal is an
+      // average — so wherever a wave face happens to line the half-vector up
+      // exactly, one pixel gets the full peak of a lobe that should have been
+      // integrated over the whole footprint. That is what the two blown-out
+      // hotspots were, and no amount of tuning the roughness fixes it: raising it
+      // kills the glitter everywhere, lowering it makes the spikes worse.
+      //
+      // The fix is to widen the lobe by the *variance of the normal across the
+      // pixel*, which the screen-space derivatives measure directly. Where the
+      // normal is smooth this adds nothing; where a pixel spans a lot of slope it
+      // broadens the lobe to cover what it is actually looking at, which is the
+      // definition of correct filtering rather than a hack.
+      const dNdx = dFdx(n).toVar();
+      const dNdy = dFdy(n).toVar();
+      const normalVariance = dNdx
+        .dot(dNdx)
+        .add(dNdy.dot(dNdy))
+        .mul(SPECULAR_AA_SCREEN_SPACE_VARIANCE)
+        .toVar();
 
-      // D — Trowbridge-Reitz / GGX.
-      const denom = nDotH.mul(nDotH).mul(a2.sub(1)).add(1).toVar();
-      const distribution = a2.div(denom.mul(denom).mul(Math.PI).max(1e-6)).toVar();
+      const alphaBase = this.uRoughness.mul(this.uRoughness).toVar();
+      // Widen alpha^2, not alpha: the variance is a second moment, and the cap
+      // keeps a pixel that straddles a crest from going fully rough.
+      const a2 = alphaBase
+        .mul(alphaBase)
+        .add(normalVariance.mul(2).min(SPECULAR_AA_VARIANCE_CEIL))
+        .min(1)
+        .toVar();
+      const alpha = a2.sqrt().toVar();
+
+      // D — anisotropic Trowbridge-Reitz.
+      //
+      // The isotropic form gives a round highlight, and sun glitter on water is
+      // not round: it is a track drawn *toward the viewer*, perpendicular to the
+      // crests. That shape comes straight out of the slope distribution being
+      // wider along the wind than across it — see `uSlopeAnisotropy` — so the NDF
+      // has to carry two roughnesses rather than one. No amount of tuning a
+      // single roughness produces it.
+      //
+      // Burley's form: with the half-vector resolved onto the tangent frame, the
+      // denominator is `(Ht/at)^2 + (Hb/ab)^2 + Hn^2`, and the isotropic GGX falls
+      // out when at == ab.
+      const tangent = vec3(this.uWindAxis.x, 0, this.uWindAxis.y).toVar();
+      const bitangent = vec3(tangent.z.negate(), 0, tangent.x).toVar();
+      const aspect = this.uSlopeAnisotropy.sqrt().toVar();
+      const alphaT = alpha.mul(aspect).toVar();
+      const alphaB = alpha.div(aspect).toVar();
+
+      const hT = halfVector.dot(tangent).div(alphaT).toVar();
+      const hB = halfVector.dot(bitangent).div(alphaB).toVar();
+      const aniDenom = hT.mul(hT).add(hB.mul(hB)).add(nDotH.mul(nDotH)).toVar();
+      const distribution = float(1)
+        .div(
+          alphaT
+            .mul(alphaB)
+            .mul(aniDenom.mul(aniDenom))
+            .mul(Math.PI)
+            .max(1e-9),
+        )
+        .toVar();
 
       // V — Smith height-correlated visibility, which is G / (4 (N.L)(N.V)).
       const lambdaV = nDotL.mul(nDotV.mul(nDotV).mul(float(1).sub(a2)).add(a2).sqrt()).toVar();
@@ -848,6 +995,19 @@ export class OceanMaterial {
         .mul(this.uSunIntensity)
         .toVar();
 
+      // Cloud shade.
+      //
+      // A cloud deck's largest effect on what is under it is moving patches of
+      // shadow, and a sky drawn over an evenly-lit sea reads as a backdrop rather
+      // than as weather. It attenuates the *sun* terms only — the specular and
+      // the scattered daylight — and leaves the sky reflection alone, because the
+      // sky is still there above the shadow and is what fills it.
+      const sunShade = float(1).toVar();
+      if (cloudShadow !== null) {
+        sunShade.assign(cloudShadow(worldPos));
+        specular.mulAssign(sunShade);
+      }
+
       // --- combine ---------------------------------------------------------------
       // The body colour is authored for *daylight*. Its diffuse term bottomed out
       // at 0.45, which is a floor on how dark lit water can get — so at night the
@@ -857,9 +1017,9 @@ export class OceanMaterial {
       // is not black, because the whole sky is still faintly lighting it.
       const ambientFloor = mix(float(0.1), float(1), this.uLightLevel).toVar();
       const litBody = bodyColor
-        .mul(nDotL.mul(0.55).add(0.45))
+        .mul(nDotL.mul(0.55).add(0.45).mul(sunShade.mul(0.55).add(0.45)))
         .mul(ambientFloor)
-        .add(scatter)
+        .add(scatter.mul(sunShade))
         .toVar();
 
       // --- foam --------------------------------------------------------------------

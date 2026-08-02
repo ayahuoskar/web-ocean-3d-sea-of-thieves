@@ -193,6 +193,21 @@ export class Wake {
   private index = 0;
 
   private readonly uScroll = uniform(new THREE.Vector2());
+  /**
+   * Per-frame drift of the foam field, in uv, from the surface current.
+   *
+   * Foam floats. It does not sit where it was made: it is carried by the wind
+   * drift and the wave orbital motion, which together move surface material
+   * downwind at roughly 3% of the wind speed — the classic Stokes-drift-plus-
+   * wind-drift figure. Without it the accumulation buffer is a stamp album, and
+   * a patch of whitecap sits motionless on water that is visibly moving under it,
+   * which is one of the strongest tells that foam is being painted rather than
+   * transported.
+   *
+   * Applied as an offset on the *source* lookup, so it costs nothing: the pass
+   * already resamples the previous frame to follow the moving centre.
+   */
+  private readonly uDrift = uniform(new THREE.Vector2());
   private readonly uDecay = uniform(1);
   /** Per-frame decay multiplier for the elevation channel. See `ELEVATION_DECAY_TAU`. */
   private readonly uElevationDecay = uniform(1);
@@ -245,6 +260,9 @@ export class Wake {
   /** Pending emissions: [x, z, heading, speed, width] per slot. */
   private readonly queue = new Float32Array(MAX_EMITTERS * 5);
   private queued = 0;
+
+  private driftX = 0;
+  private driftZ = 0;
 
   private centerX_ = 0;
   private centerZ_ = 0;
@@ -344,6 +362,17 @@ export class Wake {
     }
   }
 
+  /**
+   * Surface drift, m/s in world XZ, that foam is carried by.
+   *
+   * Wind drift plus Stokes drift is about 3% of the wind speed downwind; the
+   * caller is expected to have applied that factor rather than passing the wind.
+   */
+  setDrift(x: number, z: number): void {
+    this.driftX = x;
+    this.driftZ = z;
+  }
+
   /** Rain rate, 0..1, driving the agitation term. */
   setRainAgitation(intensity: number): void {
     this.uRainAgitation.value = Math.max(0, Math.min(1, intensity));
@@ -408,6 +437,11 @@ export class Wake {
       this.uScroll.value as THREE.Vector2,
       (this.centerX_ - this.appliedX) / this.extent,
       (this.centerZ_ - this.appliedZ) / this.extent,
+    );
+    setVec2(
+      this.uDrift.value as THREE.Vector2,
+      (this.driftX * step) / this.extent,
+      (this.driftZ * step) / this.extent,
     );
     this.uDecay.value = Math.exp(-step / DECAY_TAU);
     this.uElevationDecay.value = Math.exp(-step / ELEVATION_DECAY_TAU);
@@ -510,7 +544,7 @@ export class Wake {
 
     material.fragmentNode = Fn(() => {
       const coord = uv().toVar();
-      const sourceUv = coord.add(this.uScroll).toVar();
+      const sourceUv = coord.add(this.uScroll).sub(this.uDrift).toVar();
 
       // Anything scrolled in from outside the previous footprint is unknown, and
       // clamp-to-edge would smear the border across the new region. Mask it.

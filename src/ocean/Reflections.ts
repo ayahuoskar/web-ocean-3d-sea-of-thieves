@@ -35,7 +35,15 @@ export class Reflections {
     // rotated to put its normal along +Y. Sea level, not the camera's height:
     // the displaced surface oscillates about y = 0 and reflecting about the mean
     // plane is what keeps the reflection stable as waves pass through it.
-    const node = reflector({ resolutionScale, generateMipmaps: false, bounces: false });
+    // Mipmapped, so the surface can sample it at a roughness-driven level.
+    //
+    // `generateMipmaps: false` was fine while the reflection was only ever
+    // sampled as a sharp mirror, and that is exactly the problem: a rough sea
+    // does not reflect sharply, and without a mip chain there is nothing to
+    // sample instead. A single level costs a third again in bandwidth on a target
+    // that is already at half resolution, and it is what lets a chopped-up sea
+    // reflect as a chopped-up sea rather than as polished metal.
+    const node = reflector({ resolutionScale, generateMipmaps: true, bounces: false });
     node.target.rotateX(-Math.PI / 2);
     node.target.name = 'ocean-reflector';
 
