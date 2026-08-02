@@ -71,7 +71,7 @@ export const DEFAULT_UI_STATE: UiState = {
   cloudCoverage: 0.32,
   timeOfDay: null,
   fogDensity: 0.35,
-  volume: 0.55,
+  volume: 0.4,
   buoyancyProbes: false,
   wakeProbes: false,
   forceWebGL: false,

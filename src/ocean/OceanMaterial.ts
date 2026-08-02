@@ -20,6 +20,7 @@ import {
   viewportDepthTexture,
   viewportSafeUV,
   viewportSharedTexture,
+  varyingProperty,
 } from 'three/tsl';
 import { smoothstepDownClamped } from '../core/tslMath';
 
@@ -161,6 +162,14 @@ const MAX_CASCADES = 3;
  * prefiltered reflection probe, which this renderer does not have.
  */
 const GRAZING_SLOPE_SIGMA = 0.16;
+
+/**
+ * The undisplaced world XZ a fragment's surface point was generated from.
+ *
+ * A varying rather than a recomputation: the vertex stage is the only place that
+ * knows it, because displacement is applied after.
+ */
+const surfaceUv = /*@__PURE__*/ varyingProperty('vec2', 'oceanSurfaceUv');
 
 /**
  * Refractive index of water relative to air, for the underside.
@@ -548,6 +557,28 @@ export class OceanMaterial {
       const local = positionLocal.toVar();
       const worldXZ = vec2(local.x.add(this.uOffsetX), local.z.add(this.uOffsetZ)).toVar();
 
+      // Handed to the fragment stage, and this is the fix for the surface's
+      // shimmer rather than a convenience.
+      //
+      // The fragment used to sample the derivative fields at `positionWorld.xz` —
+      // the *displaced* position. That is not where the vertex sampled them. The
+      // choppy term moves a vertex horizontally by up to a metre, and everything
+      // between vertices is a linear interpolation of displaced corners, so the
+      // fragment's lookup lands somewhere the field never generated. The error is
+      // whatever the mesh fails to resolve, which is why the measured jitter
+      // tracked mesh density almost exactly and barely moved when SSR, the
+      // reflection, the fog or the wake were switched off:
+      //
+      //   mean frame-to-frame |dL| over the water, 1/60 s apart, same camera
+      //   medium  3.14   (2 cascades, 192 rings)
+      //   high    9.06   (3 cascades, 288 rings)
+      //   ultra   7.88   (3 cascades, 384 rings)
+      //   max     5.81   (3 cascades, 512 rings)
+      //
+      // Carrying the undisplaced coordinate through as a varying makes the
+      // fragment sample exactly where the vertex did, at every mesh density.
+      surfaceUv.assign(worldXZ);
+
       // The mesh is centred on the camera, so local XZ length is the ground
       // distance from the viewer in metres.
       const groundDistance = vec2(local.x, local.z).length().toVar();
@@ -603,6 +634,10 @@ export class OceanMaterial {
     // ----------------------------------------------------------- fragment stage
     this.material.colorNode = Fn(() => {
       const worldPos = positionWorld.toVar();
+      // The *undisplaced* sample coordinate — see the vertex stage. Wave fields
+      // are read here; anything that genuinely wants the displaced point (the
+      // depth column, the foam buffer, the crest bias) still uses `worldPos`.
+      const fieldXZ = vec2(surfaceUv).toVar();
       const viewVector = cameraPosition.sub(worldPos).toVar();
       const viewDistance = viewVector.length().toVar();
       const viewDir = viewVector.div(viewDistance).toVar();
@@ -613,7 +648,7 @@ export class OceanMaterial {
       // would double-count independent bands and wash the whole surface white.
       const fold = float(1).toVar();
       for (let i = 0; i < cascadeCount; i++) {
-        const d = this.derivativeNodes[i].sample(worldPos.xz.div(this.uTileSizes[i])).toVar();
+        const d = this.derivativeNodes[i].sample(fieldXZ.div(this.uTileSizes[i])).toVar();
         // Weight folds into the fade, so a cascade the tier does not use
         // contributes no slope and — via `mix` toward 1 — no folding either.
         const fade = cascadeShadingFade(viewDistance, i, cascadeCount).mul(

@@ -193,11 +193,24 @@ const GROUP_PHASE = 1.7;
 const SURF_FAR_PHASE = Math.PI / 3;
 /** Modulation depth at a flat calm, and the span added by a full sea. */
 const SWELL_DEPTH_CALM = 0.1;
-const SWELL_DEPTH_SPAN = 0.32;
+const SWELL_DEPTH_SPAN = 0.46;
 /** Significant wave height, metres, at which the surge is fully developed. */
 const SWELL_FULL_HEIGHT = 5;
 
 // --- surf ------------------------------------------------------------------
+//
+// A note on the whole resting mix, because the numbers below were retuned once.
+//
+// The first pass was voiced for *presence*: play it for ten seconds and the sea
+// is obviously there. That is the wrong target. This runs continuously while
+// someone works in the scene, and the thing that makes a noise bed exhausting is
+// broadband energy above about 2 kHz — the band the ear is most sensitive to and
+// the one a filtered-noise sea has no business occupying. The complaint was that
+// it hissed rather than breathed, which is exactly that band.
+//
+// So: every corner frequency below is darker, the wind layer — the harshest of
+// them — is roughly halved, and the swell modulation is deeper so the level moves
+// rather than sitting flat. The sea should be something you stop noticing.
 
 /**
  * Wind speed the surf bed is referenced to, m/s, and the ceiling on that ratio.
@@ -211,8 +224,8 @@ const SWELL_FULL_HEIGHT = 5;
 const SURF_REFERENCE_WIND = 12;
 const SURF_MAX_DRIVE = 1.5;
 /** Level at a flat calm. A glassy sea is not silent; it slops. */
-const SURF_CALM = 0.12;
-const SURF_LEVEL = 0.5;
+const SURF_CALM = 0.1;
+const SURF_LEVEL = 0.42;
 /**
  * Low-pass corner, Hz, and how it moves.
  *
@@ -222,11 +235,11 @@ const SURF_LEVEL = 0.5;
  * surface at smaller scales and small breakers are what the high end is; it closes
  * with wave height because a big sea's energy is in slow, heavy water.
  */
-const SURF_CUTOFF_BASE = 430;
-const SURF_CUTOFF_PER_WIND = 26;
+const SURF_CUTOFF_BASE = 300;
+const SURF_CUTOFF_PER_WIND = 16;
 const SURF_CUTOFF_PER_HEIGHT = 34;
-const SURF_CUTOFF_MIN = 160;
-const SURF_CUTOFF_MAX = 1600;
+const SURF_CUTOFF_MIN = 150;
+const SURF_CUTOFF_MAX = 950;
 const SURF_Q = 0.6;
 /** The second bed is quieter and darker: it is the sea further out. */
 const SURF_FAR_LEVEL = 0.78;
@@ -248,11 +261,14 @@ const SURF_PAN = 0.45;
 const WIND_EXPONENT = 1.6;
 const WIND_REFERENCE_WIND = 16;
 const WIND_MAX_DRIVE = 1.5;
-const WIND_LEVEL = 0.34;
-const WIND_BAND_BASE = 340;
-const WIND_BAND_PER_WIND = 55;
-const WIND_BAND_MIN = 300;
-const WIND_BAND_MAX = 2400;
+// Halved. Wind is the layer that hisses: it is the widest band, the brightest,
+// and the least like water. At 15 m/s — the default — the old level put it over
+// the surf, so the resting scene sounded like an open window rather than a sea.
+const WIND_LEVEL = 0.17;
+const WIND_BAND_BASE = 260;
+const WIND_BAND_PER_WIND = 34;
+const WIND_BAND_MIN = 240;
+const WIND_BAND_MAX = 1250;
 const WIND_Q = 0.75;
 const WIND_HIGHPASS = 180;
 
@@ -309,9 +325,9 @@ const RAIN_Q = 0.5;
 const RAIN_HIGHPASS_BASE = 340;
 const RAIN_HIGHPASS_PER_RATE = 200;
 const RAIN_HIGHPASS_MIN = 110;
-const RAIN_HISS_LEVEL = 0.16;
+const RAIN_HISS_LEVEL = 0.09;
 const RAIN_HISS_EXPONENT = 1.4;
-const RAIN_HISS_HZ = 5200;
+const RAIN_HISS_HZ = 3400;
 const RAIN_PAN = 0.25;
 
 // --- hull ------------------------------------------------------------------
