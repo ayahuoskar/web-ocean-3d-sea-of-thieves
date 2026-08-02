@@ -32,7 +32,16 @@ interface OceanHooks {
   backend: 'webgpu' | 'webgl';
   scene: { getObjectByName(name: string): { visible: boolean } | undefined };
   setRainOverride(intensity: number | null): void;
-  director: { snapToTarget(): void; currentMode: string };
+  director: {
+    snapToTarget(): void;
+    currentMode: string;
+    /** Engine orders published by the cinematic flight; zeroes in every other mode. */
+    readonly shipInput: { readonly throttle: number; readonly rudder: number };
+    readonly cinematicBeat: string;
+    readonly cinematicTime: number;
+    resetCinematic(time?: number): void;
+  };
+  camera: { position: { x: number; y: number; z: number } };
   /** The surface material. Only the knobs a test drives are declared. */
   water: {
     setWakeDisplacement(value: number): void;
@@ -60,9 +69,12 @@ interface OceanHooks {
   shipControlsEnabled(): boolean;
   touchControlsVisible(): boolean;
   /** Reflection layers. Null on the WebGL2 path, which has neither. */
-  reflections: { setQuality(scale: number): void } | null;
+  reflections: { setQuality(scale: number): void; readonly resolutionScale: number } | null;
+  /** Sky and sun. Declared for the per-tier shadow resolution check. */
+  atmosphere: { readonly shadowMapSize: number };
   ssr: { setStrength(amount: number): void } | null;
   surfaceWetness(): number;
+  setSurfaceWetness(value: number): void;
   shipState(): {
     throttle: number;
     rudder: number;

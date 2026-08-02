@@ -518,7 +518,7 @@ class App {
     // and leaving an empty ocean with nothing but a console error to show for it.
     const [shipResult, propsResult] = await Promise.allSettled([
       Ship.load(this.assets),
-      Props.load(this.assets),
+      Props.load(this.assets, { detailScale: QUALITY_TIERS[this.state.quality].propsDetail }),
     ]);
     if (this.disposed) return;
 
@@ -549,7 +549,9 @@ class App {
       // The controller exists from load but stays inert until Boat mode selects
       // it, so W/S and A/D cannot steer a ship the viewer is not driving.
       this.shipControls = new ShipController(this.shipBody);
-      this.shipControls.setEnabled(this.state.cameraMode === 'boat');
+      this.shipControls.setEnabled(
+        this.state.cameraMode === 'boat' || this.state.cameraMode === 'cinematic',
+      );
 
       ship.setDebugProbesVisible(this.state.buoyancyProbes);
       this.wake.setDebugVisible(this.state.wakeProbes);
@@ -638,10 +640,22 @@ class App {
       case 'cameraMode':
         this.director.setMode(this.state.cameraMode);
         this.hud.setCameraMode(this.state.cameraMode);
-        // Selecting Boat selects the *ship*, not just a camera. Any other mode
-        // releases it, so Orbit and Fly keep their own keys and a hull cannot be
-        // left under power while the viewer is somewhere else.
-        this.shipControls?.setEnabled(this.state.cameraMode === 'boat');
+        // Selecting Boat selects the *ship*, not just a camera. Cinematic drives
+        // it too — the flight steers the hull rather than teleporting it, so the
+        // wake, the buoyancy and the spray are the real ones. Orbit and Fly
+        // release it, so they keep their own keys and a hull cannot be left under
+        // power while the viewer is somewhere else.
+        //
+        // Zeroed on every change, before enabling. `setInput` is a latch that
+        // `setEnabled(false)` does not clear, so without this the orders the
+        // cinematic was holding when it ended would still be there when Boat
+        // mode took over, and the viewer would inherit a ship already under way
+        // with the rudder over.
+        this.shipControls?.setInput(0, 0);
+        this.shipControls?.setEnabled(
+          this.state.cameraMode === 'boat' || this.state.cameraMode === 'cinematic',
+        );
+        // The on-screen throttle stays with the mode that can actually use it.
         this.touchControls?.setVisible(this.state.cameraMode === 'boat');
         break;
       case 'volume':
@@ -770,6 +784,11 @@ class App {
     // the fallback policy.
     this.lensRain.setQuality(this.backend === 'webgl' ? 1 : quality.lensRainQuality);
     this.water.setWakeDisplacement(quality.wakeDisplacement);
+    // Instance counts only, and safe on a live scene: no geometry is rebuilt and
+    // nothing allocates, so this is a tier knob rather than a reload. Null until
+    // the models arrive — `Props.load` is passed the same number, so a tier
+    // chosen before loading finishes is still the one that applies.
+    this.props?.setDetailScale(quality.propsDetail);
 
     // Without the environment capture: the tier does not move the sun, and the
     // capture is a whole extra scene render into a cube target. See `applyPreset`.
@@ -1266,6 +1285,17 @@ class App {
     // sailed and no test could see it; every input was simply acted on one frame
     // late. An independent review caught it by reading the call order rather
     // than the comment.
+    // The cinematic flight's engine orders, forwarded only while it is running.
+    //
+    // Deliberately not "every frame in every mode", which is the obvious way to
+    // guarantee a clean handoff: `setInput` is the same latch the on-screen
+    // throttle writes to, so publishing the director's zeroes unconditionally
+    // would stamp on the touch controls once per frame and leave them dead. The
+    // handoff is made clean at the mode change instead, where it belongs.
+    if (this.shipControls !== null && this.state.cameraMode === 'cinematic') {
+      const orders = this.director.shipInput;
+      this.shipControls.setInput(orders.throttle, orders.rudder);
+    }
     this.shipControls?.update(dt);
 
     // Safe before the sampler's first readback resolves: it reports height 0 and
@@ -1456,6 +1486,11 @@ class App {
           this.birds.resetClock(start);
           this.fish.resetClock(start);
           this.audio.resetClock(start);
+          // The cinematic carries a position on its own 120 s loop, which is
+          // state exactly like a clock: without this, a capture taken in
+          // cinematic mode would frame whatever beat the previous shot happened
+          // to leave it on.
+          this.director.resetCinematic(start);
           this.wake?.reset(this.renderer);
 
           // Floating bodies carry position and momentum across a whole session;
@@ -1497,6 +1532,18 @@ class App {
         touchControlsVisible: () => this.touchControls?.isVisible ?? false,
         /** Current rain wetting of the hull and props, 0..1. */
         surfaceWetness: () => this.wetness.value,
+        /**
+         * Drives wetting directly, without going through the weather.
+         *
+         * Wetness used to be observable from the CPU, because it was a scalar
+         * written onto every material — so a test could read `material.roughness`
+         * and see it move. It is a node graph now, evaluated per fragment against
+         * the world normal, and the only place the result exists is the rendered
+         * image. Reaching it through the rain rate would change the sky, the fog,
+         * the lens and the sea state at the same time, which is no way to measure
+         * one thing.
+         */
+        setSurfaceWetness: (value: number) => this.wetness.setWetness(value),
         /** Direct throttle/rudder input, bypassing the keyboard. */
         setShipInput: (throttle: number, rudder: number) =>
           this.shipControls?.setInput(throttle, rudder),

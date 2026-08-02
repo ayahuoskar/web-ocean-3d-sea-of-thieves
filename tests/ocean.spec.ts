@@ -7,6 +7,7 @@ import {
   setState,
   waitForOcean,
 } from './helpers';
+import { CINEMATIC_LOOP_SECONDS } from '../src/cameras/Cinematic';
 import { capture } from './lib/capture';
 import { compareImages } from './lib/compare';
 import type { RgbaImage } from './lib/png';
@@ -807,75 +808,109 @@ test.describe('interaction', () => {
    * `MeshPhysicalNodeMaterial` — a flag test against `isMeshStandardMaterial`
    * adopts nothing at all and leaves the whole effect silently inert.
    */
-  test('rain darkens and glosses the hull, and it dries afterwards', async ({ page }) => {
+  /**
+   * Wetting has to reach the image, and it has to vary over the object.
+   *
+   * This used to read `material.roughness` and `material.color` off the CPU,
+   * because wetting was a scalar written onto every material. It is a node graph
+   * now — evaluated per fragment against the geometric world normal, so the deck
+   * soaks while the underside of a beam stays dry — and the only place the result
+   * exists is the rendered image. Reading the scalars would now pass or fail on
+   * an implementation detail rather than on whether the ship looks wet.
+   *
+   * So it photographs the hull instead, driving wetness directly through
+   * `setSurfaceWetness` with the preset, camera, sea state and lighting all held
+   * fixed. Two things are then true of a wet hull that are not true of a dry one:
+   * it is darker, and — the part the old scalar version could not express — the
+   * darkening is *not uniform*, because a surface turned away from the sky does
+   * not collect rain. A uniform albedo multiplier scales every pixel by the same
+   * factor whatever its texture, so the wet/dry ratio would be constant across
+   * the hull; the normal-driven mask spreads it. Both assertions fail if the
+   * effect is disconnected, and the second one fails if it regresses to uniform.
+   */
+  test('rain darkens the hull, unevenly, and it dries afterwards', async ({ page }) => {
     await page.goto('/');
     await waitForOcean(page);
 
-    const sample = () =>
-      page.evaluate(() => {
-        const ocean = window.__ocean as unknown as {
-          surfaceWetness(): number;
-          scene: { getObjectByName(n: string): unknown };
-        };
-        const ship = ocean.scene.getObjectByName('ship') as unknown as {
-          traverse(fn: (o: unknown) => void): void;
-        } | undefined;
-        let roughness = 0;
-        let luminance = 0;
-        let count = 0;
-        ship?.traverse((node) => {
-          const mesh = node as { isMesh?: boolean; material?: unknown };
-          if (!mesh.isMesh) return;
-          const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-          for (const m of materials as Array<{
-            roughness?: number;
-            color?: { r: number; g: number; b: number };
-          }>) {
-            if (typeof m.roughness !== 'number' || !m.color) continue;
-            roughness += m.roughness;
-            luminance += 0.2126 * m.color.r + 0.7152 * m.color.g + 0.0722 * m.color.b;
-            count++;
-          }
-        });
-        return { wetness: ocean.surfaceWetness(), roughness, luminance, count };
-      });
+    test.skip(
+      !(await hasGpuAdapter(page)),
+      'no GPU adapter: the software path cannot render these frames in time',
+    );
 
-    await setState(page, { preset: 'skyPro' });
-    await page.evaluate(() => window.__ocean.resetDeterministic(10, 30));
-    const dry = await sample();
+    // Close on the hull under a clear sky, so the ship fills enough of the frame
+    // to measure and nothing about the weather moves between the two captures.
+    await setState(page, { preset: 'skyPro', cameraMode: 'orbit' });
+    await page.evaluate(() => window.__ocean.resetDeterministic(10, 60));
+    await setCamera(page, [14, 5, 16], [0, 2.5, 0]);
+
+    // No `step` between the two: `capturePixels` renders a fresh frame from the
+    // current state, so stepping would advance the waves, clouds and spray as
+    // well and the difference would be dominated by ordinary motion rather than
+    // by wetting. Holding the clock still is what makes this a measurement of
+    // one variable.
+    const shoot = async (wetness: number) => {
+      await page.evaluate((w: number) => window.__ocean.setSurfaceWetness(w), wetness);
+      return capture(page);
+    };
+
+    const dry = await shoot(0);
+    const wet = await shoot(1);
+
+    // Pixels the wetting actually moved. Sea and sky are unaffected by it, so
+    // this selects the ship without needing to know where on screen it is.
+    const ratios: number[] = [];
+    let darkened = 0;
+    for (let i = 0; i < dry.width * dry.height; i++) {
+      const o = i * 4;
+      const a = 0.2126 * dry.data[o] + 0.7152 * dry.data[o + 1] + 0.0722 * dry.data[o + 2];
+      const b = 0.2126 * wet.data[o] + 0.7152 * wet.data[o + 1] + 0.0722 * wet.data[o + 2];
+      // A floor on the dry value keeps the ratio meaningful: a pixel at level 2
+      // can halve on rounding alone and would otherwise dominate the spread.
+      if (a < 24 || Math.abs(a - b) < 2) continue;
+      ratios.push(b / a);
+      if (b < a) darkened++;
+    }
 
     expect(
-      dry.count,
-      'no standard materials found on the ship, so this test proves nothing — ' +
-        'SurfaceWetness is probably adopting nothing either',
-    ).toBeGreaterThan(0);
-    expect(dry.wetness, 'the hull is wet under a clear sky').toBeLessThan(0.05);
+      ratios.length,
+      'wetting changed nothing on screen, so it is not reaching the image at all',
+    ).toBeGreaterThan(400);
 
-    await setState(page, { preset: 'storm' });
-    await page.evaluate(() => window.__ocean.resetDeterministic(10, 30));
-    const wet = await sample();
+    const mean = ratios.reduce((t, r) => t + r, 0) / ratios.length;
+    const spread = Math.sqrt(
+      ratios.reduce((t, r) => t + (r - mean) * (r - mean), 0) / ratios.length,
+    );
+    // The median, not the mean, carries the darkening. Wetting does two things
+    // at once and they pull opposite ways in luminance: the albedo drops, and the
+    // roughness drops too, which *brightens* every pixel that catches a specular
+    // highlight. Those highlights are a minority of the surface and several times
+    // the brightness of the rest, so they drag the mean back toward 1 while the
+    // typical pixel is clearly darker. Asserting on the mean would be asserting
+    // that the gloss is weak.
+    const sorted = [...ratios].sort((a, b) => a - b);
+    const median = sorted[sorted.length >> 1];
 
-    expect(wet.wetness, 'the storm did not wet the hull').toBeGreaterThan(0.5);
+    console.log(
+      `[wetness] n=${ratios.length} median=${median.toFixed(4)} mean=${mean.toFixed(4)} ` +
+        `spread=${spread.toFixed(4)} darker=${((darkened / ratios.length) * 100).toFixed(0)}%`,
+    );
+    expect(median, `median wet/dry luminance ratio was ${median.toFixed(3)}`).toBeLessThan(0.97);
     expect(
-      wet.roughness,
-      `wet roughness ${wet.roughness.toFixed(3)} is not below dry ${dry.roughness.toFixed(3)}; ` +
-        'a water film fills the microfacets, so wet surfaces are glossier',
-    ).toBeLessThan(dry.roughness);
-    expect(
-      wet.luminance,
-      `wet albedo ${wet.luminance.toFixed(3)} is not below dry ${dry.luminance.toFixed(3)}`,
-    ).toBeLessThan(dry.luminance);
+      spread,
+      `wet/dry ratio spread was ${spread.toFixed(4)} across ${ratios.length} pixels — ` +
+        'a uniform multiplier would give ~0, so the wetting is not normal-driven',
+    ).toBeGreaterThan(0.02);
 
-    // Back to clear, and stepped long enough to dry. The time constant is 26 s,
-    // so this is a partial recovery on purpose — asserting it returns exactly to
-    // dry would be asserting the wrong physics.
+    // Drying is still a CPU-side time constant, and still worth asserting: 26 s
+    // means this is a partial recovery on purpose, and asserting it returns
+    // exactly to dry would be asserting the wrong physics.
+    await page.evaluate(() => window.__ocean.setSurfaceWetness(1));
     await setState(page, { preset: 'skyPro' });
     await page.evaluate(() => window.__ocean.step(1 / 30, 900));
-    const drying = await sample();
-    expect(
-      drying.wetness,
-      `wetness stayed at ${drying.wetness.toFixed(3)} after 30 s of clear weather`,
-    ).toBeLessThan(wet.wetness - 0.15);
+    const dried = await page.evaluate(() => window.__ocean.surfaceWetness());
+    expect(dried, `wetness stayed at ${dried.toFixed(3)} after 30 s of clear weather`).toBeLessThan(
+      0.85,
+    );
   });
 
   /**
@@ -979,6 +1014,190 @@ test.describe('interaction', () => {
     }
 
     expect(errors, `console errors:\n${errors.join('\n')}`).toEqual([]);
+  });
+
+  /**
+   * Shadow and reflection resolution have to *follow* the tier, not just survive
+   * it.
+   *
+   * Both were latched shut for a long time — honoured once at boot, ignored
+   * afterwards — as a workaround for a crash that turned out to be a GPU
+   * resource-lifetime race, now fixed properly by the drain in
+   * `App.drainQualityRequests`. The workaround was invisible to every existing
+   * test: the tier-change test above only asserts that nothing throws, so it
+   * passed just as happily with both setters returning on their first line.
+   *
+   * This asserts the resolutions actually move, and it moves *up* then *down*,
+   * because a setter that reallocates only when growing would pass a one-way
+   * check. Low boots first so the interesting direction is exercised on a
+   * session that started small — the case the latch was hiding.
+   */
+  test('shadow and reflection resolution follow the tier', async ({ page }) => {
+    const errors = collectConsoleErrors(page);
+    await page.goto('/');
+    await waitForOcean(page);
+
+    const sample = async (quality: string) => {
+      await setState(page, { quality });
+      return page.evaluate(() => ({
+        shadow: window.__ocean.atmosphere.shadowMapSize,
+        // Null on the WebGL2 path, which has no planar reflector at all.
+        reflection: window.__ocean.reflections?.resolutionScale ?? null,
+      }));
+    };
+
+    const low = await sample('low');
+    const max = await sample('max');
+    const backDown = await sample('low');
+
+    expect(max.shadow, `low=${low.shadow} max=${max.shadow}`).toBeGreaterThan(low.shadow);
+    expect(backDown.shadow, `max=${max.shadow} back=${backDown.shadow}`).toBe(low.shadow);
+
+    expect(max.reflection).not.toBeNull();
+    expect(
+      max.reflection as number,
+      `low=${low.reflection} max=${max.reflection}`,
+    ).toBeGreaterThan(low.reflection as number);
+    expect(backDown.reflection).toBe(low.reflection);
+
+    expect(errors, `console errors:\n${errors.join('\n')}`).toEqual([]);
+  });
+
+  /**
+   * The cinematic mode has to be a *mode*, not a camera animation.
+   *
+   * The distinction is the whole design: the flight publishes engine orders and
+   * the ship sails itself along the tour, so the wake, the buoyancy and the spray
+   * are the ones the physics produced. Teleporting the hull along a curve would
+   * look identical in a single screenshot and wrong in every frame after it — the
+   * hull would slide without heeling and tow no wake.
+   *
+   * So this asserts on the hull rather than on the camera: it must be under
+   * power and moving, and it must be released cleanly when the viewer takes over.
+   * Handing back a ship still holding the tour's throttle was a real hazard here,
+   * because `setInput` is a latch that disabling the controller does not clear.
+   */
+  test('cinematic mode sails the ship and releases it cleanly', async ({ page }) => {
+    const errors = collectConsoleErrors(page);
+    await page.goto('/');
+    await waitForOcean(page);
+
+    await setState(page, { cameraMode: 'cinematic' });
+    expect(await page.evaluate(() => window.__ocean.director.currentMode)).toBe('cinematic');
+
+    await page.evaluate(() => window.__ocean.resetDeterministic(0, 30));
+    const early = await page.evaluate(() => ({
+      orders: { ...window.__ocean.director.shipInput },
+      beat: window.__ocean.director.cinematicBeat,
+      ship: window.__ocean.shipState(),
+    }));
+    expect(early.orders.throttle, 'the flight is not calling for any power').toBeGreaterThan(0.1);
+
+    // Long enough to be well clear of the first beat and unambiguously under way.
+    await page.evaluate(() => window.__ocean.step(1 / 60, 600));
+    const later = await page.evaluate(() => ({
+      beat: window.__ocean.director.cinematicBeat,
+      ship: window.__ocean.shipState(),
+    }));
+
+    expect(
+      later.ship?.forwardSpeed ?? 0,
+      `hull speed was ${(later.ship?.forwardSpeed ?? 0).toFixed(2)} m/s after 10 s of tour`,
+    ).toBeGreaterThan(1);
+    expect(later.beat, `the tour stayed on beat "${early.beat}" for 10 s`).not.toBe(early.beat);
+
+    // Hand back to the viewer. The orders must not survive the change.
+    //
+    // Asserted after letting it run, not immediately: `shipState` reports the
+    // *spooled* throttle, which eases toward the commanded value, so a snapshot
+    // taken the instant the mode changes still reads the tour's setting whether
+    // or not the command behind it was cleared — a ship does not stop dead. What
+    // distinguishes a released hull from a latched one is what happens next.
+    // With no keys held, a cleared command spools to zero; a stale latch sits at
+    // full ahead forever.
+    await setState(page, { cameraMode: 'boat' });
+    await page.evaluate(() => window.__ocean.step(1 / 60, 300));
+    const released = await page.evaluate(() => window.__ocean.shipState());
+    expect(
+      Math.abs(released?.throttle ?? 1),
+      `Boat mode still holds throttle ${released?.throttle} five seconds after the tour ended`,
+    ).toBeLessThan(0.05);
+    expect(
+      Math.abs(released?.rudder ?? 1),
+      `Boat mode still holds rudder ${released?.rudder} five seconds after the tour ended`,
+    ).toBeLessThan(0.05);
+
+    expect(errors, `console errors:\n${errors.join('\n')}`).toEqual([]);
+  });
+
+  /**
+   * The tour loops, so its ends have to meet.
+   *
+   * A cut at the wrap is the one artefact a looping camera cannot hide, and it is
+   * invisible to any test that only samples the middle. `resetCinematic` makes
+   * the loop addressable, so this simply asks where the camera is just before the
+   * seam and just after it, and requires the two to be a frame apart rather than
+   * a jump apart.
+   */
+  test('the cinematic loop closes without a cut', async ({ page }) => {
+    await page.goto('/');
+    await waitForOcean(page);
+    await setState(page, { cameraMode: 'cinematic' });
+
+    // Run the loop continuously across the seam rather than resetting either
+    // side of it and comparing. Resetting and snapping measures the camera's own
+    // settling transient, not the curve: the rig eases toward the pose the
+    // director publishes, so the first frame after a reset is dominated by that
+    // ease and reads as a metre-scale jump wherever the reset landed.
+    //
+    // Stepping through the wrap the way a viewer meets it asks the only question
+    // that matters — is the seam frame distinguishable from its neighbours?
+    //
+    // `resetDeterministic` first, because it is what pauses the loop. Without it
+    // the render loop keeps running on wall-clock time between round-trips, and
+    // the per-frame distances come out around fifteen metres — a measurement of
+    // this test's own latency rather than of the camera. The whole walk then runs
+    // inside a single `evaluate` so no round-trip can get between two frames.
+    await page.evaluate(() => window.__ocean.resetDeterministic(0, 30));
+
+    const path = await page.evaluate(
+      async ([seamStart, frames]: [number, number]) => {
+        const ocean = window.__ocean;
+        ocean.director.resetCinematic(seamStart);
+        ocean.director.snapToTarget();
+        await ocean.step(1 / 60, 30);
+        const samples: { x: number; y: number; z: number }[] = [];
+        for (let frame = 0; frame < frames; frame++) {
+          await ocean.step(1 / 60, 1);
+          const p = ocean.camera.position;
+          samples.push({ x: p.x, y: p.y, z: p.z });
+        }
+        return samples;
+      },
+      [CINEMATIC_LOOP_SECONDS - 0.5, 90] as [number, number],
+    );
+
+    const steps: number[] = [];
+    for (let i = 1; i < path.length; i++) {
+      steps.push(
+        Math.hypot(path[i].x - path[i - 1].x, path[i].y - path[i - 1].y, path[i].z - path[i - 1].z),
+      );
+    }
+    const sorted = [...steps].sort((a, b) => a - b);
+    const median = sorted[sorted.length >> 1];
+    const worst = sorted[sorted.length - 1];
+
+    console.log(
+      `[cinematic] seam crossing: median step ${median.toFixed(4)} m, worst ${worst.toFixed(4)} m`,
+    );
+    expect(median, 'the camera is not moving, so this proves nothing').toBeGreaterThan(1e-3);
+    // A frame at 60 Hz on a camera doing tens of metres a second is centimetres;
+    // anything several times the median at the wrap is a cut.
+    expect(
+      worst,
+      `the worst frame across the wrap moved ${worst.toFixed(3)} m against a median of ` +
+        `${median.toFixed(3)} m — a cut, not a loop`,
+    ).toBeLessThan(median * 4);
   });
 
   test('sliders drive the simulation', async ({ page }) => {
