@@ -936,7 +936,13 @@ class App {
       evolutionRate: 0.006 + this.state.windSpeed * 0.0022,
     });
     this.weather.setKind(preset.weather.kind);
-    this.weather.setIntensity(preset.weather.intensity);
+    // The override wins where it is set. The per-frame path and
+    // `resetDeterministic` both already defer to it, and this did not — so a
+    // caller that forced a rain rate and then touched anything routed through
+    // here got the preset's rain back in the particles while the *surface* kept
+    // showing the override. Widened by wind now coming through this function,
+    // and wrong before that too.
+    this.weather.setIntensity(this.rainOverride ?? preset.weather.intensity);
 
     // Rain leans with the wind that is driving the sea. Reading the shear off
     // the same wind speed and direction the spectrum uses is what stops a storm
