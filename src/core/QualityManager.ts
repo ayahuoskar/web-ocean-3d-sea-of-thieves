@@ -107,6 +107,18 @@ export interface QualitySettings {
    * would read as a grey smear, not as water.
    */
   wakeDisplacement: number;
+  /**
+   * Fraction of the placed scene dressing that is drawn, 0..1.
+   *
+   * Instance counts only — the island's planting, the cove's clutter and the
+   * reef's rocks thin out, they do not move or disappear as groups. Density is
+   * the right lever because the dressing's cost is almost entirely draw-side
+   * repetition of small meshes, and because a thinner grove still reads as a
+   * grove where a missing one reads as a bug. It never reaches zero: the floor is
+   * a quarter of placed capacity, so a low tier changes the island's density and
+   * never its shape.
+   */
+  propsDetail: number;
 }
 
 export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
@@ -129,6 +141,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     fogSteps: 0,
     lensRainQuality: 1,
     wakeDisplacement: 0,
+    propsDetail: 0.3,
   },
   medium: {
     fftSize: 128,
@@ -149,6 +162,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     fogSteps: 12,
     lensRainQuality: 2,
     wakeDisplacement: 0.75,
+    propsDetail: 0.5,
   },
   high: {
     fftSize: 256,
@@ -167,6 +181,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     fogSteps: 24,
     lensRainQuality: 3,
     wakeDisplacement: 1,
+    propsDetail: 0.75,
   },
   ultra: {
     fftSize: 256,
@@ -185,6 +200,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     fogSteps: 40,
     lensRainQuality: 3,
     wakeDisplacement: 1,
+    propsDetail: 1,
   },
   max: {
     fftSize: 512,
@@ -203,6 +219,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     fogSteps: 56,
     lensRainQuality: 3,
     wakeDisplacement: 1,
+    propsDetail: 1,
   },
 };
 
