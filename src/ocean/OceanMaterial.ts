@@ -647,6 +647,9 @@ export class OceanMaterial {
       // Combine folding across cascades by keeping the most-folded value. Summing
       // would double-count independent bands and wash the whole surface white.
       const fold = float(1).toVar();
+      // Slope variance lost inside the texture footprint — see the alpha channel
+      // of the derivative pass. Bands are independent, so their variances add.
+      const lostSlopeVariance = float(0).toVar();
       for (let i = 0; i < cascadeCount; i++) {
         const d = this.derivativeNodes[i].sample(fieldXZ.div(this.uTileSizes[i])).toVar();
         // Weight folds into the fade, so a cascade the tier does not use
@@ -656,6 +659,15 @@ export class OceanMaterial {
         );
         slope.addAssign(vec2(d.x, d.y).mul(fade));
         fold.assign(fold.min(mix(float(1), d.z, fade)));
+        // E[s^2] - |E[s]|^2, both from the same mip level, so this is exactly the
+        // detail this pixel's footprint averaged away — zero where the footprint
+        // is a texel and growing as it widens, which is why it needs no distance
+        // ramp of its own. `max(0)` guards the half-float subtraction, which can
+        // land a few ulps negative when the variance is genuinely nil. Squared
+        // fade because variance scales with the square of a linear weight.
+        lostSlopeVariance.addAssign(
+          d.w.sub(d.x.mul(d.x).add(d.y.mul(d.y))).max(0).mul(fade).mul(fade),
+        );
       }
 
       // Rain impacts, added to the wave slope before the normal is built so they
@@ -989,9 +1001,26 @@ export class OceanMaterial {
       const alphaBase = this.uRoughness.mul(this.uRoughness).toVar();
       // Widen alpha^2, not alpha: the variance is a second moment, and the cap
       // keeps a pixel that straddles a crest from going fully rough.
+      //
+      // Two variance terms, and they are not redundant. The screen-space one
+      // above measures how much the *surviving* normal changes across a pixel;
+      // it cannot see detail the mip chain already averaged out, because after
+      // filtering that normal is smooth and `dFdx` of it is small — which is
+      // exactly why it never touched the far field. `lostSlopeVariance` is the
+      // complement: the detail inside the footprint, recovered from the second
+      // moment. Together they cover both sides of the filter.
+      //
+      // It gets no `SPECULAR_AA_VARIANCE_CEIL`. That ceiling is 0.004 because the
+      // published screen-space value is five thousand times water's alpha^2 and
+      // needed reining in; this term is a measured slope variance in the same
+      // units as alpha^2, so clamping it would throw away the correction just
+      // where the footprint is widest and it matters most. Slope variance V over
+      // both axes is V/2 per axis, and alpha^2 takes twice the per-axis variance,
+      // so it enters at unit weight. `min(1)` still bounds the result.
       const a2 = alphaBase
         .mul(alphaBase)
         .add(normalVariance.mul(2).min(SPECULAR_AA_VARIANCE_CEIL))
+        .add(lostSlopeVariance)
         .min(1)
         .toVar();
       const alpha = a2.sqrt().toVar();

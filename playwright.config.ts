@@ -103,7 +103,7 @@ export default defineConfig({
       name: 'visual',
       // `gallery.spec.ts` lives here too: it needs the same GPU flags and the
       // same shot resolution, and it skips itself unless CAPTURE_GALLERY=1.
-      testMatch: /(visual|gallery)\.spec\.ts/,
+      testMatch: /(visual|gallery|gallery-jitter|isolation)\.spec\.ts/,
       use: {
         ...devices['Desktop Chrome'],
         viewport: { width: 1280, height: 720 },

@@ -45,7 +45,7 @@ interface Cascade {
   pairB: PingPong;
   /** RGBA: xyz = displacement, w = foam/folding mask. */
   displacement: THREE.RenderTarget;
-  /** RG = surface slope, B = Jacobian. */
+  /** RG = surface slope, B = Jacobian, A = |slope|^2 for variance recovery. */
   derivatives: THREE.RenderTarget;
   evolveA: THREE.NodeMaterial;
   evolveB: THREE.NodeMaterial;
@@ -434,7 +434,23 @@ export class OceanSimulation {
         return vec4(a.z.mul(lambda), a.x, a.w.mul(lambda), jacobian);
       }
 
-      return vec4(b.x, b.y, jacobian, 1);
+      // Alpha carries the second moment of the slope, and it is the whole reason
+      // the distant water stopped boiling.
+      //
+      // Mipmapping a slope field averages the slope. That is right for the
+      // *normal* and wrong for everything computed from it, because specular
+      // response is not linear in slope: a footprint holding a hundred wave
+      // facets averages to a mean near zero, so the shader sees a mirror, and the
+      // mirror flickers as the mean wanders between frames. It is the classic
+      // failure that LEAN and Toksvig mapping exist to solve, and on an ocean at
+      // a hundred metres it is the single most visible artefact in the frame.
+      //
+      // Storing |slope|^2 lets the same hardware mip chain deliver E[s^2]
+      // alongside E[s], and the variance the filtering destroyed comes back out
+      // as E[s^2] - |E[s]|^2 for free. Isotropic rather than per-axis because
+      // only one channel is spare, and the covariance term is worth less here
+      // than the two diagonal ones. `OceanMaterial` folds it into alpha^2.
+      return vec4(b.x, b.y, jacobian, b.x.mul(b.x).add(b.y.mul(b.y)));
     })();
 
     return material;
@@ -484,6 +500,24 @@ function makeTarget(
  * that undersampling shows up as a shimmering speckle across the whole mid-field
  * — by far the most visible artefact on a moving ocean. Trilinear filtering over
  * generated mips lets the GPU pick the right level per pixel.
+ *
+ * `anisotropy = 1` is deliberate, and it is the opposite of the usual advice.
+ *
+ * Anisotropic filtering picks the mip from the *minor* axis of the pixel
+ * footprint and then takes up to `anisotropy` taps along the major axis to cover
+ * the rest. That is a good trade when the ratio is within budget. Water viewed
+ * from near its own surface is the case where it is not: at a few hundred metres
+ * the footprint is a fraction of a metre across and tens of metres long, a ratio
+ * of order a hundred to one, so any affordable tap count leaves most of the
+ * footprint unsampled — while the low mip it selected has already let the full
+ * high-frequency detail back in. The result is sharper *and* noisier.
+ *
+ * Measured, on the far-field band under the horizon at High (mean |laplacian|,
+ * `tests/gallery-jitter.spec.ts`): anisotropy 16 -> 6.80, 4 -> 6.28, 2 -> 5.01,
+ * 1 -> 3.52. Monotonic, and the wrong way round from the usual expectation.
+ * Dropping to 1 makes the hardware choose the major-axis mip, which is the level
+ * that actually covers the footprint. The detail given up was never resolvable;
+ * it was aliasing.
  */
 function makeOutputTarget(size: number): THREE.RenderTarget {
   const target = new THREE.RenderTarget(size, size, {
@@ -497,7 +531,7 @@ function makeOutputTarget(size: number): THREE.RenderTarget {
     stencilBuffer: false,
     generateMipmaps: true,
   });
-  target.texture.anisotropy = 4;
+  target.texture.anisotropy = 1;
   return target;
 }
 
