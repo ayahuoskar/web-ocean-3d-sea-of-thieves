@@ -992,7 +992,14 @@ test.describe('interaction', () => {
     await page.goto('/');
     await waitForOcean(page);
 
-    for (const [key, expected] of [['2', 'fly'], ['3', 'boat'], ['1', 'orbit']] as const) {
+    // '4' included: a mode that is selectable by button and not by key is a
+    // mode half of the viewers cannot reach.
+    for (const [key, expected] of [
+      ['2', 'fly'],
+      ['3', 'boat'],
+      ['4', 'cinematic'],
+      ['1', 'orbit'],
+    ] as const) {
       await page.keyboard.press(key);
       await page.waitForTimeout(250);
       const mode = await page.evaluate(

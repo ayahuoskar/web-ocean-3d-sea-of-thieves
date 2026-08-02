@@ -278,17 +278,20 @@ Full methodology, cost model and the honest list of what remains unmeasured:
 
 - **No temporal antialiasing or reconstruction.** Every stochastic effect here — the fog march,
   the cloud march, the shaft march, the specular lobe — resolves spatially within one frame.
-  This is the largest single thing between the current image and a shipping one: it is what
-  would stabilise the glitter and let every march trade samples for frames.
+  This remains the largest single thing between the current image and a shipping one: it is
+  what would let every march trade samples for frames. It is *not* what the far-field shimmer
+  turned out to need — that was an under-filtered anisotropic sampler, and fixing it where it
+  lived cut the measured figure by 44% without any temporal machinery.
 - **Screen-space reflection is full-resolution, single-ray and non-temporal.** It cannot
   reconstruct off-screen content or a rough lobe. The *planar* layer is now sampled at a
   roughness-driven mip level, so the composite is no longer a mirror, but there is still no
   prefiltered probe and no stochastic sampling with a temporal resolve.
-- **Specular antialiasing is the geometric variant, not slope-space NDF filtering.** It adds
-  the scalar magnitude of the shading normal's screen-space derivatives to `alpha²`, which
-  discards the anisotropic covariance — so it cannot know that a pixel's normal varies more
-  along the wind than across it, which for this surface is the interesting part. Residual
-  striping in the near field is the honest consequence.
+- **Specular antialiasing discards the anisotropic covariance.** Two terms feed `alpha²` and
+  neither carries it. The screen-space one is the geometric variant, which adds the scalar
+  magnitude of the shading normal's derivatives; the other recovers the slope variance the mip
+  chain destroyed, from a second moment stored alongside the slope, but stores it isotropically
+  because only one texture channel was spare. So neither knows that a pixel's normal varies
+  more along the wind than across it, which for this surface is the interesting part.
 - **The grazing reflection fade is art-directed, not a Smith term.** It bottoms out at 0.45
   where a real masking function goes to zero, and it multiplies the Fresnel blend rather than
   acting as the BRDF's geometry factor. (The *specular* Smith visibility is a real
@@ -300,9 +303,10 @@ Full methodology, cost model and the honest list of what remains unmeasured:
   is true of the total internal reflection on the underside — it is a screen-space offset, so
   it reflects only what is on screen and falls back to the water's body colour elsewhere.
 - **The wake is Kelvin-*inspired*.** The dispersion relations are right, which is what makes it
-  scale correctly with speed, but it is an authored sum of two cosines and some envelopes — no
-  hull pressure distribution, no stationary-phase cusp, no Froude-number response, no finite
-  depth, and no propagation of history at the group velocity.
+  scale correctly with speed, and the features are now anchored to the stem and the transom
+  rather than to the hull's centre — but it is still an authored sum of two systems and some
+  envelopes: no hull pressure distribution, no stationary-phase cusp, no Froude-number
+  response, no finite depth, and no propagation of history at the group velocity.
 - **Monahan's law drives foam generation, not measured coverage.** The deposit rate follows
   `W = 3.84e-6 U^3.41`, but nothing measures the resulting rendered coverage and compares it
   against the law. The foam still reads as broad ribboning rather than sparse multiscale
@@ -314,22 +318,10 @@ Full methodology, cost model and the honest list of what remains unmeasured:
   approximation, no temporal reprojection.
 - **Underwater sun occlusion covers the hull only.** An analytic ellipsoid in the hull's frame,
   plus the cloud deck. A diver under a barrel gets full shafts.
-- **The quality tier does not change the shadow map or reflection resolution after startup.**
-  Both are written once, from whatever tier the session boots on. Changing either at runtime
-  destroys a GPU resource that an in-flight command buffer still references, which WebGPU
-  reports as *"Destroyed texture used in a submit"*. See `Atmosphere.setShadowMapSize`.
-- **`resetDeterministic` does not fully isolate a shot from the one before it.** Capturing
-  the boat shot straight after the storm gives visibly heavier foam than capturing it first,
-  so something in the sea state survives the reset. The rain rate is now pushed in *before*
-  anything rewinds, which fixed the lens and hull wetness leaking the same way, but the foam
-  path still carries something. The baselines are self-consistent because the suite always
-  runs the shots in one order; the gallery works around it by reloading between images. It
-  is a defect in the harness, not a property of the renderer.
-- **Rain wetting is uniform over an object.** The hull darkens and glosses in a squall and
-  dries out over the following half-minute, but a real hull wets from *above* — the deck soaks
-  while the underside of a beam stays dry, and water runs down and pools. Expressing that needs
-  the world normal per material, which means rebuilding materials the asset loader shares
-  between clones.
+- **Rain wetting has no runoff.** Wetting is driven by the geometric world normal, so the deck
+  and the upper faces of the rail soak while the underside of a beam stays dry, but water does
+  not run down, streak, or pool in a concavity — that needs surface flow or at least local
+  curvature, and neither is modelled.
 - **`refraction: 0` is a visual policy, not a cost saving.** The backdrop and depth reads are
   unconditional in the node graph; a tier that sets it to zero still pays for them.
 - **One machine.** Every performance figure comes from a single RTX 5090; nothing here

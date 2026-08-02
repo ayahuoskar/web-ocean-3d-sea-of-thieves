@@ -506,6 +506,18 @@ export class Wake {
     this.uBreakRate.value = Math.max(0, rate);
   }
 
+  /**
+   * The resolved foam target, for CPU readback.
+   *
+   * Exposed so a test can measure the *rendered* whitecap coverage against the
+   * empirical law that is supposed to be generating it. Monahan drove the deposit
+   * rate for a long time with nothing checking the result, and the reference
+   * image was rendering roughly ten times the coverage the law predicts.
+   */
+  get outputTarget(): THREE.RenderTarget {
+    return this.output;
+  }
+
   /** Recentres the world footprint. Contents are resampled on the next update. */
   setCenter(x: number, z: number): void {
     this.centerX_ = x;

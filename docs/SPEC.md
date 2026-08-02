@@ -29,7 +29,7 @@ Observed in the reference across the captures in `reference/shots/`.
 | F10 | Buoyancy | Ship and buoys ride the wave surface — heave, pitch, roll sampled from the displacement field. Debug "Buoyancy Probes" toggle. | P0 |
 | F11 | Wakes | Ship generates a persistent foam wake and surface displacement. Debug "Wake Probes" toggle. | P1 |
 | F12 | Presets | 9: Three.js Sky Pro, Arctic, Black Flag, Dusk, Foggy, Moonlit, Sea of Thieves, Storm, Sunset. Each sets sun/sky, water colour, wind, wavelength, cloud coverage, weather FX. | P0 |
-| F13 | Camera modes | Orbit (LMB rotate / RMB pan / scroll zoom), Fly (WASD + mouse look), Boat (chase camera on the ship). Keys 1/2/3. | P0 |
+| F13 | Camera modes | Orbit (LMB rotate / RMB pan / scroll zoom), Fly (WASD + mouse look), Boat (chase camera on the ship), Cinematic (a looping 120 s authored tour that sails the ship through open water, the island, a waterline pass, a dive and the reef). Keys 1/2/3/4. | P0 |
 | F14 | Quality tiers | Low / Medium / High / Ultra / Max — scales cascade count, FFT resolution, mesh LOD, post FX, shadows. | P0 |
 | F15 | Renderer fallback | WebGPU by default with a "Force WebGL" toggle producing a coherent — **not** visually equivalent — WebGL2 path. Refraction, planar reflection and SSR are absent there by policy; the surface falls back to analytic depth colour and an analytic sky reflection. | P0 |
 | F16 | Pixel ratio control | Live 0.5×–2× resolution scale slider. | P1 |
@@ -112,7 +112,8 @@ src/
     Buoyancy.ts           probe-based rigid-body float
     Wake.ts               world-anchored wake foam accumulation buffer
   cameras/
-    CameraDirector.ts     orbit / fly / boat modes and the transitions between them
+    CameraDirector.ts     orbit / fly / boat / cinematic modes and the transitions
+    Cinematic.ts          the authored tour: beats, cyclic spline, derived rudder
   ui/
     Panel.ts, Hud.ts, types.ts, styles.css
   presets/

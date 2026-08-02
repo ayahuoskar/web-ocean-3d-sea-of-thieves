@@ -617,10 +617,20 @@ class App {
         break;
       case 'windSpeed':
       case 'peakWavelength':
-        this.simulation.updateSpectrum({
-          windSpeed: this.state.windSpeed,
-          peakWavelength: this.state.peakWavelength,
-        });
+        // Through `applyPreset`, not straight to the spectrum.
+        //
+        // Wind is not only a wave parameter. It stretches the surface's glitter
+        // along the crests, leans the rain, scuds the clouds, and — via Monahan —
+        // sets the rate at which whitecaps are deposited. All of those read
+        // `state.windSpeed` from inside `applyPreset`, and this case did not call
+        // it, so every one of them kept the value from whenever the *preset* last
+        // changed. Dragging the wind slider from a calm sea to a gale raised the
+        // waves and left the foam, the glitter and the clouds behaving as though
+        // it were still calm; the whitecap rate in particular was only ever
+        // correct for the wind a preset happened to load with.
+        //
+        // Without the environment capture: this does not move the sun.
+        this.applyPreset(false);
         break;
       case 'cloudCoverage':
         this.clouds.setParams({ coverage: this.state.cloudCoverage });
@@ -922,9 +932,15 @@ class App {
     // moves; the strength keeps a gentler share of it, because at a given
     // coverage heavier seas also entrain more air per breaking event.
     const whitecapRatio = whitecapAt(this.state.windSpeed) / whitecapAt(15);
+    // 0.32, down from 0.55, and this is the first version of the number that was
+    // measured rather than judged. `tests/foam.spec.ts` reads the accumulation
+    // buffer back and compares the standing coverage against the law that is
+    // supposed to be producing it: at 0.55 a 15 m/s sea stood at 7.96% against
+    // Monahan's 3.93%, which is what made the reference image a sheet of white
+    // rather than a sea with whitecaps on it.
     this.wake.setBreaking(
       foamThreshold * 0.34,
-      0.55 * Math.max(0.05, Math.min(2.2, whitecapRatio)),
+      0.32 * Math.max(0.45, Math.min(2.2, whitecapRatio)),
     );
 
     // The surface's own mask is re-scaled from the same number.
