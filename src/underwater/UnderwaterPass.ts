@@ -245,7 +245,26 @@ export class UnderwaterPass {
       If(this.uSubmersion.greaterThan(0.001), () => {
         // Sky pixels come back at `far`, which is exactly right here: looking at
         // "nothing" underwater means looking at an infinite column of water.
-        const dist = viewDistance(suv).toVar('uwDist');
+        const axialDist = viewDistance(suv).toVar('uwAxial');
+
+        // Beer-Lambert wants the distance the light travelled, and the depth
+        // buffer measures along the camera's *forward axis*.
+        //
+        // Off-centre pixels look further to reach the same axial depth — by
+        // `1 / cos(theta)`, which at the edge of a 55-degree vertical field with
+        // a 16:9 frame is about 1.25. Using the axial value directly therefore
+        // under-absorbed toward the edges of the frame and, worse, made the
+        // absorption depend on the field of view: the same scene through a wider
+        // lens got clearer water. The shaft march below already made this
+        // correction for itself, which is what made the inconsistency visible.
+        //
+        // Reconstructed from the projection rather than from the pixel angle, so
+        // it stays correct if the projection is ever changed.
+        const ndc0 = vec2(suv.x.mul(2).sub(1), suv.y.mul(-2).add(1)).toVar('uwNdc0');
+        const viewH0 = this.uInvProjection.mul(vec4(ndc0.x, ndc0.y, -1, 1)).toVar('uwViewH0');
+        const viewDir0 = normalize(viewH0.xyz.div(viewH0.w)).toVar('uwViewDir0');
+        const axialCos = viewDir0.z.negate().max(1e-3).toVar('uwAxialCos');
+        const dist = axialDist.div(axialCos).toVar('uwDist');
 
         // --- 1. transmission -------------------------------------------------
         const transmit = exp(this.uSigma.mul(dist.negate())).toVar('uwT');
@@ -290,35 +309,35 @@ export class UnderwaterPass {
           // absorb. Taking `suv.y * 2 - 1` builds a ray pointing *down* wherever
           // the pixel looks up, which sent every shaft the wrong way and was the
           // reason the god rays never converged on the sun.
-          const ndc = vec2(suv.x.mul(2).sub(1), suv.y.mul(-2).add(1)).toVar('uwNdc');
-          const viewH = this.uInvProjection.mul(vec4(ndc.x, ndc.y, -1, 1)).toVar('uwViewH');
-          const viewDir = normalize(viewH.xyz.div(viewH.w)).toVar('uwViewDir');
           const worldDir = normalize(
-            this.uCameraWorld.mul(vec4(viewDir, 0)).xyz,
+            this.uCameraWorld.mul(vec4(viewDir0, 0)).xyz,
           ).toVar('uwWorldDir');
 
-          // `dist` is measured along the camera's forward axis; the march needs
-          // it along this pixel's ray, which is longer off-centre.
-          const axial = viewDir.z.negate().max(1e-3).toVar('uwAxial');
-          const march = min(dist.div(axial), this.uShaftRange).toVar('uwMarch');
+          // `dist` is already along this pixel's ray — see the transmission term
+          // above, which now makes the same correction rather than leaving the
+          // two describing different path lengths.
+          const march = min(dist, this.uShaftRange).toVar('uwMarch');
           const stepLength = march.mul(this.uInvSteps).toVar('uwStep');
 
           // Mip level matched to the march's own sampling rate.
           //
-          // `log2(stepLength / texel)` is the level at which one texel of the
-          // caustics field spans one march step — the Nyquist level for this
-          // sampler. Below it the march is point-sampling a signal it cannot
-          // resolve, and because the start offset is an interleaved gradient
-          // noise the resulting variance arrives as a stationary screen-space
-          // lattice rather than as noise. That grid over the seafloor was the
-          // symptom.
+          // The footprint is the step's **horizontal** extent, not its length.
+          // The caustics field is a 2D map indexed by world XZ, so a vertical
+          // metre of march moves the lookup by nothing at all (bar the sun-shear
+          // term, which is far smaller). Using the full 3D step length asked for
+          // a coarser level than the sampler needed and over-blurred exactly the
+          // near-vertical rays that carry the shafts.
           //
-          // Backed off to 0.75 of the full level. The exact figure is correct for
-          // a box filter and this is a trilinear one, which over-blurs slightly;
-          // three quarters keeps the shafts' filaments legible while removing the
-          // lattice. Clamped at zero so a short march never asks for a sharper
-          // level than the base.
-          const shaftLod = stepLength
+          // `log2(footprint / texel)` is then the level at which one texel spans
+          // one step — the Nyquist level for this sampler. Below it the march
+          // point-samples a signal it cannot resolve, and because the start
+          // offset is an interleaved gradient noise the variance arrives as a
+          // stationary screen-space lattice rather than as noise.
+          //
+          // Backed off to 0.75 of the full level: the exact figure is right for a
+          // box filter and this is a trilinear one, which over-blurs slightly.
+          const stepHorizontal = stepLength.mul(worldDir.xz.length()).toVar('uwStepH');
+          const shaftLod = stepHorizontal
             .div(this.uCausticsTexel)
             .max(1)
             .log2()

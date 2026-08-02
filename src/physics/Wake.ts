@@ -656,12 +656,30 @@ export class Wake {
         // Bow wave: the hull pushes a mound up ahead of itself and drags a trough
         // in behind the shoulder. Without it the pattern starts from nothing at
         // the hull, which reads as the ship floating over its own wake.
+        //
+        // The trough is not decoration. A displacement hull moving through water
+        // has to put the water it displaces somewhere, and it comes back down
+        // immediately abaft the bow — which is why a ship at speed sits visibly
+        // *lower* amidships than the undisturbed surface around it. An earlier
+        // version of this comment described the trough while the code added only
+        // the mound, so the hull rode on a bulge with nothing under it.
         const bow = delta
           .sub(forward.mul(width.mul(0.9)))
           .length()
           .div(width.mul(1.1))
           .toVar();
-        const bowWave = bow.mul(bow).min(20).negate().exp().mul(1.15).toVar();
+        const crest = bow.mul(bow).min(20).negate().exp().mul(1.15).toVar();
+
+        // Centred a little over a beam abaft the bow mound, and wider — the
+        // shoulder trough is a longer, shallower feature than the crest ahead of
+        // it, which is what gives the two together the S-shape a bow wave has in
+        // profile.
+        const shoulder = delta
+          .add(forward.mul(width.mul(0.55)))
+          .length()
+          .div(width.mul(1.5))
+          .toVar();
+        const bowWave = crest.sub(shoulder.mul(shoulder).min(20).negate().exp().mul(0.5)).toVar();
 
         const local = transverse
           .add(divergent.mul(0.85))

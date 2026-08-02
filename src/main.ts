@@ -799,7 +799,19 @@ class App {
     // on cascade 0 at 15 m/s, fold < 0.14 covers 5.5% of the surface and fold < 0
     // covers 3.8%, so the buffer sees only genuinely folded water and the trail
     // it leaves supplies the rest of the coverage.
-    this.wake.setBreaking(foamThreshold * 0.34, 0.55);
+    // Monahan drives the *deposit rate*, not just the surface's read strength.
+    //
+    // It previously scaled only `setFoamStrength`, which changes how strongly an
+    // existing deposit reads — so the empirical coverage law was decorating the
+    // opacity of a foam field whose generation was a fixed constant for every
+    // wind speed. The rate is what the law is about, so that is what it now
+    // moves; the strength keeps a gentler share of it, because at a given
+    // coverage heavier seas also entrain more air per breaking event.
+    const whitecapRatio = whitecapAt(this.state.windSpeed) / whitecapAt(15);
+    this.wake.setBreaking(
+      foamThreshold * 0.34,
+      0.55 * Math.max(0.05, Math.min(2.2, whitecapRatio)),
+    );
 
     // The surface's own mask is re-scaled from the same number.
     //
@@ -816,9 +828,7 @@ class App {
       foamThreshold: foamThreshold * 0.62,
       foamSoftness: 0.42,
     });
-    this.water.setFoamStrength(
-      Math.max(0.08, Math.min(1.5, whitecapAt(this.state.windSpeed) / whitecapAt(15))),
-    );
+    this.water.setFoamStrength(Math.max(0.35, Math.min(1.2, Math.sqrt(whitecapRatio))));
     // Sky and horizon come from the atmosphere, not from preset constants.
     //
     // The first argument used to be the *sun* colour, which is not the sky by
@@ -899,7 +909,6 @@ class App {
 
     this.oceanMesh.recenter(this.camera.position);
     this.water.setWorldOffset(this.oceanMesh.mesh.position.x, this.oceanMesh.mesh.position.z);
-    this.water.setFoamCenter(this.wake.centerX, this.wake.centerZ);
     // Depth-buffer distances are measured along this axis; the surface needs it
     // to convert them into distance along each pixel's own ray.
     this.water.setCameraForward(this.camera.getWorldDirection(_keyDirection2));
@@ -984,6 +993,16 @@ class App {
     this.caustics.bake(this.renderer, this.camera.position.x, this.camera.position.z);
 
     this.updateSceneContent(dt);
+
+    // *After* the wake has been recentred and re-rendered, not before.
+    //
+    // `updateSceneContent` moves the buffer's world centre to the camera and
+    // resamples the texture to match. Publishing the centre ahead of that handed
+    // the surface the *previous* frame's anchor for a texture that had already
+    // been re-anchored, so while the camera was moving the wake slid against the
+    // hull by exactly one frame of camera travel — the one thing the whole
+    // world-anchored design exists to prevent, reintroduced by an ordering.
+    this.water.setFoamCenter(this.wake.centerX, this.wake.centerZ);
 
     this.hud.setFps(this.loop.stats.fps);
 

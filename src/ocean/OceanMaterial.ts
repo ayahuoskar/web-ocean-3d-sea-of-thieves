@@ -778,15 +778,54 @@ export class OceanMaterial {
         reflection.assign(ssr(worldPos, n, reflection));
       }
 
-      // --- sun specular (GGX) ---------------------------------------------------
+      // --- sun specular: the whole microfacet BRDF, not just its NDF -----------
+      //
+      // This was `D * N.L * intensity` and nothing else — no Fresnel, no
+      // masking-shadowing, and no `1 / (4 (N.L)(N.V))` denominator. The NDF is
+      // normalised over the *microfacet distribution*, not over outgoing
+      // radiance, so on its own it is not a reflectance and its peak scales as
+      // `1 / (pi * a2)`. At the surface's 0.075 roughness that is a2 = 3.2e-5,
+      // so the term peaked near 10,000 before the sun's intensity multiplied it
+      // — four to five orders of magnitude of specular energy that does not
+      // exist, dumped straight into the tone mapper wherever the half-vector
+      // lined up. That is most of why the water read as white foil.
+      //
+      // The three missing factors are not refinements; each removes a specific
+      // error. The visibility term is Heitz's height-correlated Smith form,
+      // which already folds in the `4 (N.L)(N.V)` denominator. Fresnel is
+      // evaluated on the *half-vector*, not the macro normal, because that is
+      // the facet actually doing the reflecting.
       const halfVector = normalize(viewDir.add(sunDir)).toVar();
       const nDotH = n.dot(halfVector).clamp(0, 1).toVar();
+      const nDotL = n.dot(sunDir).clamp(0, 1).toVar();
+      const vDotH = viewDir.dot(halfVector).clamp(0, 1).toVar();
+
       const alpha = this.uRoughness.mul(this.uRoughness).toVar();
       const a2 = alpha.mul(alpha).toVar();
+
+      // D — Trowbridge-Reitz / GGX.
       const denom = nDotH.mul(nDotH).mul(a2.sub(1)).add(1).toVar();
-      const ggx = a2.div(denom.mul(denom).mul(Math.PI).max(1e-4)).toVar();
-      const nDotL = n.dot(sunDir).clamp(0, 1).toVar();
-      const specular = this.uSunColor.mul(ggx.mul(nDotL).mul(this.uSunIntensity)).toVar();
+      const distribution = a2.div(denom.mul(denom).mul(Math.PI).max(1e-6)).toVar();
+
+      // V — Smith height-correlated visibility, which is G / (4 (N.L)(N.V)).
+      const lambdaV = nDotL.mul(nDotV.mul(nDotV).mul(float(1).sub(a2)).add(a2).sqrt()).toVar();
+      const lambdaL = nDotV.mul(nDotL.mul(nDotL).mul(float(1).sub(a2)).add(a2).sqrt()).toVar();
+      const visibility = float(0.5).div(lambdaV.add(lambdaL).max(1e-6)).toVar();
+
+      // F — Schlick on the half-vector, F0 for an air/water interface.
+      const oneMinusVH = float(1).sub(vDotH).toVar();
+      const vhPow = oneMinusVH
+        .mul(oneMinusVH)
+        .mul(oneMinusVH)
+        .mul(oneMinusVH)
+        .mul(oneMinusVH)
+        .toVar();
+      const fresnelSpecular = f0.add(float(1).sub(f0).mul(vhPow)).toVar();
+
+      const specular = this.uSunColor
+        .mul(distribution.mul(visibility).mul(fresnelSpecular).mul(nDotL))
+        .mul(this.uSunIntensity)
+        .toVar();
 
       // --- combine ---------------------------------------------------------------
       // The body colour is authored for *daylight*. Its diffuse term bottomed out
