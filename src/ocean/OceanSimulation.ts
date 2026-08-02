@@ -503,21 +503,32 @@ function makeTarget(
  *
  * `anisotropy = 1` is deliberate, and it is the opposite of the usual advice.
  *
- * Anisotropic filtering picks the mip from the *minor* axis of the pixel
- * footprint and then takes up to `anisotropy` taps along the major axis to cover
- * the rest. That is a good trade when the ratio is within budget. Water viewed
- * from near its own surface is the case where it is not: at a few hundred metres
- * the footprint is a fraction of a metre across and tens of metres long, a ratio
- * of order a hundred to one, so any affordable tap count leaves most of the
- * footprint unsampled — while the low mip it selected has already let the full
- * high-frequency detail back in. The result is sharper *and* noisier.
- *
  * Measured, on the far-field band under the horizon at High (mean |laplacian|,
  * `tests/gallery-jitter.spec.ts`): anisotropy 16 -> 6.80, 4 -> 6.28, 2 -> 5.01,
  * 1 -> 3.52. Monotonic, and the wrong way round from the usual expectation.
- * Dropping to 1 makes the hardware choose the major-axis mip, which is the level
- * that actually covers the footprint. The detail given up was never resolvable;
- * it was aliasing.
+ *
+ * The reason is not that anisotropic filtering under-samples. It does not: the
+ * reference algorithm takes N = min(ceil(Pmax/Pmin), maxAniso) samples at
+ * LOD = log2(Pmax/N), so a tap budget too small for the footprint is compensated
+ * by choosing a coarser level, and the footprint is covered either way.
+ *
+ * The reason is that this is a *slope* field feeding a nonlinear shading model,
+ * and filtering does not commute with it. Anisotropic filtering delivers a
+ * better estimate of the mean slope over the footprint — and the mean slope is
+ * the wrong thing to shade. Specular response is a sharply nonlinear function of
+ * slope, so the correct answer is the mean of the shaded facets, not the shading
+ * of the mean facet, and a higher tap count buys accuracy in exactly the
+ * quantity that is not wanted. What it costs is the four levels of extra
+ * sharpness it takes in exchange, which is retained slope variance the shading
+ * then turns into noise.
+ *
+ * Dropping to 1 makes the hardware choose the major-axis level, which carries
+ * less of that variance. It is a real trade and not a free win — detail along
+ * the well-resolved minor axis goes with it — and it is the right side of the
+ * trade for water seen from near its own surface, where the footprint is a
+ * fraction of a metre across and tens of metres long. The alpha channel below
+ * addresses the same mismatch from the other end, by carrying the variance
+ * forward instead of discarding it.
  */
 function makeOutputTarget(size: number): THREE.RenderTarget {
   const target = new THREE.RenderTarget(size, size, {

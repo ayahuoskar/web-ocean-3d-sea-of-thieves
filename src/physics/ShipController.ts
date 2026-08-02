@@ -85,6 +85,8 @@ export class ShipController {
   private throttle = 0;
   private rudder = 0;
   private enabled = false;
+  /** Whether W/A/S/D reach the hull. See `setKeyboardEnabled`. */
+  private keyboard = true;
 
   private readonly keys = new Set<string>();
   private readonly abort = new AbortController();
@@ -132,6 +134,25 @@ export class ShipController {
   }
 
   /** Direct control, for tests and for touch input. Values are clamped. */
+  /**
+   * Whether the viewer's keys reach the hull.
+   *
+   * Separate from `setEnabled`, because "the ship is under command" and "the
+   * *viewer* is commanding it" are different questions and the cinematic tour is
+   * the case that separates them: it needs the controller running so the hull
+   * sails under its own physics, and it needs the keyboard out of the way so the
+   * authored flight is the only thing steering.
+   *
+   * Releasing held keys on the way out matters. Without it, a key pressed while
+   * the tour was running is still in the set when control returns, and the hull
+   * takes off on a keystroke the viewer made seconds ago and has long forgotten.
+   */
+  setKeyboardEnabled(enabled: boolean): void {
+    if (this.keyboard === enabled) return;
+    this.keyboard = enabled;
+    if (!enabled) this.releaseKeys();
+  }
+
   setInput(throttle: number, rudder: number): void {
     this.throttleInput = clamp(throttle, -1, 1);
     this.rudderInput = clamp(rudder, -1, 1);
@@ -171,8 +192,18 @@ export class ShipController {
     if (!this.enabled || !(dt > 0)) return;
 
     // --- controls ------------------------------------------------------------
-    const keyThrottle = (this.keys.has('keyw') ? 1 : 0) - (this.keys.has('keys') ? 1 : 0);
-    const keyRudder = (this.keys.has('keyd') ? 1 : 0) - (this.keys.has('keya') ? 1 : 0);
+    // The keyboard outranks `setInput` so a viewer at the helm always beats the
+    // on-screen throttle, and `keyboard` is what stops that rule applying to a
+    // driver that is not a viewer. The cinematic tour steers through `setInput`,
+    // and with the keys still live, holding S during a full-ahead beat commanded
+    // full astern — the tour visibly fighting for its own wheel while the HUD
+    // said the flight was holding it.
+    const keyThrottle = this.keyboard
+      ? (this.keys.has('keyw') ? 1 : 0) - (this.keys.has('keys') ? 1 : 0)
+      : 0;
+    const keyRudder = this.keyboard
+      ? (this.keys.has('keyd') ? 1 : 0) - (this.keys.has('keya') ? 1 : 0)
+      : 0;
     const wantThrottle = keyThrottle !== 0 ? keyThrottle : this.throttleInput;
     const wantRudder = keyRudder !== 0 ? keyRudder : this.rudderInput;
 

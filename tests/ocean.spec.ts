@@ -1113,26 +1113,42 @@ test.describe('interaction', () => {
     ).toBeGreaterThan(1);
     expect(later.beat, `the tour stayed on beat "${early.beat}" for 10 s`).not.toBe(early.beat);
 
-    // Hand back to the viewer. The orders must not survive the change.
+    // Hand back to the viewer, and assert *immediately*.
     //
-    // Asserted after letting it run, not immediately: `shipState` reports the
-    // *spooled* throttle, which eases toward the commanded value, so a snapshot
-    // taken the instant the mode changes still reads the tour's setting whether
-    // or not the command behind it was cleared — a ship does not stop dead. What
-    // distinguishes a released hull from a latched one is what happens next.
-    // With no keys held, a cleared command spools to zero; a stale latch sits at
-    // full ahead forever.
+    // An earlier version of this stepped five seconds first, on the reasoning
+    // that the spooled throttle cannot drop instantly. That reasoning is sound
+    // and the test was still wrong: throttle spools at 0.7 per second, so full
+    // ahead decays on its own inside about a second and a half, and waiting five
+    // proved only that a first-order lag is a first-order lag. It passed against
+    // a handoff that did *not* clear the spool, which is exactly the defect it
+    // was written to catch. Taking the helm must hand over a stopped engine on
+    // the same frame.
     await setState(page, { cameraMode: 'boat' });
-    await page.evaluate(() => window.__ocean.step(1 / 60, 300));
     const released = await page.evaluate(() => window.__ocean.shipState());
     expect(
       Math.abs(released?.throttle ?? 1),
-      `Boat mode still holds throttle ${released?.throttle} five seconds after the tour ended`,
-    ).toBeLessThan(0.05);
+      `Boat mode inherited throttle ${released?.throttle} from the tour`,
+    ).toBeLessThan(1e-6);
     expect(
       Math.abs(released?.rudder ?? 1),
-      `Boat mode still holds rudder ${released?.rudder} five seconds after the tour ended`,
-    ).toBeLessThan(0.05);
+      `Boat mode inherited rudder ${released?.rudder} from the tour`,
+    ).toBeLessThan(1e-6);
+
+    // And the keys must be inert *during* the tour, which is the other half of
+    // "the flight holds the wheel". The keyboard deliberately outranks
+    // `setInput` so a viewer at the helm beats the on-screen throttle; applied
+    // during a cinematic that rule let a held S command full astern against a
+    // full-ahead beat.
+    await setState(page, { cameraMode: 'cinematic' });
+    await page.evaluate(() => window.__ocean.resetDeterministic(0, 30));
+    await page.keyboard.down('s');
+    await page.evaluate(() => window.__ocean.step(1 / 60, 120));
+    const underKey = await page.evaluate(() => window.__ocean.shipState());
+    await page.keyboard.up('s');
+    expect(
+      underKey?.throttle ?? 0,
+      `holding S during the tour drove the throttle to ${underKey?.throttle}`,
+    ).toBeGreaterThan(0.5);
 
     expect(errors, `console errors:\n${errors.join('\n')}`).toEqual([]);
   });

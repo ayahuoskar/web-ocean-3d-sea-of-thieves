@@ -151,6 +151,18 @@ class App {
   private disposed = false;
   /** True once the async scene-content load has settled, whatever the outcome. */
   private sceneContentLoaded = false;
+  /**
+   * The in-flight scene load, so a tier change can wait for it.
+   *
+   * Models arrive after the first frames are on screen, which means the load
+   * adds meshes to a live scene and compiles their pipelines while the loop is
+   * running. A tier change that lands in that window would be destroying FFT,
+   * shadow and reflection resources while pipeline creation for the new content
+   * is still in flight — the same lifetime class as the crash the drain exists
+   * to prevent, reached by a different route. Holding the promise is what lets
+   * the drain rule it out instead of hoping.
+   */
+  private contentReady: Promise<void> | null = null;
   /** True once `compileAsync` has built the initial pipeline set. */
   private shadersReady = false;
   /** Lazily created offscreen target for `capturePixels`. */
@@ -391,7 +403,11 @@ class App {
     // Models load after the first frames are on screen. The ocean is the
     // headline; making the viewer wait on 26 MB of ship textures before seeing
     // anything would be the wrong trade.
-    void this.loadSceneContent();
+    // Kept, not dropped. A tier change destroys GPU resources, and this task
+    // adds meshes and creates pipelines on its own schedule — so the two must
+    // not overlap. `drainQualityRequests` awaits it.
+    this.contentReady = this.loadSceneContent();
+    void this.contentReady;
   }
 
   /**
@@ -516,6 +532,9 @@ class App {
     // features and must fail separately: one unreachable prop asset previously
     // rejected the whole batch, taking the ship, buoyancy and the wake with it
     // and leaving an empty ocean with nothing but a console error to show for it.
+    /** Roots added hidden, revealed together once their pipelines exist. */
+    const loaded: THREE.Object3D[] = [];
+
     const [shipResult, propsResult] = await Promise.allSettled([
       Ship.load(this.assets),
       Props.load(this.assets, { detailScale: QUALITY_TIERS[this.state.quality].propsDetail }),
@@ -525,6 +544,9 @@ class App {
     if (shipResult.status === 'fulfilled') {
       const ship = shipResult.value;
       this.ship = ship;
+      // Hidden until compiled — see the reveal at the end of this function.
+      ship.object.visible = false;
+      loaded.push(ship.object);
       this.scene.add(ship.object);
       this.wetness.adopt(ship.object);
 
@@ -563,6 +585,8 @@ class App {
     if (propsResult.status === 'fulfilled') {
       const props = propsResult.value;
       this.props = props;
+      props.object.visible = false;
+      loaded.push(props.object);
       this.scene.add(props.object);
       // Props share materials with the hull through the loader's cache;
       // `adopt` de-duplicates, so this is a no-op for anything already tracked.
@@ -591,10 +615,22 @@ class App {
     // this project's constraints rule out, and placing the scene dressing made
     // it considerably worse: twenty more models, each with its own materials.
     //
-    // It is safe to await here because `sceneContentLoaded` is not set until it
-    // returns, so nothing observes a half-compiled scene, and `compileAsync` is
-    // best-effort by construction.
+    // Awaiting `compileAsync` is not by itself enough, and the first version of
+    // this was wrong about that: the objects were already in the scene, the loop
+    // was already running, and a frame drawn between adding them and the compile
+    // resolving hits exactly the inline compile this is meant to avoid.
+    //
+    // So they are added hidden, and the reveal happens with the loop stopped.
+    // The ordering is forced from both ends: `compileAsync` walks the scene with
+    // `traverseVisible`, so compiling before the reveal compiles nothing at all,
+    // and revealing before the compile is the original bug. The only gap between
+    // them that is safe is one no frame can be drawn in.
+    const wasPaused = this.loop.isPaused;
+    this.loop.setPaused(true);
+    await this.loop.settle();
+    for (const object of loaded) object.visible = true;
     await this.prewarm();
+    if (!wasPaused && !this.disposed) this.loop.setPaused(false);
 
     this.sceneContentLoaded = true;
   }
@@ -670,15 +706,23 @@ class App {
         // release it, so they keep their own keys and a hull cannot be left under
         // power while the viewer is somewhere else.
         //
-        // Zeroed on every change, before enabling. `setInput` is a latch that
-        // `setEnabled(false)` does not clear, so without this the orders the
-        // cinematic was holding when it ended would still be there when Boat
-        // mode took over, and the viewer would inherit a ship already under way
-        // with the rudder over.
-        this.shipControls?.setInput(0, 0);
+        // `resetInput`, not `setInput(0, 0)`, and this distinction is the whole
+        // handoff. Throttle and rudder are spooled, and `setEnabled` only clears
+        // the spool on a *transition* — Cinematic and Boat both keep the
+        // controller enabled, so switching between them returns on its first
+        // line and touches nothing. Clearing only the order left the tour's full
+        // ahead spooling down over the next second and a half, so taking the
+        // helm handed the viewer a ship already under way with the rudder over.
+        this.shipControls?.resetInput();
         this.shipControls?.setEnabled(
           this.state.cameraMode === 'boat' || this.state.cameraMode === 'cinematic',
         );
+        // Cinematic runs the ship but not the viewer's keys: the controller has
+        // to be live for the hull to sail under its own physics, and the keys
+        // have to be out of the way for the authored flight to be the only thing
+        // steering. Otherwise W/A/S/D outrank `setInput` and the tour fights for
+        // its own wheel.
+        this.shipControls?.setKeyboardEnabled(this.state.cameraMode !== 'cinematic');
         // The on-screen throttle stays with the mode that can actually use it.
         this.touchControls?.setVisible(this.state.cameraMode === 'boat');
         break;
@@ -1042,6 +1086,8 @@ class App {
     // so the fence resolves against an empty queue and the teardown lands on a
     // command buffer that is still being built.
     await this.loop.settle();
+    // And the scene load, if one is still running. See `contentReady`.
+    await this.contentReady?.catch(() => undefined);
     try {
       while (this.pendingQuality !== null && !this.disposed) {
         const tier = this.pendingQuality;
