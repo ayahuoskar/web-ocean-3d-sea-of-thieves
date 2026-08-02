@@ -17,12 +17,14 @@ const MODE_LABELS: Record<CameraMode, string> = {
   orbit: 'Orbit',
   fly: 'Fly',
   boat: 'Boat',
+  cinematic: 'Cine',
 };
 
 const MODE_DIGITS: Record<CameraMode, string> = {
   orbit: '1',
   fly: '2',
   boat: '3',
+  cinematic: '4',
 };
 
 const HINTS: Record<CameraMode, readonly Hint[]> = {
@@ -45,7 +47,18 @@ const HINTS: Record<CameraMode, readonly Hint[]> = {
     { action: 'Steer', key: 'A D' },
     { action: 'Reverse', key: 'S' },
   ],
+  // Nothing to drive — the flight holds the wheel. The hint names what the
+  // viewer *can* do, which is leave, rather than listing controls that are
+  // deliberately inert while the mode is running.
+  cinematic: [
+    { action: 'Auto tour', key: '4' },
+    { action: 'Take helm', key: '3' },
+    { action: 'Free look', key: '2' },
+  ],
 };
+
+/** Keyboard digits, in mode order. See `MODE_DIGITS`. */
+const MODE_DIGITS_ORDER: readonly string[] = CAMERA_MODES.map((mode) => MODE_DIGITS[mode]);
 
 /** Minimum milliseconds between FPS text writes (~4 updates per second). */
 const FPS_WRITE_INTERVAL = 250;
@@ -210,7 +223,9 @@ export class Hud {
     if (event.ctrlKey || event.metaKey || event.altKey || event.repeat) return;
     if (isTypingTarget(event.target)) return;
 
-    const index = ['1', '2', '3'].indexOf(event.key);
+    // Derived from the mode list rather than written out, so adding a mode
+    // cannot leave it selectable by button and not by key.
+    const index = MODE_DIGITS_ORDER.indexOf(event.key);
     if (index < 0) return;
     const mode = CAMERA_MODES[index];
     if (mode === undefined) return;

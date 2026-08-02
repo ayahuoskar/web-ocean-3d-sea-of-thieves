@@ -18,7 +18,7 @@ export type PresetId =
   | 'storm'
   | 'sunset';
 
-export type CameraMode = 'orbit' | 'fly' | 'boat';
+export type CameraMode = 'orbit' | 'fly' | 'boat' | 'cinematic';
 
 export interface UiState {
   quality: QualityTier;
@@ -93,4 +93,4 @@ export const PRESET_IDS: readonly PresetId[] = [
   'sunset',
 ];
 
-export const CAMERA_MODES: readonly CameraMode[] = ['orbit', 'fly', 'boat'];
+export const CAMERA_MODES: readonly CameraMode[] = ['orbit', 'fly', 'boat', 'cinematic'];

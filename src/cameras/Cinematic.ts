@@ -1,0 +1,640 @@
+import * as THREE from 'three';
+import { ISLAND } from '../scene/Seafloor';
+
+/**
+ * A looping authored flight that shows the scene off — and sails the ship while
+ * it does it.
+ *
+ * Four decisions carry the whole thing.
+ *
+ * **The hull is driven, not moved.** Every beat emits a throttle and a rudder
+ * through the same `ShipController.setInput` the keyboard and the touch stick
+ * use. Nothing here writes the ship's transform. That is not tidiness: the hull
+ * climbing a swell, losing way in the turn and laying a wake whose wavelength
+ * follows its speed are all consequences of the solver integrating those two
+ * numbers, and a cinematic that teleported the hull along a curve would show a
+ * decal sliding over water instead of a ship sailing through it.
+ *
+ * **Every output is a closed-form function of one clock.** `update` advances a
+ * scalar and then *samples*; nothing is integrated, filtered or damped against a
+ * previous frame, and nothing reads the live hull. `resetClock(t)` therefore
+ * lands on exactly the pose and exactly the ship input that time maps to,
+ * whatever ran before it. The visual harness rewinds the clock between captures,
+ * and a rig with any per-frame memory in it — a smoothing filter, a chase lag, a
+ * "where was I last frame" — makes every screenshot depend on the order the
+ * tests happened to run in.
+ *
+ * **The loop is continuous because the curve is cyclic and C¹ in time, not
+ * because the endpoints happen to match.** Camera positions and look-at points
+ * are knots on a non-uniform cardinal spline whose knot array is treated as a
+ * ring: knot `n-1` blends into knot `0` with the same Hermite arithmetic as any
+ * other pair. Tangents are finite differences taken *per second* rather than per
+ * knot interval (see `buildTrack`), so the velocity leaving a knot equals the
+ * velocity entering it even where the two beats either side have wildly
+ * different durations. Position, look direction and speed are therefore all
+ * continuous at the wrap by construction — there is no seam to line up by hand,
+ * and no way to introduce one by editing a duration. Matching endpoints alone
+ * would give a position match and a visible *cut in the motion*, which is the
+ * exact failure this is built to avoid.
+ *
+ * **The hull's circuit closes for a different reason, and it is worth stating.**
+ * The ship is asked to hold one constant turn radius for the whole loop while
+ * its speed varies. For a constant-radius path the per-beat displacements
+ * telescope, so the circuit closes exactly whenever the heading closes — and the
+ * radius is *derived* as `totalArcLength / 2π`, which is precisely the condition
+ * that makes the heading close. Editing a duration or a throttle re-derives the
+ * radius and the circuit still closes. Author a rudder by hand instead and the
+ * ship spirals a few hundred metres further out on every lap until it is over
+ * deep water with nothing to look at.
+ *
+ * Known limitation, stated rather than hidden: the framing assumes the hull
+ * starts near the origin on an easterly heading, which is where it spawns and
+ * where it stays unless someone has been driving it in Boat mode first. The
+ * flight cannot read the live hull without giving up determinism, so a ship
+ * parked half a kilometre away will be off-centre in the beats that frame it.
+ * The shots that care are all wide enough that ±100 m of hull error keeps it in
+ * frame, and the open-loop rudder puts *any* hull into the same circuit shape
+ * around wherever it happens to be.
+ */
+
+// ---------------------------------------------------------------- hull mirrors
+
+/**
+ * Terminal speed at full ahead, m/s: `sqrt(MAX_THRUST / DRAG_LONGITUDINAL)` from
+ * `ShipController`.
+ *
+ * Mirrored rather than imported because those constants are private to the
+ * controller and this module has no business widening its API. If the hull is
+ * ever re-tuned and this is not, the circuit below simply closes at the wrong
+ * radius — the ship wanders wider or tighter than the shots expect. The camera
+ * path is authored in world space and is not affected at all, which is why a
+ * stale mirror here is a framing annoyance rather than a broken mode.
+ */
+const HULL_TOP_SPEED = 9.64;
+
+/**
+ * Steady yaw rate per unit of rudder at full rudder authority, rad/s:
+ * `RUDDER_TORQUE / YAW_DAMPING` from `ShipController`.
+ *
+ * The controller's yaw is a first-order system — rudder torque against damping
+ * proportional to yaw rate — so a held rudder settles at exactly this rate times
+ * the rudder. That is what makes a target turn radius invertible into a rudder
+ * order at all.
+ */
+const HULL_YAW_RATE_PER_RUDDER = 0.214;
+
+/**
+ * Speed, m/s, at which the rudder reaches full authority — `ShipController`'s
+ * `RUDDER_REFERENCE_SPEED`.
+ *
+ * Below it a rudder order buys proportionally less turn, because a rudder is a
+ * foil. Every beat here runs well above it, so the correction is a no-op in
+ * practice; it is applied anyway so that dropping a throttle to a crawl in some
+ * future edit does not silently open the circuit out.
+ */
+const HULL_RUDDER_REFERENCE_SPEED = 5.5;
+
+// ------------------------------------------------------------------- authoring
+
+/**
+ * How hard the spline pulls toward its finite-difference tangents.
+ *
+ * 1.0 is Catmull–Rom: the camera passes each knot at the full average speed of
+ * its neighbours, which is smooth but metronomic — a spline follower. Below 1
+ * the curve slows into each knot and accelerates out of it, which is what a
+ * camera operator settling on a mark and then moving off it actually does. It
+ * stays exactly C¹ at any value, so this is a feel control and nothing else; at
+ * 0 it would degenerate to straight lines with corners at every knot.
+ */
+const TENSION = 0.7;
+
+/**
+ * Height above the waterline that `'ship'` look targets aim at, metres.
+ *
+ * The hull is 27 m long and its origin sits at the design waterline, so aiming
+ * at y = 0 puts the ship's *feet* in the centre of frame and crops the rig. A
+ * few metres up centres the hull instead.
+ */
+const SHIP_LOOK_HEIGHT = 5;
+
+/** A key's look-at: an explicit world point, or the nominal hull at that time. */
+type LookTarget = readonly [number, number, number] | 'ship';
+
+interface Key {
+  /** Where in the beat this key lands, 0..1. The first key of a beat must be 0. */
+  at: number;
+  /** Camera position, world metres. */
+  eye: readonly [number, number, number];
+  look: LookTarget;
+}
+
+interface Beat {
+  /** Stable identifier. Surfaced by `beatName` for a HUD or a capture label. */
+  name: string;
+  /** Seconds. Also sets how much of the hull's circuit this beat covers. */
+  duration: number;
+  /**
+   * Engine order, 0..1 ahead.
+   *
+   * Constant across the beat, and deliberately stepped at the boundary rather
+   * than ramped: `ShipController` already spools the throttle over 0.7 s and the
+   * rudder over 2.2 s, so a step here *is* a telegraph order and arrives at the
+   * solver as a smooth change. Smoothing it a second time on this side would
+   * only make the hull sluggish for no visible gain.
+   */
+  throttle: number;
+  keys: readonly Key[];
+}
+
+/** World point the island beats aim at. Mirrors the landmass `Seafloor` builds. */
+const ISLAND_LOOK: readonly [number, number, number] = [ISLAND.x, 30, ISLAND.z];
+
+/**
+ * The flight.
+ *
+ * Geometry worth knowing while reading the numbers: the ship spawns at the
+ * origin heading +X; the shallow plateau runs to 320 m with the reef scattered
+ * between 26 m and 260 m over sand at about −17 m; the island sits 1.39 km away
+ * on a bearing of roughly (−0.83, −0.56). The rudder derivation below turns the
+ * hull to port throughout, which sweeps it toward −Z — the island's side of the
+ * world — so the wide beats can hold the ship and the landmass on one axis
+ * instead of having to choose.
+ *
+ * Underwater keys hold −7 to −8.5 m, which is 4.5 m of water under the lens
+ * against the *worst* plateau relief (−11.5 m, where the seafloor's noise peaks)
+ * rather than against its −17 m mean. That clearance is authored rather than
+ * enforced with a clamp
+ * against `seafloorHeight`: a clamp is a non-smooth term, and the one thing this
+ * curve must never develop is a corner — it would appear as a kick in the motion
+ * at exactly the moments the shot is closest to the ground.
+ */
+const BEATS: readonly Beat[] = [
+  {
+    // Ship at full ahead with the camera holding station off the starboard bow,
+    // letting the hull close on the lens. The wake is the subject as much as the
+    // hull is, and it needs a few seconds at speed before it is worth showing.
+    name: 'open-water',
+    duration: 16,
+    throttle: 1.0,
+    keys: [
+      { at: 0.0, eye: [180, 12, 80], look: 'ship' },
+      { at: 0.5, eye: [120, 7, 26], look: 'ship' },
+    ],
+  },
+  {
+    // Crane astern and up, then let the ship run away from the lens until it and
+    // the island line up on the same bearing. The island is 1.7 km out from the
+    // last key and subtends about 17 degrees of an 85-degree frame — a landmass
+    // on the horizon, which is the role it is dressed for, with the ship at ~320 m
+    // sitting within four degrees of the same axis in the foreground.
+    name: 'island-pass',
+    duration: 26,
+    throttle: 1.0,
+    keys: [
+      { at: 0.0, eye: [66, 22, 96], look: 'ship' },
+      { at: 0.42, eye: [330, 58, 20], look: 'ship' },
+      { at: 0.8, eye: [415, 88, -110], look: ISLAND_LOOK },
+    ],
+  },
+  {
+    // Opens still on the island wide: the curve has eased to about 11 m/s across
+    // those two keys, the calmest stretch of the surface half of the loop, which
+    // is the hold the reveal needs before the shot moves again. Then straight
+    // down to the deck at close to 40. The last key sits at 5.5 m with a 3-4 m
+    // sea running, so crests pass the lens and the submersion ramp in
+    // `CameraDirector` cross-fades through them rather than cutting.
+    name: 'waterline',
+    duration: 16,
+    throttle: 0.8,
+    keys: [
+      { at: 0.0, eye: [392, 80, -158], look: ISLAND_LOOK },
+      { at: 0.35, eye: [243, 33, -222], look: 'ship' },
+      { at: 0.72, eye: [92, 5.5, -272], look: 'ship' },
+    ],
+  },
+  {
+    // Through the surface. The entry key is still framing the hull from 66 m, so
+    // the dive starts as a shot of the ship and *becomes* a shot of the water
+    // column — going under while looking at nothing reads as a mistake.
+    name: 'descent',
+    duration: 12,
+    throttle: 0.55,
+    keys: [
+      { at: 0.0, eye: [24, 3.4, -290], look: 'ship' },
+      { at: 0.42, eye: [-36, -2.8, -300], look: [-96, -9, -310] },
+      { at: 0.62, eye: [-84, -6.2, -300], look: [-152, -10, -286] },
+    ],
+  },
+  {
+    // Along the reef, not across it: eye and look-at sit at nearly the same
+    // radius from the origin so the outcrops recede down the frame instead of
+    // passing the lens broadside. The slowest beat in the loop at 7-15 m/s,
+    // because underwater the water column itself is the thing being shown and
+    // moving fast through it destroys the parallax that makes it legible. The
+    // last key tilts up toward the surface to put the god rays in frame.
+    name: 'reef-run',
+    duration: 28,
+    throttle: 0.5,
+    keys: [
+      { at: 0.0, eye: [-130, -7.5, -232], look: [-226, -11, -104] },
+      { at: 0.32, eye: [-196, -8.5, -136], look: [-238, -12, 0] },
+      { at: 0.64, eye: [-224, -7.0, -28], look: [-206, -2.5, 118] },
+    ],
+  },
+  {
+    // Up through the surface and back around onto the opening mark, re-acquiring
+    // the hull on the way so the loop point arrives on a shot of the ship rather
+    // than on empty water. This beat exists to make the wrap *unwatchable* — the
+    // spline guarantees the motion is continuous, but continuity through a
+    // surprising composition still reads as an edit.
+    name: 'ascent',
+    duration: 22,
+    throttle: 0.85,
+    keys: [
+      { at: 0.0, eye: [-212, -7.5, 62], look: [-186, 3, 186] },
+      { at: 0.38, eye: [-155, 11, 148], look: 'ship' },
+      { at: 0.66, eye: [-10, 19, 150], look: 'ship' },
+    ],
+  },
+];
+
+// ------------------------------------------------------------ derived timeline
+
+/** Seconds for one lap of the flight and one lap of the hull's circuit. */
+export const CINEMATIC_LOOP_SECONDS = BEATS.reduce((sum, beat) => sum + beat.duration, 0);
+
+/** Absolute loop time each beat starts at. */
+const BEAT_START = (() => {
+  const starts = new Float64Array(BEATS.length);
+  let t = 0;
+  for (let i = 0; i < BEATS.length; i++) {
+    starts[i] = t;
+    t += BEATS[i].duration;
+  }
+  return starts;
+})();
+
+/**
+ * Nominal speed through the water for each beat, m/s.
+ *
+ * Terminal speed under quadratic drag goes as the square root of thrust, so a
+ * throttle of `T` settles at `HULL_TOP_SPEED * sqrt(T)`. Nominal because the
+ * real hull spends a few seconds spooling onto it and loses a little to the
+ * keel in a turn; the difference shows up as the ship sitting slightly inside
+ * its authored circuit, never as it leaving.
+ */
+const BEAT_SPEED = (() => {
+  const speeds = new Float64Array(BEATS.length);
+  for (let i = 0; i < BEATS.length; i++) {
+    speeds[i] = HULL_TOP_SPEED * Math.sqrt(Math.max(0, BEATS[i].throttle));
+  }
+  return speeds;
+})();
+
+/** Distance the hull has run by the start of each beat, metres. */
+const BEAT_START_ARC = (() => {
+  const arcs = new Float64Array(BEATS.length);
+  let s = 0;
+  for (let i = 0; i < BEATS.length; i++) {
+    arcs[i] = s;
+    s += BEAT_SPEED[i] * BEATS[i].duration;
+  }
+  return arcs;
+})();
+
+/** Total distance run in one lap, metres. */
+const TOTAL_ARC =
+  BEAT_START_ARC[BEATS.length - 1] + BEAT_SPEED[BEATS.length - 1] * BEATS[BEATS.length - 1].duration;
+
+/**
+ * Radius of the hull's circuit, metres.
+ *
+ * Not a tuning knob — it is the radius at which one lap of arc is exactly one
+ * revolution, which is the whole reason the circuit closes. At the durations and
+ * throttles above it comes out at 161.5 m, or six hull lengths: a lazy sweep
+ * rather than a hull doing donuts. The lap reaches 323 m from the origin at its
+ * far point, which puts the ship over the shallow plateau — turquoise water with
+ * the reef under it — right out to that plateau's 320 m edge and no further.
+ */
+const TRACK_RADIUS = TOTAL_ARC / (2 * Math.PI);
+
+/**
+ * Rudder order for each beat, negative for port.
+ *
+ * Inverted out of the turn the beat has to make rather than authored: holding a
+ * fixed radius while the speed changes needs the rudder to change with it, since
+ * yaw rate is `speed / radius` and the controller delivers yaw rate
+ * proportional to rudder. Port throughout, which curls the hull toward −Z and
+ * therefore toward the island's half of the world.
+ */
+const BEAT_RUDDER = (() => {
+  const rudders = new Float64Array(BEATS.length);
+  for (let i = 0; i < BEATS.length; i++) {
+    const speed = BEAT_SPEED[i];
+    const yawRate = speed / TRACK_RADIUS;
+    // A rudder is a foil: below the reference speed it delivers proportionally
+    // less moment, so the order has to be correspondingly larger.
+    const authority = Math.min(1, speed / HULL_RUDDER_REFERENCE_SPEED);
+    const order = yawRate / (HULL_YAW_RATE_PER_RUDDER * Math.max(1e-3, authority));
+    rudders[i] = -Math.min(1, order);
+  }
+  return rudders;
+})();
+
+/** Index of the beat containing `time`. `time` must already be wrapped. */
+function beatAt(time: number): number {
+  let i = BEATS.length - 1;
+  while (i > 0 && BEAT_START[i] > time) i--;
+  return i;
+}
+
+/**
+ * Where the hull is at `time` if it flies the authored orders exactly.
+ *
+ * A circle of radius `TRACK_RADIUS` centred at `(0, -R)`, entered at the origin
+ * on heading +X and traversed to port. Used only to resolve `'ship'` look
+ * targets at build time — it is never compared against the live hull, because
+ * reading the live hull is what would make a capture depend on what the physics
+ * did before it.
+ */
+function nominalShipXZ(time: number, out: THREE.Vector2): THREE.Vector2 {
+  const beat = beatAt(time);
+  const arc = BEAT_START_ARC[beat] + BEAT_SPEED[beat] * (time - BEAT_START[beat]);
+  const turned = arc / TRACK_RADIUS;
+  return out.set(TRACK_RADIUS * Math.sin(turned), -TRACK_RADIUS * (1 - Math.cos(turned)));
+}
+
+// ------------------------------------------------------------------ the spline
+
+interface Track {
+  count: number;
+  /** Absolute loop time of each knot, ascending, starting at 0. */
+  time: Float64Array;
+  /** Seconds from each knot to the next, wrapping past the last. */
+  span: Float64Array;
+  /** Knot positions, xyz interleaved. */
+  eye: Float64Array;
+  look: Float64Array;
+  /** Time derivatives at each knot, xyz interleaved, in metres per second. */
+  eyeTangent: Float64Array;
+  lookTangent: Float64Array;
+  /** Beat owning each knot, so ship input and the label are a single lookup. */
+  beat: Int32Array;
+}
+
+/**
+ * Flattens the beats into one cyclic knot ring and precomputes its tangents.
+ *
+ * The tangents are the reason the loop has no seam. A uniform Catmull–Rom takes
+ * `(P[i+1] - P[i-1]) / 2` per *knot interval*, which is only a velocity if every
+ * interval is the same length; here they run from 4.5 s to 10 s, so that form
+ * would hand the two sides of a knot different speeds and put a visible kick in
+ * the motion at every beat boundary — the wrap included, where it would read as
+ * a cut. Dividing by the two intervals' combined *duration* instead makes the
+ * tangent a genuine metres-per-second, and Hermite's endpoint conditions then
+ * guarantee the outgoing velocity at a knot equals the incoming one.
+ *
+ * Indices are taken modulo the ring, so the last knot's tangent looks forward
+ * into the first and the first looks back into the last. The wrap is not a
+ * special case anywhere in this file.
+ */
+function buildTrack(beats: readonly Beat[]): Track {
+  let count = 0;
+  for (const beat of beats) count += beat.keys.length;
+
+  const track: Track = {
+    count,
+    time: new Float64Array(count),
+    span: new Float64Array(count),
+    eye: new Float64Array(count * 3),
+    look: new Float64Array(count * 3),
+    eyeTangent: new Float64Array(count * 3),
+    lookTangent: new Float64Array(count * 3),
+    beat: new Int32Array(count),
+  };
+
+  const shipXZ = new THREE.Vector2();
+  let k = 0;
+  for (let b = 0; b < beats.length; b++) {
+    const beat = beats[b];
+    for (const key of beat.keys) {
+      const time = BEAT_START[b] + key.at * beat.duration;
+      track.time[k] = time;
+      track.beat[k] = b;
+      track.eye[k * 3] = key.eye[0];
+      track.eye[k * 3 + 1] = key.eye[1];
+      track.eye[k * 3 + 2] = key.eye[2];
+
+      if (key.look === 'ship') {
+        // Resolved here rather than per frame. The nominal hull is closed-form
+        // either way, but baking it keeps the runtime a pure spline evaluation —
+        // and mixing a live term into two of the knots would break exactly the
+        // C¹ property the rest of this function exists to establish. The cost is
+        // that the aim point follows the chord between knots rather than the
+        // hull's arc, which at ~10 s spacing on a 160 m circle is about 6 m of
+        // lead against a subject a hundred metres away.
+        nominalShipXZ(time, shipXZ);
+        track.look[k * 3] = shipXZ.x;
+        track.look[k * 3 + 1] = SHIP_LOOK_HEIGHT;
+        track.look[k * 3 + 2] = shipXZ.y;
+      } else {
+        track.look[k * 3] = key.look[0];
+        track.look[k * 3 + 1] = key.look[1];
+        track.look[k * 3 + 2] = key.look[2];
+      }
+      k++;
+    }
+  }
+
+  for (let i = 0; i < count; i++) {
+    const next = (i + 1) % count;
+    // The final span runs off the end of the lap and back onto knot 0, which is
+    // the only place the ring's closure appears as arithmetic.
+    track.span[i] = next === 0 ? CINEMATIC_LOOP_SECONDS - track.time[i] : track.time[next] - track.time[i];
+  }
+
+  for (let i = 0; i < count; i++) {
+    const previous = (i - 1 + count) % count;
+    const next = (i + 1) % count;
+    const window = track.span[previous] + track.span[i];
+    for (let c = 0; c < 3; c++) {
+      track.eyeTangent[i * 3 + c] =
+        (TENSION * (track.eye[next * 3 + c] - track.eye[previous * 3 + c])) / window;
+      track.lookTangent[i * 3 + c] =
+        (TENSION * (track.look[next * 3 + c] - track.look[previous * 3 + c])) / window;
+    }
+  }
+
+  return track;
+}
+
+const TRACK = buildTrack(BEATS);
+
+/** Cubic Hermite on one component. `span` converts the tangents out of per-second. */
+function hermite(p0: number, m0: number, p1: number, m1: number, span: number, s: number): number {
+  const s2 = s * s;
+  const s3 = s2 * s;
+  const h00 = 2 * s3 - 3 * s2 + 1;
+  const h10 = s3 - 2 * s2 + s;
+  const h01 = -2 * s3 + 3 * s2;
+  const h11 = s3 - s2;
+  return h00 * p0 + h10 * span * m0 + h01 * p1 + h11 * span * m1;
+}
+
+function sampleCurve(
+  points: Float64Array,
+  tangents: Float64Array,
+  index: number,
+  next: number,
+  span: number,
+  s: number,
+  out: THREE.Vector3,
+): void {
+  out.set(
+    hermite(points[index * 3], tangents[index * 3], points[next * 3], tangents[next * 3], span, s),
+    hermite(
+      points[index * 3 + 1],
+      tangents[index * 3 + 1],
+      points[next * 3 + 1],
+      tangents[next * 3 + 1],
+      span,
+      s,
+    ),
+    hermite(
+      points[index * 3 + 2],
+      tangents[index * 3 + 2],
+      points[next * 3 + 2],
+      tangents[next * 3 + 2],
+      span,
+      s,
+    ),
+  );
+}
+
+// -------------------------------------------------------------------- the mode
+
+/** Camera pose the flight wants this frame. */
+export interface CinematicPose {
+  position: THREE.Vector3;
+  target: THREE.Vector3;
+}
+
+/** What the flight is asking of the hull this frame. Same units as `setInput`. */
+export interface CinematicShipInput {
+  /** −1 (full astern) … 1 (full ahead). */
+  throttle: number;
+  /** −1 (hard to port) … 1 (hard to starboard). */
+  rudder: number;
+}
+
+/** Beat names and durations, in order. For a HUD, a scrubber or a capture list. */
+export const CINEMATIC_BEATS: ReadonlyArray<{ readonly name: string; readonly duration: number }> =
+  BEATS.map((beat) => ({ name: beat.name, duration: beat.duration }));
+
+export class CinematicDirector {
+  private enabled = false;
+  private clock = 0;
+
+  /**
+   * Returned by `update` rather than allocated per frame. The caller is expected
+   * to read it immediately and not retain it.
+   */
+  private readonly input: CinematicShipInput = { throttle: 0, rudder: 0 };
+
+  get isEnabled(): boolean {
+    return this.enabled;
+  }
+
+  /** Position on the loop, seconds. Always in `[0, CINEMATIC_LOOP_SECONDS)`. */
+  get time(): number {
+    return this.clock;
+  }
+
+  /** Name of the beat playing at the current clock. */
+  get beatName(): string {
+    return BEATS[beatAt(this.clock)].name;
+  }
+
+  /**
+   * Starts or stops the flight.
+   *
+   * Enabling rewinds to the opening beat. A cinematic that resumed wherever it
+   * was last left would drop the viewer into the middle of the underwater run
+   * with no idea what they were looking at; the flight is authored to open on
+   * the ship at speed, and that is the only sensible entry point. Use
+   * `resetClock` immediately after if some other time is wanted.
+   *
+   * Disabling zeroes the ship input on the spot. `ShipController.setEnabled`
+   * clears its *spooled* throttle and rudder but not the last value handed to
+   * `setInput`, so a stale order left here would be picked straight back up the
+   * next time the hull is put under manual control — a ship that starts driving
+   * itself the moment Boat mode is selected.
+   */
+  setEnabled(on: boolean): void {
+    if (this.enabled === on) return;
+    this.enabled = on;
+    this.input.throttle = 0;
+    this.input.rudder = 0;
+    if (on) this.clock = 0;
+  }
+
+  /**
+   * Jumps to `time` on the loop.
+   *
+   * The deterministic entry point: the very next `update(0, …)` reports exactly
+   * the pose and the ship order that belong to that time, with no settling and
+   * no dependence on what the flight was doing beforehand.
+   */
+  resetClock(time = 0): void {
+    this.clock = wrapTime(time);
+  }
+
+  /**
+   * Advances the clock and samples it.
+   *
+   * Advance-then-sample, so `resetClock(t)` followed by `update(0, …)` reports
+   * the pose at exactly `t` — which is the sequence a capture harness runs, and
+   * the reason the ordering is spelled out rather than left to taste.
+   *
+   * Returns the hull's orders for this frame; the caller forwards them to
+   * `ShipController.setInput`. When disabled the orders are zero and `out` is
+   * left untouched, so a caller that keeps forwarding after the mode ends
+   * releases the hull rather than freezing it under power.
+   */
+  update(dt: number, out: CinematicPose): CinematicShipInput {
+    if (!this.enabled) {
+      this.input.throttle = 0;
+      this.input.rudder = 0;
+      return this.input;
+    }
+
+    this.clock = wrapTime(this.clock + (Number.isFinite(dt) ? dt : 0));
+
+    let index = TRACK.count - 1;
+    while (index > 0 && TRACK.time[index] > this.clock) index--;
+    const next = (index + 1) % TRACK.count;
+    const span = TRACK.span[index];
+    const s = span > 0 ? Math.min(1, Math.max(0, (this.clock - TRACK.time[index]) / span)) : 0;
+
+    sampleCurve(TRACK.eye, TRACK.eyeTangent, index, next, span, s, out.position);
+    sampleCurve(TRACK.look, TRACK.lookTangent, index, next, span, s, out.target);
+
+    const beat = TRACK.beat[index];
+    this.input.throttle = BEATS[beat].throttle;
+    this.input.rudder = BEAT_RUDDER[beat];
+    return this.input;
+  }
+}
+
+/**
+ * Folds any time onto the loop.
+ *
+ * Handles negatives, because `resetClock(-2)` meaning "two seconds before the
+ * loop point" is a reasonable thing for a harness to ask and JavaScript's `%`
+ * would answer with a negative index into the knot ring.
+ */
+function wrapTime(time: number): number {
+  if (!Number.isFinite(time)) return 0;
+  const wrapped = time % CINEMATIC_LOOP_SECONDS;
+  return wrapped < 0 ? wrapped + CINEMATIC_LOOP_SECONDS : wrapped;
+}

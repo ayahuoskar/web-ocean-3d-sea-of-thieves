@@ -1,6 +1,20 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { CameraMode } from '../ui/types';
+import { CinematicDirector, type CinematicShipInput } from './Cinematic';
+
+/**
+ * Modes the director can be put into.
+ *
+ * A superset of the UI's `CameraMode`, not a replacement for it. `'cinematic'`
+ * is a camera rig that exists whether or not anything has drawn a button for it,
+ * and widening the union here rather than in `src/ui/types` means the rig and
+ * its control can land independently — while `setMode` still accepts everything
+ * the UI is already able to send, because `CameraMode` is assignable to this.
+ * When the UI grows the fourth mode the two types simply become identical and
+ * this alias can go.
+ */
+export type DirectorMode = CameraMode | 'cinematic';
 
 export interface CameraTarget {
   /** World position the boat camera chases. */
@@ -22,7 +36,7 @@ const FLY_DAMPING = 6;
 const MOUSE_SENSITIVITY = 0.0022;
 
 /**
- * Owns the camera across three modes and, critically, owns the transitions
+ * Owns the camera across four modes and, critically, owns the transitions
  * between them — cutting instantly between an orbit rig and a chase rig is the
  * single most jarring thing a demo like this can do, so every switch is a timed
  * ease from the current pose to the new one.
@@ -31,7 +45,7 @@ export class CameraDirector {
   readonly camera: THREE.PerspectiveCamera;
   readonly orbit: OrbitControls;
 
-  private mode: CameraMode = 'orbit';
+  private mode: DirectorMode = 'orbit';
   private readonly domElement: HTMLElement;
   private readonly surfaceHeight: (x: number, z: number) => number;
 
@@ -44,6 +58,22 @@ export class CameraDirector {
 
   // Chase state
   private target: CameraTarget | null = null;
+
+  // Cinematic state
+  private readonly cinematic = new CinematicDirector();
+  private readonly cinematicPose = {
+    position: new THREE.Vector3(),
+    target: new THREE.Vector3(),
+  };
+  /**
+   * The hull orders the active mode is issuing, republished every frame.
+   *
+   * Zero in every mode but Cinematic, and zeroed the instant Cinematic is left,
+   * so a caller that forwards this unconditionally into
+   * `ShipController.setInput` can never leave the hull carrying an order the
+   * viewer did not give it.
+   */
+  private readonly shipOrders: CinematicShipInput = { throttle: 0, rudder: 0 };
 
   // Transition state
   private transition = 0;
@@ -83,15 +113,40 @@ export class CameraDirector {
     document.addEventListener('mousemove', this.onMouseMove, { signal });
   }
 
-  get currentMode(): CameraMode {
+  get currentMode(): DirectorMode {
     return this.mode;
+  }
+
+  /**
+   * Throttle and rudder the active mode wants from the hero ship this frame.
+   *
+   * Forward it to `ShipController.setInput` unconditionally, every frame, in
+   * every mode — the zeroes the other three modes publish are what release the
+   * hull when Cinematic ends. Reading it only while Cinematic is active leaves
+   * the controller holding the last order the flight issued, which it will act
+   * on the moment Boat mode enables it again.
+   *
+   * Live object; do not retain it.
+   */
+  get shipInput(): Readonly<CinematicShipInput> {
+    return this.shipOrders;
+  }
+
+  /** Beat name the cinematic flight is playing, for a HUD label. */
+  get cinematicBeat(): string {
+    return this.cinematic.beatName;
+  }
+
+  /** Position on the cinematic loop in seconds. Meaningless in other modes. */
+  get cinematicTime(): number {
+    return this.cinematic.time;
   }
 
   setChaseTarget(target: CameraTarget | null): void {
     this.target = target;
   }
 
-  setMode(mode: CameraMode): void {
+  setMode(mode: DirectorMode): void {
     if (mode === this.mode) return;
 
     // Capture the current pose so the new rig can be eased into rather than cut to.
@@ -100,6 +155,13 @@ export class CameraDirector {
     this.transition = 1;
 
     if (this.mode === 'fly') this.exitPointerLock();
+    if (this.mode === 'cinematic') {
+      // Released here, not on the next update, so the orders are already zero
+      // for whatever reads them first after the switch.
+      this.cinematic.setEnabled(false);
+      this.shipOrders.throttle = 0;
+      this.shipOrders.rudder = 0;
+    }
     this.mode = mode;
 
     if (mode === 'orbit') {
@@ -116,6 +178,12 @@ export class CameraDirector {
       this.pitch = this.tmpEuler.x;
       this.flyVelocity.set(0, 0, 0);
     }
+
+    // Rewinds the flight to its opening beat. The pose it opens on is not where
+    // the camera currently is, which is exactly what the transition above is
+    // for: the ease runs from wherever the viewer left the previous rig onto the
+    // flight's first mark, so entering the mode is a move rather than a cut.
+    if (mode === 'cinematic') this.cinematic.setEnabled(true);
 
     this.orbit.enabled = mode === 'orbit';
   }
@@ -159,6 +227,14 @@ export class CameraDirector {
         // Nothing to seed: the chase pose is derived from the target each frame.
         // `snapToTarget` is the deterministic entry point for this mode.
         break;
+      case 'cinematic':
+        // Nothing to seed either, and for a stronger reason: the flight's pose
+        // is a function of its clock, and no clock reading corresponds to an
+        // arbitrary requested pose. A pin here therefore survives exactly until
+        // the next `update` re-samples the curve. `resetCinematic` is the
+        // deterministic entry point for this mode — it pins *and* moves the
+        // clock, which is the only way the two can agree.
+        break;
     }
   }
 
@@ -176,6 +252,25 @@ export class CameraDirector {
     this.camera.updateMatrixWorld(true);
   }
 
+  /**
+   * Places the camera at exactly the pose the cinematic flight holds at `time`,
+   * with no transition and no damping, and leaves its clock there.
+   *
+   * The counterpart to `snapToTarget` for this mode, and the reason the flight
+   * carries no per-frame state: a capture taken after this call depends on
+   * `time` and on nothing else — not on how many frames the mode has run, not on
+   * what the previous capture did.
+   */
+  resetCinematic(time = 0): void {
+    if (this.mode !== 'cinematic') return;
+    this.transition = 0;
+    this.cinematic.resetClock(time);
+    this.updateCinematic(0);
+    this.camera.position.copy(this.desiredPosition);
+    this.camera.quaternion.copy(this.desiredQuaternion);
+    this.camera.updateMatrixWorld(true);
+  }
+
   update(dt: number): void {
     switch (this.mode) {
       case 'orbit':
@@ -186,6 +281,9 @@ export class CameraDirector {
         break;
       case 'boat':
         this.updateChase(dt);
+        break;
+      case 'cinematic':
+        this.updateCinematic(dt);
         break;
     }
 
@@ -263,6 +361,35 @@ export class CameraDirector {
   }
 
   /**
+   * Samples the authored flight and republishes its hull orders.
+   *
+   * Note what is *not* here: no damping toward the sampled pose. Every other rig
+   * in this class lags its target, because every other rig is following
+   * something it does not control — a mouse, a key, a hull in a seaway. The
+   * flight already contains its own easing, in the shape of the curve, and a lag
+   * filter on top would be a second-order term with memory: the pose after a
+   * `resetCinematic` would then depend on where the camera happened to be
+   * standing beforehand, which is precisely the determinism the mode is built
+   * around.
+   */
+  private updateCinematic(dt: number): void {
+    const orders = this.cinematic.update(dt, this.cinematicPose);
+    this.shipOrders.throttle = orders.throttle;
+    this.shipOrders.rudder = orders.rudder;
+
+    this.desiredPosition.copy(this.cinematicPose.position);
+    this.tmpQuat.setFromRotationMatrix(
+      lookAtMatrix(this.cinematicPose.position, this.cinematicPose.target, UP),
+    );
+    this.desiredQuaternion.copy(this.tmpQuat);
+
+    if (this.transition === 0) {
+      this.camera.position.copy(this.desiredPosition);
+      this.camera.quaternion.copy(this.desiredQuaternion);
+    }
+  }
+
+  /**
    * How submerged the camera is, 0..1, with a soft band around the surface.
    *
    * This ramp is the *only* thing standing between the camera and a hard cut at
@@ -291,6 +418,12 @@ export class CameraDirector {
     this.abort.abort();
     this.orbit.dispose();
     this.exitPointerLock();
+    // Zeroes the published orders on the way out, for the same reason leaving
+    // the mode does: a disposed director must not be the last thing that told
+    // the hull to open its throttle.
+    this.cinematic.setEnabled(false);
+    this.shipOrders.throttle = 0;
+    this.shipOrders.rudder = 0;
   }
 
   // ------------------------------------------------------------------ input
