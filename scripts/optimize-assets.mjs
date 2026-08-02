@@ -61,11 +61,27 @@ const ASSETS = [
   // all and the error bound stops the pass long before the ratio is reached.
   // Asking for 5% and getting 12% is the simplifier refusing to shred the
   // silhouette, which is the behaviour we want.
-  { slug: 'island_tree_01', ratio: 0.05, error: 0.02, texture: 512 },
+  // The error bound, not the ratio, is what actually moves a tree. At 0.02 the
+  // simplifier refuses almost every collapse — the canopy is thousands of
+  // separate leaf cards with no shared edges — and `jacaranda_tree` came out at
+  // 16 MB for one background tree, two thirds of the entire shipped payload.
+  // 0.06 lets whole leaf clusters merge. It is a visible trade at arm's length
+  // and invisible at the forty metres these are actually seen from.
+  { slug: 'island_tree_01', ratio: 0.022, error: 0.06, texture: 512 },
   { slug: 'pachira_aquatica_01', ratio: 0.15, error: 0.012, texture: 512 },
+  { slug: 'island_tree_02', ratio: 0.03, error: 0.06, texture: 512 },
+  { slug: 'island_tree_03', ratio: 0.017, error: 0.06, texture: 512 },
+  { slug: 'jacaranda_tree', ratio: 0.008, error: 0.08, texture: 512 },
   { slug: 'fern_02', ratio: 0.35, error: 0.01, texture: 512 },
   { slug: 'shrub_sorrel_01', ratio: 0.35, error: 0.01, texture: 512 },
   { slug: 'grass_bermuda_01', ratio: 0.4, error: 0.01, texture: 512 },
+
+  // Coastline edges carry the shoreline's silhouette, so they keep a little more
+  // than the rock masses do — a decimated edge reads as a bitten one.
+  { slug: 'coast_line_01', ratio: 0.08, error: 0.01, texture: 1024 },
+  { slug: 'coast_line_02', ratio: 0.08, error: 0.01, texture: 1024 },
+  { slug: 'coast_land_rocks_03', ratio: 0.06, error: 0.012, texture: 1024 },
+  { slug: 'coastal_cliff_04', ratio: 0.06, error: 0.012, texture: 1024 },
 
   { slug: 'coast_rocks_01', ratio: 0.06, error: 0.012, texture: 1024 },
   { slug: 'coast_rocks_03', ratio: 0.06, error: 0.012, texture: 1024 },
@@ -84,6 +100,14 @@ const ASSETS = [
   { slug: 'wooden_barrels_01', ratio: 0.3, error: 0.008, texture: 512 },
   { slug: 'wooden_lantern_01', ratio: 0.35, error: 0.006, texture: 512 },
   { slug: 'wooden_crate_02', ratio: 0.3, error: 0.008, texture: 512 },
+
+  // Pirate remains. Held to a tighter error than the rocks: these are handled
+  // objects seen from a couple of metres, where a collapsed hilt or a faceted
+  // jug is the thing the eye lands on.
+  { slug: 'antique_estoc', ratio: 0.2, error: 0.004, texture: 512 },
+  { slug: 'jug_01', ratio: 0.25, error: 0.005, texture: 512 },
+  { slug: 'wooden_bucket_01', ratio: 0.3, error: 0.006, texture: 512 },
+  { slug: 'modular_fort_01', ratio: 0.15, error: 0.01, texture: 1024 },
 
   { slug: 'treasure_chest', ratio: 0.3, error: 0.006, texture: 1024 },
   { slug: 'wooden_crate_01', ratio: 0.3, error: 0.008, texture: 512 },

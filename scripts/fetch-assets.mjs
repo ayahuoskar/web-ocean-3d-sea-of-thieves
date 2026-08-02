@@ -79,6 +79,16 @@ const MANIFEST = [
   //
   // 1k throughout. These are background geometry seen from tens of metres away;
   // the ship is the only thing that earns 2k.
+  // Coastline. `coast_line_01/02` are the pieces that make a shore read as a
+  // shore rather than as a hill meeting water: they are authored as *edges*,
+  // with a wave-cut platform and a back slope, so they sit along a contour
+  // instead of being another rock standing on one.
+  { kind: 'model', slug: 'coast_line_01', res: '1k', dir: 'models/coast_line_01', note: 'Shoreline edge' },
+  { kind: 'model', slug: 'coast_line_02', res: '1k', dir: 'models/coast_line_02', note: 'Shoreline edge' },
+  { kind: 'model', slug: 'coast_land_rocks_03', res: '1k', dir: 'models/coast_land_rocks_03', note: 'Shore rock mass' },
+  // A second cliff form, because six copies of one silhouette standing in a row
+  // is what made the island's back read as a stage flat.
+  { kind: 'model', slug: 'coastal_cliff_04', res: '1k', dir: 'models/coastal_cliff_04', note: 'Island cliff face' },
   { kind: 'model', slug: 'coast_rocks_01', res: '1k', dir: 'models/coast_rocks_01', note: 'Shore rock cluster' },
   { kind: 'model', slug: 'coast_rocks_03', res: '1k', dir: 'models/coast_rocks_03', note: 'Shore rock cluster' },
   { kind: 'model', slug: 'coastal_cliff_02', res: '1k', dir: 'models/coastal_cliff_02', note: 'Island cliff face' },
@@ -99,6 +109,14 @@ const MANIFEST = [
   // from the same cove collection.
   { kind: 'model', slug: 'anthurium_botany_01', res: '1k', dir: 'models/anthurium_botany_01', note: 'Tropical broadleaf' },
   { kind: 'model', slug: 'calathea_orbifolia_01', res: '1k', dir: 'models/calathea_orbifolia_01', note: 'Tropical broadleaf' },
+  // Three more canopy forms. Nine copies of one tree is not a wood, however
+  // many of them there are — the eye finds the repeat long before it runs out
+  // of trees, and a grove needs different silhouettes more than it needs more
+  // instances. `jacaranda` is the broadest crown Poly Haven publishes, which is
+  // what a tropical canopy is mostly made of.
+  { kind: 'model', slug: 'island_tree_02', res: '1k', dir: 'models/island_tree_02', note: 'Island tree' },
+  { kind: 'model', slug: 'island_tree_03', res: '1k', dir: 'models/island_tree_03', note: 'Island tree' },
+  { kind: 'model', slug: 'jacaranda_tree', res: '1k', dir: 'models/jacaranda_tree', note: 'Broad canopy tree' },
 
   // ---- Pirate cove ---------------------------------------------------------
   //
@@ -111,6 +129,18 @@ const MANIFEST = [
   { kind: 'model', slug: 'wooden_barrels_01', res: '1k', dir: 'models/wooden_barrels_01', note: 'Barrel stack' },
   { kind: 'model', slug: 'wooden_lantern_01', res: '1k', dir: 'models/wooden_lantern_01', note: 'Lantern on the pier' },
   { kind: 'model', slug: 'wooden_crate_02', res: '1k', dir: 'models/wooden_crate_02', note: 'Cargo crate' },
+
+  // ---- Pirate remains ------------------------------------------------------
+  //
+  // A wreck site tells a story or it is litter, and the story needs objects a
+  // person left behind rather than objects that washed up. Poly Haven has no
+  // skeleton — that one is built procedurally, see `src/scene/Remains.ts`.
+  { kind: 'model', slug: 'antique_estoc', res: '1k', dir: 'models/antique_estoc', note: 'Sword, half-buried' },
+  { kind: 'model', slug: 'jug_01', res: '1k', dir: 'models/jug_01', note: 'Bottle / jug' },
+  { kind: 'model', slug: 'wooden_bucket_01', res: '1k', dir: 'models/wooden_bucket_01', note: 'Bucket' },
+  // A ruin gives the island a landmark and a reason for the cannon to be where
+  // it is. Modular in the source; one section is enough.
+  { kind: 'model', slug: 'modular_fort_01', res: '1k', dir: 'models/modular_fort_01', note: 'Ruined shore fort' },
 
   // ---- Underwater find ----------------------------------------------------
   { kind: 'model', slug: 'treasure_chest', res: '1k', dir: 'models/treasure_chest', note: 'Sunken treasure chest' },

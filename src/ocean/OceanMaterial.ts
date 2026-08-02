@@ -217,6 +217,54 @@ const SPECULAR_AA_SCREEN_SPACE_VARIANCE = 0.5;
  */
 const SPECULAR_AA_VARIANCE_CEIL = 0.004;
 
+/**
+ * Water thickness a backlit crest and a wave body present to the sun, metres.
+ *
+ * The crest figure is the one that matters. A wave tip is a thin sheet — light
+ * crosses it in centimetres, so almost everything survives and the water glows
+ * jade. `THICK_BODY_METRES` is what the face below it presents, far enough that
+ * red is gone and most of the green with it, which is what makes the glow stop
+ * at the crest instead of washing the whole wave.
+ *
+ * Both are relative to the local sea state rather than absolute, because a 0.4 m
+ * chop and a 6 m swell do not have the same crest. See `uWaveScale`.
+ */
+const THIN_CREST_METRES = 0.22;
+const THICK_BODY_METRES = 4.2;
+
+/**
+ * Henyey–Greenstein asymmetry for scattering in sea water.
+ *
+ * Measured values for ocean water are famously forward-peaked — the Petzold
+ * volume-scattering measurements give an average cosine around 0.9 for the
+ * particulate component. 0.72 is deliberately below that: the honest figure puts
+ * almost all the energy inside a few degrees of the sun, which on a surface this
+ * broken produces a glow that snaps on and off as the crest orientation crosses
+ * the lobe. Widening it trades a little physics for a term that survives the
+ * wave field it is being evaluated on.
+ */
+const SCATTER_ANISOTROPY = 0.72;
+
+/**
+ * Peak value of that phase function, which the term is divided by.
+ *
+ * `(1 - g^2) / (4pi (1 - g)^3)` = 1.746 at g = 0.72. Normalising by it keeps the
+ * lobe peaking at one, which is what the presets' authored `scatterStrength`
+ * values were tuned against when the term was a clamped dot product. Without it
+ * every preset would have needed retuning to say the same thing.
+ */
+const SCATTER_NORMALISE = 1 / 1.746;
+
+/**
+ * Wrap on the away-from-sun term.
+ *
+ * The shading normal at a crest is close to horizontal, so a hard `dot > 0` puts
+ * the on/off boundary exactly where the normal is noisiest and the glow crawls
+ * along the crest line as ripples cross it. Wrapping moves the boundary off the
+ * horizon and softens it.
+ */
+const SCATTER_WRAP = 0.45;
+
 export class OceanMaterial {
   readonly material: THREE.MeshBasicNodeMaterial;
 
@@ -261,6 +309,8 @@ export class OceanMaterial {
    * authored body colour — are scaled by this so they go out after dark.
    */
   private readonly uLightLevel = uniform(1);
+  /** Significant wave height, metres. Sets the scale a crest is measured against. */
+  private readonly uWaveScale = uniform(3.5);
   private readonly uSkyColor = uniform(new THREE.Color(0x5793d0));
   private readonly uHorizonColor = uniform(new THREE.Color(0xbdd6ec));
   private readonly uFogColor = uniform(new THREE.Color(0xb9d2e8));
@@ -414,6 +464,13 @@ export class OceanMaterial {
     const upwind = 0.00316 * Math.max(0, speed);
     const crosswind = 0.003 + 0.00192 * Math.max(0, speed);
     this.uSlopeAnisotropy.value = Math.min(4, Math.max(1, upwind / Math.max(1e-4, crosswind)));
+
+    // Significant wave height for a fully developed sea, Pierson–Moskowitz:
+    // Hs = 0.0246 U^2. It is what tells the scattering term where a crest *is* —
+    // the term reads a wave's height as a fraction of the sea state, so with a
+    // fixed scale a calm day would have no crests to glow and a gale would have
+    // nothing but. The floor keeps a glassy preset from dividing by nearly zero.
+    this.uWaveScale.value = Math.max(0.35, 0.0246 * Math.max(0, speed) ** 2);
   }
 
   setDisplacementScale(value: number): void {
@@ -847,19 +904,87 @@ export class OceanMaterial {
       ).toVar();
 
       // --- subsurface scattering ---------------------------------------------
-      // Crests transmit light when the sun is behind them.
+      //
+      // Light that entered the back of a wave, travelled through it, and came
+      // out toward the eye. Three things decide how much arrives, and until this
+      // rewrite the term used none of them: it was an authored colour times a
+      // backlight lobe times the wave's absolute height, which is a tint that
+      // happens to appear on tall water. The extinction coefficient, the path
+      // length and the absorption were all computed a dozen lines above it for
+      // the transmission term and none of them were consulted.
+      //
+      // **How far the light travelled.** A backlit crest glows because the water
+      // there is *thin* — the tip is centimetres of water between the sun and
+      // the eye, while the body of the wave below it is metres. That is the
+      // opposite of what the old `worldPos.y` ramp said, which brightened the
+      // term as the water got taller. Thickness is estimated from the wave's own
+      // height relative to the sea state: at the crest it approaches
+      // `THIN_CREST_METRES`, and it grows toward `THICK_BODY_METRES` down the
+      // face. Normalising by the sea state matters — a 0.4 m chop and a 6 m swell
+      // have different crests, and a fixed metre scale makes one of them wrong.
+      const seaScale = this.uWaveScale.max(0.35).toVar();
+      const heightAboveMean = worldPos.y.div(seaScale).clamp(0, 1).toVar();
+      const thickness = mix(
+        float(THICK_BODY_METRES),
+        float(THIN_CREST_METRES),
+        heightAboveMean,
+      ).toVar();
+
+      // **What the medium did to it on the way.** Beer–Lambert through that
+      // thickness, with the *same* per-channel extinction the transmission term
+      // uses. This is where the colour comes from now, and it is why the term no
+      // longer needs an authored hue to look like water: red is extinguished in
+      // the first metre and blue-green survives, so a thin crest comes out the
+      // jade of real backlit water and a thick one goes blue and dies. The
+      // authored `scatterColor` stays, demoted to what it physically is — the
+      // scattering albedo of the body, which is where turbidity and chlorophyll
+      // legitimately live.
+      const transmitted: any = this.uExtinction.mul(thickness).negate().exp().toVar();
+
+      // **Which way it went.** Water scatters strongly forward, so the lobe
+      // should be sharp and centred on the sun's own direction rather than the
+      // cube of a clamped dot, which is a stand-in with no particular shape.
+      // Henyey–Greenstein at g = 0.72 is the standard cheap phase function and
+      // gives a much tighter forward peak with a real tail off-axis; the tail is
+      // what stops the effect switching off the moment the sun leaves the
+      // frame's back half.
       const sunDir = normalize(this.uSunDirection).toVar();
-      const back = viewDir.negate().dot(sunDir).clamp(0, 1).toVar();
-      const backlight = back.mul(back).mul(back).toVar();
-      const crest = worldPos.y.mul(0.28).clamp(0, 1).toVar();
+      const cosTheta = viewDir.negate().dot(sunDir).toVar();
+      const g = float(SCATTER_ANISOTROPY);
+      const gg = g.mul(g).toVar();
+      const denom = gg.add(1).sub(cosTheta.mul(g).mul(2)).max(1e-4).toVar();
+      const phase = gg
+        .oneMinus()
+        .div(denom.mul(denom.sqrt()).mul(4 * Math.PI))
+        .toVar();
+
+      // The surface still has to be facing away from the sun for light to enter
+      // its far side. A wrapped term rather than a hard `dot > 0`, because the
+      // shading normal at a crest is close to horizontal and a hard cutoff makes
+      // the glow flicker along the crest line as the normal crosses it.
+      const awayFromSun = n
+        .dot(sunDir)
+        .negate()
+        .add(SCATTER_WRAP)
+        .div(1 + SCATTER_WRAP)
+        .clamp(0, 1)
+        .toVar();
+
       // Scaled by how much light there actually is.
       //
       // Subsurface scattering is transmitted *sunlight*: it cannot be brighter
-      // than what is illuminating the water. The scatter colour is authored, so
-      // without this it kept its full daytime value after dark, and the water
-      // around the submerged hull glowed green at half past nine at night.
-      const scatter = this.uScatterColor
-        .mul(backlight.mul(crest).mul(this.uScatterStrength).mul(this.uLightLevel))
+      // than what is illuminating the water. Without this the term kept its full
+      // daytime value after dark, and the water around the submerged hull glowed
+      // green at half past nine at night.
+      const scatter: any = (this.uScatterColor as any)
+        .mul(transmitted)
+        .mul(
+          phase
+            .mul(awayFromSun)
+            .mul(this.uScatterStrength)
+            .mul(this.uLightLevel)
+            .mul(SCATTER_NORMALISE),
+        )
         .toVar();
 
       // --- reflection ----------------------------------------------------------

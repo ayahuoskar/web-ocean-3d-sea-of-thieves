@@ -251,6 +251,11 @@ export class Atmosphere {
   /** Set once `setShadowMapSize` has written the shadow's configuration. */
   private shadowConfigured = false;
 
+  /** Half-width of the shadow camera's box, metres. See `setShadowFocus`. */
+  private readonly shadowExtent = 260;
+  /** Centre of the shadowed region, snapped to texels. See `setShadowFocus`. */
+  private readonly shadowFocus = new THREE.Vector3();
+
   private readonly uOvercastTint: any = uniform(new THREE.Color(0.92, 0.96, 1.04));
   /** Multiplier applied to the flattened sky. Overcast is darker than clear. */
   /**
@@ -325,10 +330,10 @@ export class Atmosphere {
     this.sunLight.shadow.mapSize.set(2048, 2048);
     this.sunLight.shadow.camera.near = 1;
     this.sunLight.shadow.camera.far = SUN_LIGHT_DISTANCE * 2;
-    this.sunLight.shadow.camera.left = -260;
-    this.sunLight.shadow.camera.right = 260;
-    this.sunLight.shadow.camera.top = 260;
-    this.sunLight.shadow.camera.bottom = -260;
+    this.sunLight.shadow.camera.left = -this.shadowExtent;
+    this.sunLight.shadow.camera.right = this.shadowExtent;
+    this.sunLight.shadow.camera.top = this.shadowExtent;
+    this.sunLight.shadow.camera.bottom = -this.shadowExtent;
     this.sunLight.shadow.bias = -0.0006;
     this.sunLight.shadow.normalBias = 0.6;
 
@@ -385,6 +390,33 @@ export class Atmosphere {
   /** Current sun shadow map resolution per side. */
   get shadowMapSize(): number {
     return this.sunLight.shadow.mapSize.x;
+  }
+
+  /**
+   * Moves the shadowed region to follow the viewer.
+   *
+   * The shadow camera is a +/-260 m box, and it used to be anchored at the world
+   * origin because `DirectionalLight.target` defaults to an object there and
+   * nothing ever moved it. Everything more than 260 m from the origin was
+   * therefore outside it — including the entire island, 1.4 km away, which is
+   * why every prop on it had its shadow flags cleared. Those flags were correct
+   * given the box; the box was the problem.
+   *
+   * Following the camera keeps the same resolution over the same area and simply
+   * puts it where someone is looking. The cost is that shadows exist only within
+   * 260 m of the viewer, which is what was already true near the origin.
+   *
+   * Snapped to whole shadow texels. Without that the box slides continuously and
+   * every shadow edge crawls and fizzes as the camera moves, because each frame
+   * rasterises the depth map against a slightly different sub-texel grid — the
+   * artefact is far more distracting than the softer edge snapping costs. The
+   * snap is done on world XZ rather than in light space, which is exact when the
+   * sun is overhead and approximate as it descends; the residual at a low sun is
+   * a fraction of a texel and does not read.
+   */
+  setShadowFocus(x: number, z: number): void {
+    const texel = (this.shadowExtent * 2) / Math.max(1, this.sunLight.shadow.mapSize.x);
+    this.shadowFocus.set(Math.round(x / texel) * texel, 0, Math.round(z / texel) * texel);
   }
 
   get sunDirection(): THREE.Vector3 {
@@ -624,7 +656,10 @@ export class Atmosphere {
     const overcastAmount = Math.min(1, Math.max(0, p.overcast ?? 0));
 
     if (sunUp > 0.001) {
-      this.sunLight.position.copy(this._sunDirection).multiplyScalar(SUN_LIGHT_DISTANCE);
+      this.sunLight.position
+        .copy(this._sunDirection)
+        .multiplyScalar(SUN_LIGHT_DISTANCE)
+        .add(this.shadowFocus);
       this.sunLight.color.copy(this._sunColor);
       // Cloud attenuates the key light, and it was not doing so at all.
       //
@@ -640,10 +675,19 @@ export class Atmosphere {
       // the same light is retargeted rather than adding a second one. The switch
       // happens where the sun's contribution is already zero.
       const moonUp = smoothstepScalar(-0.02, 0.15, this._moonDirection.y);
-      this.sunLight.position.copy(this._moonDirection).multiplyScalar(SUN_LIGHT_DISTANCE);
+      this.sunLight.position
+        .copy(this._moonDirection)
+        .multiplyScalar(SUN_LIGHT_DISTANCE)
+        .add(this.shadowFocus);
       this.sunLight.color.copy(MOON_LIGHT_COLOR);
       this.sunLight.intensity = 0.42 * moonUp * this.nightAmount;
     }
+
+    // The target is what the shadow box is centred on, and it has to be told
+    // where that is: three reads `target.matrixWorld`, and the target is not in
+    // the scene graph, so nothing else would update it.
+    this.sunLight.target.position.copy(this.shadowFocus);
+    this.sunLight.target.updateMatrixWorld();
 
     const day = smoothstepScalar(-0.12, 0.22, this._sunDirection.y);
     const night = this.nightAmount;

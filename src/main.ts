@@ -1167,6 +1167,10 @@ class App {
   private update = (dt: number, elapsed: number): void => {
     this.director.update(dt);
 
+    // Before `update`, which is what reads it to place the light and its target.
+    // The shadowed region follows the viewer rather than sitting on the origin,
+    // so the island 1.4 km out gets the same shadows the ship does.
+    this.atmosphere.setShadowFocus(this.camera.position.x, this.camera.position.z);
     this.atmosphere.update(dt);
     this.clouds.setSunDirection(this.atmosphere.sunDirection);
 
