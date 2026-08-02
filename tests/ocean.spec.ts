@@ -1085,6 +1085,10 @@ test.describe('interaction', () => {
    * because `setInput` is a latch that disabling the controller does not clear.
    */
   test('cinematic mode sails the ship and releases it cleanly', async ({ page }) => {
+    // Deterministic stepping is synchronous with the GPU, so this test's cost is
+    // set by how loaded the machine is rather than by how much it does. It runs
+    // in 35 s alone and timed out at four minutes inside the full suite.
+    test.setTimeout(600_000);
     const errors = collectConsoleErrors(page);
     await page.goto('/');
     await waitForOcean(page);
@@ -1101,7 +1105,7 @@ test.describe('interaction', () => {
     expect(early.orders.throttle, 'the flight is not calling for any power').toBeGreaterThan(0.1);
 
     // Long enough to be well clear of the first beat and unambiguously under way.
-    await page.evaluate(() => window.__ocean.step(1 / 60, 600));
+    await page.evaluate(() => window.__ocean.step(1 / 60, 420));
     const later = await page.evaluate(() => ({
       beat: window.__ocean.director.cinematicBeat,
       ship: window.__ocean.shipState(),
@@ -1142,7 +1146,10 @@ test.describe('interaction', () => {
     await setState(page, { cameraMode: 'cinematic' });
     await page.evaluate(() => window.__ocean.resetDeterministic(0, 30));
     await page.keyboard.down('s');
-    await page.evaluate(() => window.__ocean.step(1 / 60, 120));
+    // 90 steps is 1.5 s, and the throttle spools at 0.7 per second — long enough
+    // for a working S key to have driven it hard astern, which is the thing this
+    // has to be able to see.
+    await page.evaluate(() => window.__ocean.step(1 / 60, 90));
     const underKey = await page.evaluate(() => window.__ocean.shipState());
     await page.keyboard.up('s');
     expect(
