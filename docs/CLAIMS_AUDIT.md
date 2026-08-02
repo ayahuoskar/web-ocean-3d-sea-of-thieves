@@ -228,7 +228,10 @@ offset rather than a solved ray, clouds still a procedural slab, foam still
 reading as ribboning rather than multiscale bubbles.
 
 Also from this pass: a validation error that had been hiding behind four
-successive "fixes". Toggling `renderer.shadowMap.enabled`, calling
+successive "fixes", and which took two more attempts after this section was first
+written — the drain requested its GPU fence before joining the frame already
+inside `renderAsync`, and `setState({ quality, preset })` submitted an environment
+capture between the fence being requested and it resolving. Toggling `renderer.shadowMap.enabled`, calling
 `shadow.dispose()`, toggling `castShadow`, and resizing the mipmapped reflector
 each *triggered* it, and each fix removed one trigger and revealed the next. The
 cause was none of them: a tier change destroys GPU resources that a submitted

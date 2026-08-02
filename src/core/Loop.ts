@@ -20,6 +20,16 @@ export class Loop {
   private elapsed = 0;
   private handle = 0;
   private inFlight = false;
+  /**
+   * The frame currently inside `renderFn`, so a caller can join it.
+   *
+   * `inFlight` on its own is a flag with no join operation: pausing the loop
+   * stops *new* frames but says nothing about the one already awaiting its
+   * render. Anything that then destroys a GPU resource — a quality change — can
+   * do so while that frame's command buffer still references it, which WebGPU
+   * reports as "Destroyed texture used in a submit". `settle()` is the join.
+   */
+  private inFlightPromise: Promise<void> | null = null;
 
   readonly stats: FrameStats = { fps: 0, frameMs: 0 };
 
@@ -59,6 +69,19 @@ export class Loop {
    */
   get elapsedTime(): number {
     return this.elapsed;
+  }
+
+  /**
+   * Resolves once no frame is inside `renderFn`.
+   *
+   * Pair with `setPaused(true)`: pause first so no *new* frame starts, then
+   * settle so the one already running has finished. Doing it the other way round
+   * leaves a window in which a fresh frame begins between the two calls.
+   */
+  async settle(): Promise<void> {
+    while (this.inFlightPromise !== null) {
+      await this.inFlightPromise;
+    }
   }
 
   get isPaused(): boolean {
@@ -125,10 +148,16 @@ export class Loop {
 
     this.inFlight = true;
     const started = performance.now();
+    const render = this.renderFn(dt, this.elapsed);
+    this.inFlightPromise = Promise.resolve(render).then(
+      () => undefined,
+      () => undefined,
+    );
     try {
-      await this.renderFn(dt, this.elapsed);
+      await render;
     } finally {
       this.inFlight = false;
+      this.inFlightPromise = null;
       this.stats.frameMs = performance.now() - started;
       const instantaneous = rawDelta > 0 ? 1 / rawDelta : 0;
       this.stats.fps =

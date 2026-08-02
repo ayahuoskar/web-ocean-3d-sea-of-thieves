@@ -666,7 +666,8 @@ class App {
     this.sampler.rebuild();
 
     // The wave textures are recreated by `resize`, so the material's bindings are
-    // stale — re-point them.
+    // stale — re-point them. The reflection target is *not* recreated: its
+    // resolution is written once at startup, see `Reflections.setQuality`.
     //
     // Rebuilding the material instead, as this used to, was wrong in three ways.
     // Every input had to be re-supplied and one silently was not, which is how
@@ -907,25 +908,19 @@ class App {
   }
 
   /**
-   * Coalesces tier changes to at most one per frame.
+   * Coalesces tier changes and applies them with nothing in flight.
    *
-   * A tier change disposes and recreates the FFT targets, the ocean geometry, the
-   * particle field and the reflection target, and three rebuilds the affected
-   * node graphs *asynchronously*. Two changes landing in the same tick therefore
-   * start a second teardown while the first rebuild is still pending, and what
-   * came out of that was a shadow node left holding a null render target — which
-   * the planar reflector, rendering the whole scene from its own `updateBefore`,
-   * then read `depthTexture` from.
+   * A tier change disposes and recreates the FFT targets, the ocean geometry and
+   * the particle field. Destroying any of those while a submitted command buffer
+   * still references them is a use-after-free, which WebGPU states plainly:
+   * "Destroyed texture used in a submit". Three earlier attempts each removed one
+   * *trigger* — the renderer's shadow flag, `shadow.dispose()`, `castShadow` —
+   * and the next appeared, because none of them addressed the lifetime.
    *
-   * It reproduced only when transitions were back to back: with 400 ms between
-   * them it never fired, which is what identified it as a race rather than an
-   * ordering bug. Three earlier fixes each removed one *trigger* — the renderer
-   * flag, `shadow.dispose()`, `castShadow` — and the next appeared, because none
-   * of them addressed the overlap.
-   *
-   * Deferring to the frame boundary also happens to be what a UI wants: dragging
-   * a quality selector across five tiers should rebuild the world once, not five
-   * times.
+   * Requests coalesce into one drain. Note that the drain applies *every* pending
+   * request in turn rather than one per frame: dragging a quality selector across
+   * five tiers with the loop paused would otherwise take five frames that are not
+   * being rendered anyway.
    */
   private requestQuality(tier: QualityTier): Promise<void> {
     this.pendingQuality = tier;
@@ -955,6 +950,12 @@ class App {
   private async drainQualityRequests(): Promise<void> {
     const wasPaused = this.loop.isPaused;
     this.loop.setPaused(true);
+    // Pause *then* settle, in that order. Pausing stops new frames; settling
+    // joins the one already inside `renderAsync`. Requesting the queue fence
+    // without settling first registers it before that frame has even submitted,
+    // so the fence resolves against an empty queue and the teardown lands on a
+    // command buffer that is still being built.
+    await this.loop.settle();
     try {
       while (this.pendingQuality !== null && !this.disposed) {
         const tier = this.pendingQuality;
@@ -1305,15 +1306,25 @@ class App {
          * `renderer.info` straight after would otherwise be reading the tier it
          * had just left.
          */
-        setState: (partial: Partial<UiState>) => {
-          let settled: Promise<void> | null = null;
+        setState: async (partial: Partial<UiState>) => {
+          // Quality first, and awaited before anything else runs.
+          //
+          // A tier change pauses the loop and waits on a GPU fence. Applying the
+          // remaining keys synchronously on top of that is not safe: `preset`
+          // re-captures the environment cube, which is a whole scene render
+          // submitted *after* the fence was requested and before it resolved.
+          // `{ quality, preset }` in one call is exactly what the visual harness
+          // sends, so this was reachable on every shot.
+          if (partial.quality !== undefined) {
+            (this.state as unknown as Record<string, unknown>).quality = partial.quality;
+            await this.onStateChange('quality');
+          }
           for (const [key, value] of Object.entries(partial)) {
+            if (key === 'quality') continue;
             (this.state as unknown as Record<string, unknown>)[key] = value;
-            const result = this.onStateChange(key as keyof UiState);
-            if (result) settled = result;
+            this.onStateChange(key as keyof UiState);
           }
           this.panel.setState(partial);
-          return settled ?? Promise.resolve();
         },
         /**
          * Places the camera exactly, for reproducible screenshots.

@@ -246,8 +246,8 @@ Bugs found by measuring rather than looking, none of them visible to typecheck:
 
 ## Performance
 
-Frame work measures **1.00 / 3.13 / 6.49 ms** GPU p50 at Low / High / Max on WebGPU at
-1600 × 900 DPR 1, against a 16.7 ms budget. WebGL2 Low measures **2.58 ms** against 33.3 ms.
+Frame work measures **0.49 / 3.09 / 6.52 ms** GPU p50 at Low / High / Max on WebGPU at
+1600 × 900 DPR 1, against a 16.7 ms budget. WebGL2 Low measures **2.06 ms** against 33.3 ms.
 All seven benchmarked configurations pass, with no console errors during the sample.
 
 **Read that with care.** Automated Chromium throttles `requestAnimationFrame` independently

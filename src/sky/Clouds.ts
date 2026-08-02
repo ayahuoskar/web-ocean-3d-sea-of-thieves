@@ -348,9 +348,13 @@ export class Clouds {
       // and deepen toward evening. Using the vertical thickness made a shadow at
       // 20 degrees elevation as light as one at noon.
       //
-      // Capped at four slab thicknesses, matching the floor on `sun.y` above:
-      // past that the plane-parallel approximation stops describing anything, and
-      // the honest behaviour is to stop deepening rather than to run away.
+      // Capped at four slab thicknesses by the same 0.25 floor on `sun.y` that
+      // bounds the walk. Note what that floor costs below 14 degrees of sun
+      // elevation: the sample point stops reaching the slab's midpoint, so the
+      // density it returns is whatever is at the capped distance — which can be
+      // *outside* the layer entirely, and the shadow then vanishes rather than
+      // merely stopping deepening. Sunset presets are the case, and the correct
+      // fix is a short march rather than one sample.
       const pathLength = this.uThickness.div(this.uSunDir.y.max(0.25)).toVar();
 
       // Never to zero: a shaded sea is darker, not black, because the sky around

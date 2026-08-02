@@ -562,9 +562,15 @@ export class Wake {
       const history = texture(source, sourceUv).toVar();
       const historyStill = texture(source, coord.add(this.uScroll)).toVar();
       const previous = history.r.mul(this.uDecay).mul(inside).toVar();
+      // Masked by *its own* footprint test, not the drifted one. Sharing `inside`
+      // meant the drift decided where the elevation field's border was, which is
+      // the coupling this split exists to remove.
+      const edgeStill = coord.add(this.uScroll).toVar();
+      const stillEdge = edgeStill.min(edgeStill.oneMinus()).toVar();
+      const insideStill = stillEdge.x.min(stillEdge.y).smoothstep(0, 0.004).toVar();
       const previousElevation = historyStill.g
         .mul(this.uElevationDecay)
-        .mul(inside)
+        .mul(insideStill)
         .toVar();
 
       const world = coord.sub(0.5).mul(extent).add(this.uCenter).toVar();

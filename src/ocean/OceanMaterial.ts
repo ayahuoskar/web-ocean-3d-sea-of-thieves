@@ -989,11 +989,35 @@ export class OceanMaterial {
       // perpendicular to the wind — where the projection length goes to zero.
       const windWorld = vec3(this.uWindAxis.x, 0, this.uWindAxis.y).toVar();
       const projected = windWorld.sub(n.mul(n.dot(windWorld))).toVar();
+
+      // The fallback has to be an axis the normal cannot be parallel to, and it
+      // has to be chosen *before* projecting rather than blended after.
+      //
+      // Blending two unnormalised projections is not a fallback: near the
+      // degenerate direction both are short and they can cancel, which leaves a
+      // zero tangent and a NaN frame on a thin ring of wave faces. Picking world
+      // X or Z by whichever the normal is less aligned with guarantees a
+      // projection of at least 1/sqrt(2) before normalisation.
+      const fallbackAxis = n.x
+        .abs()
+        .lessThan(n.z.abs())
+        .select(vec3(1, 0, 0), vec3(0, 0, 1))
+        .toVar();
+      const fallback = fallbackAxis.sub(n.mul(n.dot(fallbackAxis))).toVar();
       const tangent = normalize(
-        mix(vec3(1, 0, 0).sub(n.mul(n.x)), projected, projected.length().smoothstep(0.01, 0.12)),
+        projected.length().greaterThan(0.05).select(projected, fallback),
       ).toVar();
       const bitangent = normalize(n.cross(tangent)).toVar();
-      const aspect = this.uSlopeAnisotropy.sqrt().toVar();
+      // Fourth root, not square root.
+      //
+      // `uSlopeAnisotropy` is a ratio of slope *variances*, and variance goes as
+      // alpha squared — so scaling alpha by sqrt(R) one way and 1/sqrt(R) the
+      // other makes the variance ratio R^2, not R. At the measured 1.5 that is
+      // 2.25: the track came out half again as stretched as the sea it is
+      // supposed to be describing. R^(1/4) gives alphaT/alphaB = sqrt(R) and a
+      // variance ratio of exactly R, with the geometric mean of the two
+      // roughnesses preserved at the isotropic value.
+      const aspect = this.uSlopeAnisotropy.pow(0.25).toVar();
       const alphaT = alpha.mul(aspect).toVar();
       const alphaB = alpha.div(aspect).toVar();
 
@@ -1269,21 +1293,37 @@ export class OceanMaterial {
         // called it total internal reflection. It is not: a mirror shows *the
         // scene*, and the whole reason a diver notices the ceiling outside the
         // window is that the reef, the hull and the seabed appear upside down in
-        // it. So the reflected direction is built and traced in screen space
-        // against the same backdrop the refraction already reads.
+        // it. So the reflected direction now drives a lookup into the same
+        // backdrop the refraction already reads.
         //
-        // Screen-space, so it inherits the usual limitation: it can only reflect
-        // what is on screen, and off-screen rays fall back to the water's own
-        // body colour. That fallback is the honest one — it is what an infinite
-        // column of water looks like — and it is what the previous version was
-        // showing everywhere.
+        // **A screen-space offset, not a traced reflection.** There is no march
+        // and no depth test: the reflected direction is projected to a uv
+        // displacement and sampled once, which is the same approximation the
+        // refraction above uses and carries the same error — what it returns is
+        // whatever happens to be at that screen position, not what the reflected
+        // ray would actually hit. It is right for a distant, roughly planar
+        // ceiling and wrong for anything with parallax. A real trace is
+        // `ScreenSpaceReflection`, and pointing it downward from a submerged
+        // camera is the honest upgrade.
+        //
+        // Off-screen rays fall back to the water's own body colour, which is what
+        // an infinite column of water looks like — and is what the previous
+        // version showed everywhere.
         const reflectedDir = viewDir.negate().reflect(n).toVar();
         const tirOffset = reflectedDir.xz
           .mul(this.uRefractionStrength.mul(1.6))
           .div(viewDistance.mul(0.05).add(1))
           .toVar();
-        const tirUv: any = (viewportSafeUV(screenUV.add(tirOffset)) as any).toVar();
-        const tirEdge = tirUv.min(tirUv.oneMinus()).toVar();
+        // The in-frame test is on the *raw* offset uv, before clamping.
+        //
+        // `viewportSafeUV` pulls an out-of-range coordinate back inside the
+        // frame, so testing its output asks "is this uv on screen" of something
+        // that has just been made on screen by construction — the fallback could
+        // never engage. The raw coordinate is the one that knows whether the
+        // reflected ray left the frame.
+        const tirRawUv = screenUV.add(tirOffset).toVar();
+        const tirUv: any = (viewportSafeUV(tirRawUv) as any).toVar();
+        const tirEdge = tirRawUv.min(tirRawUv.oneMinus()).toVar();
         const tirInFrame = tirEdge.x.min(tirEdge.y).smoothstep(0, 0.06).clamp(0, 1).toVar();
         const tirScene = vec3(viewportSharedTexture(tirUv)).toVar();
 

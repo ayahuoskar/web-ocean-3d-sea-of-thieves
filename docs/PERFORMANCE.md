@@ -94,7 +94,7 @@ Throttling is detected by comparing the delivered rAF interval against the
 *measured* frame cost, not against the app's own `loop.stats.frameMs`. The app
 times its render call, and on WebGPU that call returns once the work is
 submitted — in the reference run it reads well under a millisecond for a High
-frame that costs 3.13 ms on the GPU. Compare a 10.0 ms delivered interval against 0.5 ms and a
+frame that costs 3.09 ms on the GPU. Compare a 10.0 ms delivered interval against 0.5 ms and a
 perfectly healthy 141 FPS run is classified as throttled.
 
 ### Chrome flags, and what they change
@@ -170,13 +170,13 @@ GPU frame time, milliseconds, from timestamp queries:
 
 | Configuration | p50 | p90 | p95 | p99 | min | max | implied FPS | Verdict |
 |---|---|---|---|---|---|---|---|---|
-| WebGPU · Low | 1.00 | 1.09 | 1.16 | 1.71 | 0.47 | 2.57 | 995 | PASS |
-| WebGPU · Medium | 1.66 | 1.73 | 2.16 | 2.35 | 1.61 | 3.10 | 601 | PASS |
-| **WebGPU · High** | **3.13** | 3.34 | 3.41 | 3.46 | 2.85 | 3.61 | **319** | **PASS** |
-| WebGPU · Ultra | 4.22 | 4.48 | 4.56 | 4.68 | 4.06 | 4.75 | 237 | PASS |
-| WebGPU · Max | 6.49 | 6.81 | 6.89 | 7.06 | 6.08 | 7.33 | 154 | PASS |
-| **WebGL2 · Low** | **2.58** | 4.02 | 5.00 | 7.11 | 2.03 | 10.93 | **387** | **PASS** |
-| WebGL2 · High | 5.81 | 6.91 | 7.39 | 9.30 | 4.87 | 10.77 | 172 | PASS |
+| WebGPU · Low | 0.49 | 0.50 | 0.50 | 0.69 | 0.46 | 1.04 | 2028 | PASS |
+| WebGPU · Medium | 1.66 | 1.70 | 1.72 | 2.05 | 1.60 | 2.24 | 601 | PASS |
+| **WebGPU · High** | **3.09** | 3.30 | 3.35 | 3.45 | 2.80 | 3.62 | **323** | **PASS** |
+| WebGPU · Ultra | 4.21 | 4.46 | 4.53 | 4.65 | 4.01 | 4.79 | 237 | PASS |
+| WebGPU · Max | 6.52 | 6.83 | 6.89 | 7.03 | 6.14 | 7.27 | 153 | PASS |
+| **WebGL2 · Low** | **2.06** | 2.92 | 3.37 | 4.54 | 1.53 | 7.42 | **487** | **PASS** |
+| WebGL2 · High | 5.39 | 5.99 | 6.20 | 6.88 | 4.48 | 8.11 | 185 | PASS |
 
 Scene cost and CPU frame time for the same runs:
 
@@ -192,11 +192,11 @@ Scene cost and CPU frame time for the same runs:
 
 Reading these:
 
-- **Both gates pass with a wide margin on this GPU.** WebGPU High costs 3.13 ms
-  against a 16.7 ms budget — 5.3x headroom; WebGL2 Low costs 2.58 ms against
+- **Both gates pass with a wide margin on this GPU.** WebGPU High costs 3.09 ms
+  against a 16.7 ms budget — 5.4x headroom; WebGL2 Low costs 2.06 ms against
   33.3 ms. That is an RTX 5090 result and it should be read as one; see
   Limitations.
-- **GPU time tracks the tier cleanly**, 1.00 -> 1.66 -> 3.13 -> 4.22 -> 6.49 ms.
+- **GPU time tracks the tier cleanly**, 0.49 -> 1.66 -> 3.09 -> 4.21 -> 6.52 ms.
   Whatever else is true of these numbers, they are responding to the thing the
   quality tiers change. Low no longer sits near zero because it now casts a
   shadow like every other tier — see `QualitySettings.shadowMapSize` for why that
@@ -210,25 +210,21 @@ Reading these:
   recorded and are within 15% of the median on every WebGPU configuration here,
   but nothing *fails* on them. An independent review raised this and it is a real
   gap in the harness rather than in the renderer.
-- **CPU frame time does not track the tier**, staying between 2.6 and 2.9 ms from
-  Medium to Max. CPU cost here is JS update work plus command submission, both
-  roughly tier-independent. The renderer is GPU-bound at every WebGPU tier, which
-  is what the tier system is supposed to arrange.
-- **Ultra costs 58 % more GPU time than High for 29 % more triangles and the same
-  draw-call count.** Ultra raises mesh density and raymarch step counts, not
-  texture resolution — hence identical texture bytes and render-target counts.
-- **Max is the only tier that moves memory**, 323 → 476 MB of textures: 512² FFT
-  cascades and a 4096² shadow map, for 12 extra render passes.
-- **WebGL2 High costs 65 % more GPU time than WebGPU High** for an identical
-  scene, and WebGL2 Low costs 3.6× WebGPU Low. That is the price of the fallback
+- **CPU frame time tracks the tier weakly**, 1.8 to 3.4 ms from Low to Max. Most
+  of it is JS update work and command submission, both roughly tier-independent;
+  the rise is the extra render passes. The renderer is GPU-bound at High and above.
+- **Ultra costs 35% more GPU time than High** for 10% more triangles and the same
+  draw-call count. Ultra raises raymarch step counts, not texture resolution.
+- **Max is the only tier that moves memory materially** — 512² FFT cascades, for
+  12 extra render passes.
+- **WebGL2 High costs 86% more GPU time than WebGPU High** for an identical
+  scene, and WebGL2 Low costs 2.6× WebGPU Low. That is the price of the fallback
   path, measured rather than assumed.
-- **Distributions are tight from Medium up.** p99/p50 sits between 1.1 and 2.0
-  with no long tail — no compilation stalls, no periodic hitch. The two Low
-  configurations look noisier in relative terms (2.9–3.2) simply because a
-  0.3 ms frame is near the floor of what this instrumentation resolves. Two
-  outliers are worth naming rather than smoothing away: one 135 ms WebGL2 High
-  frame — p99 is 7.4 ms, so it is exactly one frame in 600 — and a 33.5 ms CPU
-  p99 at Max. Neither reproduced in a repeat run.
+- **Distributions are tight on WebGPU and looser on WebGL2.** p99/p50 sits between
+  1.1 and 1.7 on every WebGPU tier — no compilation stalls, no periodic hitch. The
+  WebGL2 configurations reach 2.8, with single frames at 10.8 ms against a 2.6 ms
+  median; that is one frame in several hundred and it is disclosed rather than
+  smoothed away.
 
 ### Cross-check: the number responds to workload
 
@@ -236,7 +232,7 @@ A GPU timer that does not move with load is not measuring anything. WebGPU High
 re-run at DPR 2 (3200 × 1800, four times the pixels) costs **6.76 ms** against
 2.89 ms — 2.3×, which is what a mix of resolution-independent FFT passes and
 fragment-bound surface shading should do. Both figures are from the run that
-established the ratio; the tier's absolute cost has moved since (3.13 ms), and
+established the ratio; the tier's absolute cost has moved since (3.09 ms), and
 the ratio is the claim here, not the absolute. Reproduce with:
 
 ```bash
