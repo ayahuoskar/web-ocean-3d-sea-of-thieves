@@ -61,7 +61,11 @@ export default defineConfig({
      */
     {
       name: 'chromium-webgpu',
-      testIgnore: 'visual.spec.ts',
+      // Everything the `visual` project owns. These need its GPU flags and its
+      // 1280x720 shot resolution, and running them here as well would compare
+      // captures taken at a different viewport — passing or failing for reasons
+      // that have nothing to do with what they measure.
+      testIgnore: /(visual|gallery|gallery-jitter|isolation)\.spec\.ts/,
       use: {
         ...devices['Desktop Chrome'],
         viewport: { width: 1600, height: 900 },

@@ -137,6 +137,36 @@ export class ShipController {
     this.rudderInput = clamp(rudder, -1, 1);
   }
 
+  /**
+   * Returns the engine to a full stop, orders *and* spool.
+   *
+   * `setInput(0, 0)` is not enough and the difference is the whole point of this
+   * existing. The throttle and rudder are spooled quantities — they travel
+   * toward the ordered value over seconds, because an engine does — so clearing
+   * the order leaves the spool wherever it had reached. Every other integrating
+   * system here has a `resetClock`; this one did not, and the omission made the
+   * visual baselines a function of the order the suite ran in.
+   *
+   * The mechanism was indirect enough to hide for a long time. A deterministic
+   * capture rewinds the clock, returns the hull to its spawn pose and settles for
+   * ninety steps with the shot's engine order applied. With the spool already
+   * open from the previous shot the hull was under way from the first of those
+   * steps instead of accelerating from rest, so it laid a different wake — and
+   * the wake displaces and lights the surface across the whole buffer, which is
+   * most of the visible water. The captures differed by 13 levels of mean
+   * luminance across the frame while every parameter the harness could read back
+   * was identical.
+   */
+  resetInput(): void {
+    this.releaseKeys();
+    this.throttleInput = 0;
+    this.rudderInput = 0;
+    this.throttle = 0;
+    this.rudder = 0;
+    this.body.externalForce.set(0, 0, 0);
+    this.body.externalTorque.set(0, 0, 0);
+  }
+
   update(dt: number): void {
     if (!this.enabled || !(dt > 0)) return;
 

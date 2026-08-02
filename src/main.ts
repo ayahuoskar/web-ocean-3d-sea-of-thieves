@@ -1503,7 +1503,13 @@ class App {
           // the settle rather than after, which is the whole point: the ship has
           // a ~6.7 s velocity time constant, so an input applied after settling
           // would photograph a hull that has not begun to move.
-          this.shipControls?.setInput(0, 0);
+          //
+          // `resetInput`, not `setInput(0, 0)`: the throttle and rudder spool
+          // toward their order over seconds, so clearing the order alone left the
+          // spool open and the hull under way from the first settle step. See
+          // `ShipController.resetInput` — this was the whole of the shot-ordering
+          // dependence.
+          this.shipControls?.resetInput();
           // Set, not settled. Wetness dries with a 26 s time constant, so a
           // capture that inherited a storm's wet hull would still be visibly damp
           // three hundred settle steps later.

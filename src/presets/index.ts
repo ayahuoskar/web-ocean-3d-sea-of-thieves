@@ -17,8 +17,19 @@ export interface Preset {
     mieCoefficient: number;
     mieDirectionalG: number;
     exposure: number;
-    /** How far toward flat overcast light the sky is pulled, 0..1. */
-    overcast?: number;
+    /**
+     * How far toward flat overcast light the sky is pulled, 0..1.
+     *
+     * Required, not optional, and that is the entire point. `Atmosphere.setParams`
+     * merges rather than replaces — it has to, because the time-of-day slider
+     * spreads a sun position over whatever preset is loaded — so a key that only
+     * some presets mention is a key that leaks. Two of the ten set this and the
+     * other eight left it out, so selecting Storm and then anything else kept the
+     * storm's flat grey sky forever: the sun, the clouds and the water all changed
+     * and the light did not. Making it non-optional means the compiler, not a
+     * reviewer, is what notices the next preset that forgets it.
+     */
+    overcast: number;
     nightIntensity: number;
     moonElevation: number;
     moonAzimuth: number;
@@ -85,6 +96,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       rayleigh: 1.5,
       mieCoefficient: 0.004,
       mieDirectionalG: 0.8,
+      overcast: 0,
       exposure: 1,
       nightIntensity: 0,
       moonElevation: -0.5,
@@ -134,6 +146,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       rayleigh: 2.4,
       mieCoefficient: 0.003,
       mieDirectionalG: 0.75,
+      overcast: 0,
       exposure: 1.1,
       nightIntensity: 0,
       moonElevation: -0.5,
@@ -183,6 +196,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       rayleigh: 1.2,
       mieCoefficient: 0.006,
       mieDirectionalG: 0.82,
+      overcast: 0,
       exposure: 1,
       nightIntensity: 0,
       moonElevation: -0.5,
@@ -232,6 +246,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       rayleigh: 2.6,
       mieCoefficient: 0.009,
       mieDirectionalG: 0.86,
+      overcast: 0,
       exposure: 0.95,
       nightIntensity: 0.25,
       moonElevation: 0.35,
@@ -333,6 +348,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       rayleigh: 0.6,
       mieCoefficient: 0.002,
       mieDirectionalG: 0.8,
+      overcast: 0,
       exposure: 1.4,
       nightIntensity: 1,
       moonElevation: 0.7,
@@ -382,6 +398,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       rayleigh: 1.3,
       mieCoefficient: 0.005,
       mieDirectionalG: 0.8,
+      overcast: 0,
       exposure: 1.05,
       nightIntensity: 0,
       moonElevation: -0.5,
@@ -486,6 +503,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       rayleigh: 2.9,
       mieCoefficient: 0.012,
       mieDirectionalG: 0.88,
+      overcast: 0,
       exposure: 1,
       nightIntensity: 0.05,
       moonElevation: -0.5,
