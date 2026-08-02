@@ -82,7 +82,10 @@ test('whitecap coverage follows Monahan', async ({ page }) => {
   test.setTimeout(600_000);
   await bootOcean(page);
 
-  const speeds = [9, 15, 21];
+  // 6 and 24 are in the range where `setBreaking`'s clamp binds — the deposit
+  // rate stops following the law below about 11.9 m/s and above about 18.9 —
+  // and they are here precisely because that is where the claim is most at risk.
+  const speeds = [6, 9, 15, 21, 24];
   const measured: number[] = [];
   for (const u of speeds) {
     const r = await coverage(page, u);
@@ -112,9 +115,26 @@ test('whitecap coverage follows Monahan', async ({ page }) => {
   // And the *shape* of the law, which is the part a single scale factor cannot
   // fake: U^3.41 is very steep, so tripling the wind must raise coverage by far
   // more than three times.
+  // Monotonic across the whole range, including where the rate is clamped. A
+  // clamp that flattened the response would show up here even if every
+  // individual point still sat inside its factor-of-three band.
+  for (let i = 1; i < speeds.length; i++) {
+    expect(
+      measured[i],
+      `coverage did not rise from ${speeds[i - 1]} to ${speeds[i]} m/s: ` +
+        `${(measured[i - 1] * 100).toFixed(2)}% then ${(measured[i] * 100).toFixed(2)}%`,
+    ).toBeGreaterThan(measured[i - 1]);
+  }
+
+  // And the *shape* of the law, which is the part a single scale factor cannot
+  // fake: U^3.41 is very steep, so more than doubling the wind must raise
+  // coverage by far more than twice.
+  const first = measured[0];
+  const last = measured[measured.length - 1];
   expect(
-    measured[2] / Math.max(measured[0], 1e-6),
-    `coverage went from ${(measured[0] * 100).toFixed(2)}% at 9 m/s to ` +
-      `${(measured[2] * 100).toFixed(2)}% at 21 m/s, which is far flatter than U^3.41`,
-  ).toBeGreaterThan(4);
+    last / Math.max(first, 1e-6),
+    `coverage went from ${(first * 100).toFixed(2)}% at ${speeds[0]} m/s to ` +
+      `${(last * 100).toFixed(2)}% at ${speeds[speeds.length - 1]} m/s, ` +
+      'which is far flatter than U^3.41',
+  ).toBeGreaterThan(monahan(speeds[speeds.length - 1]) / monahan(speeds[0]) / 3);
 });

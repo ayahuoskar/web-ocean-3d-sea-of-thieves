@@ -571,9 +571,13 @@ class App {
       // The controller exists from load but stays inert until Boat mode selects
       // it, so W/S and A/D cannot steer a ship the viewer is not driving.
       this.shipControls = new ShipController(this.shipBody);
-      this.shipControls.setEnabled(
-        this.state.cameraMode === 'boat' || this.state.cameraMode === 'cinematic',
-      );
+      // Both flags from the current mode, not just `enabled`. The mode change
+      // that would have set them may already have happened — the models take
+      // seconds to arrive, and a viewer who selects Cinematic during the
+      // download changed mode while this object did not yet exist. It was
+      // therefore born with the keyboard live, and holding S once the ship
+      // appeared drove it straight through the tour.
+      this.applyShipControlMode();
 
       ship.setDebugProbesVisible(this.state.buoyancyProbes);
       this.wake.setDebugVisible(this.state.wakeProbes);
@@ -706,23 +710,7 @@ class App {
         // release it, so they keep their own keys and a hull cannot be left under
         // power while the viewer is somewhere else.
         //
-        // `resetInput`, not `setInput(0, 0)`, and this distinction is the whole
-        // handoff. Throttle and rudder are spooled, and `setEnabled` only clears
-        // the spool on a *transition* — Cinematic and Boat both keep the
-        // controller enabled, so switching between them returns on its first
-        // line and touches nothing. Clearing only the order left the tour's full
-        // ahead spooling down over the next second and a half, so taking the
-        // helm handed the viewer a ship already under way with the rudder over.
-        this.shipControls?.resetInput();
-        this.shipControls?.setEnabled(
-          this.state.cameraMode === 'boat' || this.state.cameraMode === 'cinematic',
-        );
-        // Cinematic runs the ship but not the viewer's keys: the controller has
-        // to be live for the hull to sail under its own physics, and the keys
-        // have to be out of the way for the authored flight to be the only thing
-        // steering. Otherwise W/A/S/D outrank `setInput` and the tour fights for
-        // its own wheel.
-        this.shipControls?.setKeyboardEnabled(this.state.cameraMode !== 'cinematic');
+        this.applyShipControlMode();
         // The on-screen throttle stays with the mode that can actually use it.
         this.touchControls?.setVisible(this.state.cameraMode === 'boat');
         break;
@@ -913,6 +901,32 @@ class App {
    *   "Destroyed texture [ShadowDepthTexture] used in a submit" — the cube render
    *   referenced the shadow map in a command buffer that outlived it.
    */
+  /**
+   * Points the ship controller at the current camera mode.
+   *
+   * One place, because there are two callers and they must not drift: the mode
+   * change, and the controller's own construction — which happens when the
+   * models finish downloading and so can land either side of a mode change.
+   */
+  private applyShipControlMode(): void {
+    const controls = this.shipControls;
+    if (controls === null) return;
+    const mode = this.state.cameraMode;
+    // `resetInput`, not `setInput(0, 0)`. Throttle and rudder are spooled, and
+    // `setEnabled` only clears the spool on a *transition* — Cinematic and Boat
+    // both keep the controller enabled, so switching between them would
+    // otherwise hand the viewer a ship still carrying the tour's full ahead.
+    controls.resetInput();
+    // Cinematic selects the *ship* as much as Boat does: the flight steers the
+    // hull rather than teleporting it, so the wake, the buoyancy and the spray
+    // are the real ones.
+    controls.setEnabled(mode === 'boat' || mode === 'cinematic');
+    // But not the viewer's keys. They deliberately outrank `setInput` so someone
+    // at the helm beats the on-screen throttle; during a cinematic that rule
+    // would let a held S command full astern against a full-ahead beat.
+    controls.setKeyboardEnabled(mode !== 'cinematic');
+  }
+
   private applyPreset(captureEnvironment = true): void {
     const preset = getPreset(this.state.preset);
 
@@ -1002,9 +1016,24 @@ class App {
     // supposed to be producing it: at 0.55 a 15 m/s sea stood at 7.96% against
     // Monahan's 3.93%, which is what made the reference image a sheet of white
     // rather than a sea with whitecaps on it.
+    //
+    // The limits are soft — bounded, but never flat. A hard
+    // `max(0.45, min(2.2, ratio))` binds below about 11.9 m/s and above about
+    // 18.9, and inside those regions the deposit rate stopped responding to the
+    // wind at all: measured coverage was *identical* at 6 and 9 m/s, and
+    // identical again at 21 and 24. That is a dead zone at each end of the
+    // slider, where dragging the wind moved the waves and not the foam. Adding a
+    // small share of the unclamped ratio keeps the bound while leaving the
+    // response monotonic everywhere.
+    //
+    // The rate deliberately does not carry the whole of U^3.41, and the
+    // measurements are what say so: the *area* that folds rises with wind too,
+    // so a rate following the full law on top of it double-counts. At 21 m/s the
+    // clamped rate is a fifth of what the law alone would ask for, and the
+    // rendered coverage lands within 0.02 points of it.
     this.wake.setBreaking(
       foamThreshold * 0.34,
-      0.32 * Math.max(0.45, Math.min(2.2, whitecapRatio)),
+      0.32 * (Math.max(0.45, Math.min(2.2, whitecapRatio)) + 0.08 * whitecapRatio),
     );
 
     // The surface's own mask is re-scaled from the same number.

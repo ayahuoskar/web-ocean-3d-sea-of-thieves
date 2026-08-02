@@ -307,10 +307,10 @@ Full methodology, cost model and the honest list of what remains unmeasured:
   rather than to the hull's centre — but it is still an authored sum of two systems and some
   envelopes: no hull pressure distribution, no stationary-phase cusp, no Froude-number
   response, no finite depth, and no propagation of history at the group velocity.
-- **Monahan's law drives foam generation, not measured coverage.** The deposit rate follows
-  `W = 3.84e-6 U^3.41`, but nothing measures the resulting rendered coverage and compares it
-  against the law. The foam still reads as broad ribboning rather than sparse multiscale
-  bubbles and streaks.
+- **Foam reads as broad ribboning**, not sparse multiscale bubbles and streaks. The rendered
+  coverage *is* now measured against Monahan's `W = 3.84e-6 U^3.41` and tracks it to within a
+  factor of three from 6 to 24 m/s (0.26 / 0.28 / 3.42 / 13.97 / 14.76 % against 0.17 / 0.69 /
+  3.93 / 12.39 / 19.54) — so the amount of foam is right and its *structure* is not.
 - **Cloud shadow is a one-sample approximation.** It traces to the middle of the slab along the
   sun path and attenuates by density times path length — the same field the clouds are drawn
   from, so the shade lands under the cloud that casts it, but it is not an integral through the

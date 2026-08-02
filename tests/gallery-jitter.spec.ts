@@ -34,8 +34,8 @@ const NEAR = { lo: 0.78, hi: 0.96 };
 interface BandStats {
   temporal: number;
   highFreq: number;
-  /** Luminance standard deviation — how much structure the band actually holds. */
-  spread: number;
+  /** Mean |luminance step| between horizontally adjacent pixels. */
+  detail: number;
 }
 
 function analyse(
@@ -47,57 +47,72 @@ function analyse(
   const y1 = Math.floor(a.height * band.hi);
   let temporal = 0;
   let highFreq = 0;
-  let sum = 0;
-  let sumSq = 0;
+  let detail = 0;
   let n = 0;
+  const luma = (i: number, img: typeof a) =>
+    0.2126 * img.data[i] + 0.7152 * img.data[i + 1] + 0.0722 * img.data[i + 2];
   for (let y = y0; y < y1; y++) {
     for (let x = 1; x < a.width - 1; x++) {
       const i = (y * a.width + x) * 4;
-      temporal += Math.abs(a.data[i] - b.data[i]);
+      const here = luma(i, a);
+      temporal += Math.abs(here - luma(i, b));
       // Laplacian along the row: a smooth gradient gives ~0, per-pixel noise
       // gives its own amplitude.
-      highFreq += Math.abs(2 * a.data[i] - a.data[i - 4] - a.data[i + 4]);
-      sum += a.data[i];
-      sumSq += a.data[i] * a.data[i];
+      highFreq += Math.abs(2 * here - luma(i - 4, a) - luma(i + 4, a));
+      detail += Math.abs(here - luma(i - 4, a));
       n++;
     }
   }
-  const mean = sum / n;
-  return {
-    temporal: temporal / n,
-    highFreq: highFreq / n,
-    spread: Math.sqrt(Math.max(0, sumSq / n - mean * mean)),
-  };
+  return { temporal: temporal / n, highFreq: highFreq / n, detail: detail / n };
 }
 
 /**
- * Ceilings on far-field shimmer, per tier.
+ * Ceilings on far-field spatial noise, per tier.
  *
- * Set about 25% above the measured figures, which is room for driver and
- * scheduling variation without room for a regression. Medium runs two cascades
- * and the others three, which is the whole reason the tiers differ here.
+ * Set about 25% above the measured figures — room for driver and scheduling
+ * variation, not room for a regression. Medium runs two cascades and the others
+ * three, which is the whole reason the tiers differ here.
  */
 const SHIMMER_CEILING: Record<string, number> = {
-  medium: 3.0,
-  high: 4.6,
-  ultra: 5.0,
-  max: 5.2,
+  medium: 1.8,
+  high: 3.0,
+  ultra: 3.2,
+  max: 3.3,
 };
 
 /**
- * Floor on near-field structure, as a luminance standard deviation.
+ * Ceilings on far-field frame-to-frame change.
  *
- * Not a Laplacian. Per-pixel Laplacian energy *rises* with distance, because a
- * distant pixel spans many wavelengths and a near one spans a fraction of
- * one — the near field measured lower than the far field on it, which makes it
- * useless as a detail floor. Standard deviation over the band asks the question
- * that matters instead: is there still wave structure here, or has it been
- * smoothed into a sheet? A flat plane scores near zero whatever its shading.
- *
- * Well below the measured figures, because its job is to catch a collapse
- * rather than to pin the exact amount of structure.
+ * The spatial figure alone is not enough, and the first version of this test had
+ * only that one: a band flashing uniformly from black to white every frame
+ * carries no horizontal structure at all, so it scores zero on a Laplacian and
+ * would have passed every ceiling while being the worst shimmer imaginable. Both
+ * have to be bounded.
  */
-const DETAIL_FLOOR = 8;
+const TEMPORAL_CEILING: Record<string, number> = {
+  medium: 1.3,
+  high: 2.2,
+  ultra: 2.4,
+  max: 2.3,
+};
+
+/**
+ * Floor on near-field structure: the mean luminance step between horizontally
+ * adjacent pixels.
+ *
+ * Not a Laplacian, and not a standard deviation. Per-pixel Laplacian energy
+ * *rises* with distance — a distant pixel spans many wavelengths and a near one
+ * spans a fraction of one — so the near field measured lower on it than the far
+ * field, which makes it useless here. Standard deviation over the band is worse:
+ * it cannot tell wave detail from a smooth vertical gradient, and this frame has
+ * several of those in it (Fresnel, aerial perspective, the reflected sky), so a
+ * flat band with an ordinary lighting ramp across it passes comfortably.
+ *
+ * The mean adjacent-pixel step has neither problem. A linear ramp of forty
+ * levels across the frame contributes about 0.03 per pixel; water with waves in
+ * it contributes a whole level or more.
+ */
+const DETAIL_FLOOR = 0.4;
 
 test('the far field does not shimmer, and the near field keeps its detail', async ({ page }) => {
   test.setTimeout(600_000);
@@ -115,8 +130,7 @@ test('the far field does not shimmer, and the near field keeps its detail', asyn
     const near = analyse(a, b, NEAR);
     console.log(
       `SHIMMER ${quality.padEnd(7)} far temporal ${far.temporal.toFixed(3)} highFreq ` +
-        `${far.highFreq.toFixed(3)}  |  near spread ${near.spread.toFixed(3)} ` +
-        `highFreq ${near.highFreq.toFixed(3)}`,
+        `${far.highFreq.toFixed(3)}  |  near detail ${near.detail.toFixed(3)}`,
     );
 
     expect(
@@ -126,8 +140,15 @@ test('the far field does not shimmer, and the near field keeps its detail', asyn
     ).toBeLessThan(SHIMMER_CEILING[quality]);
 
     expect(
-      near.spread,
-      `${quality}: near-field structure collapsed to ${near.spread.toFixed(3)}. ` +
+      far.temporal,
+      `${quality}: the far field changed by ${far.temporal.toFixed(3)} levels in one frame, ` +
+        `over the ${TEMPORAL_CEILING[quality]} ceiling — at this distance a wave moves a ` +
+        'fraction of a pixel, so this is the image reshuffling rather than the sea moving',
+    ).toBeLessThan(TEMPORAL_CEILING[quality]);
+
+    expect(
+      near.detail,
+      `${quality}: near-field structure collapsed to ${near.detail.toFixed(3)}. ` +
         'The shimmer figure can always be won by flattening the water; this is the ' +
         'assertion that stops that counting as a fix',
     ).toBeGreaterThan(DETAIL_FLOOR);
