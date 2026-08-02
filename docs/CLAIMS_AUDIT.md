@@ -182,6 +182,29 @@ Rain is no longer an uncoupled overlay. It disturbs the surface, aerates it into
 foam, beads on the lens and wets the hull, and each of those has a test that
 fails if the coupling is removed.
 
+## 12. What regenerating the gallery found
+
+The README's images had been captured by hand and were months of renderer work out
+of date, with nothing able to detect it. `tests/gallery.spec.ts` replaces them with
+one command through the same deterministic harness the baselines use.
+
+Doing that surfaced a defect the visual suite could not: **`resetDeterministic`
+does not make a shot independent of the one before it.** The boat shot captured
+straight after the storm has visibly heavier foam than the same shot captured
+first. Two causes, one fixed:
+
+- The rain rate was rewound *after* the objects that snap their own state to it,
+  so `LensRain.resetClock` set its coverage from the previous shot's intensity —
+  a clear-sky image inherited a soaked lens and dried it over a 26 s constant that
+  eight seconds of settling could not touch. The rate is now pushed in first.
+- Something in the foam path still carries over. Not yet found; recorded rather
+  than papered over.
+
+The suite's baselines are self-consistent because it always runs the shots in one
+order, which is exactly the ordering dependence `tests/lib/shots.ts` opens by
+warning against. The gallery avoids it by reloading between images — the right
+call for published output, and not a fix.
+
 ## 11. Fourth pass — the same reviewer, twice
 
 The third pass ended with "no, not AAA" and six ranked architectural gaps. Four

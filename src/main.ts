@@ -1367,6 +1367,22 @@ class App {
           const start = time - settleSteps * settleDt;
           this.loop.setElapsed(start);
 
+          // The rain rate this shot should show, pushed in *before* anything
+          // rewinds — several of these snap their own state to the current
+          // intensity, and until now they were snapping to the previous shot's.
+          //
+          // `LensRain.resetClock` sets its coverage to `this.intensity`, which
+          // `update()` had not yet been called to change: a capture taken after
+          // the storm shot therefore inherited a soaked lens and dried it over a
+          // 26 s constant that eight seconds of settling could not touch. The
+          // droplets in a clear-sky gallery image were that, and it made the
+          // canonical shots depend on the order they ran in — exactly what the
+          // shot list's own header warns against.
+          const resetRain = this.rainOverride ?? getPreset(this.state.preset).weather.intensity;
+          this.lensRain.setIntensity(resetRain);
+          this.weather.setIntensity(resetRain);
+          this.wake?.setRainAgitation(resetRain);
+
           this.weather.resetClock(start);
           this.particles.resetClock(start);
           this.underwater.resetClock(start);
@@ -1391,7 +1407,7 @@ class App {
           // Set, not settled. Wetness dries with a 26 s time constant, so a
           // capture that inherited a storm's wet hull would still be visibly damp
           // three hundred settle steps later.
-          this.wetness.setWetness(this.rainOverride ?? getPreset(this.state.preset).weather.intensity);
+          this.wetness.setWetness(resetRain);
           if (shipInput) this.shipControls?.setInput(shipInput.throttle, shipInput.rudder);
           this.ship?.resetClock(start);
           this.previousShipPosition.copy(this.ship?.object.position ?? this.previousShipPosition);

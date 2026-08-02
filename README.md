@@ -4,7 +4,7 @@ A realtime spectral ocean rendered with **Three.js**, **WebGPU** and **TSL** —
 synthesis, physically motivated water optics, foam, caustics, buoyancy, wakes, underwater
 transitions and a volumetric sky, with a graceful WebGL2 fallback from the same shader source.
 
-![Web Ocean 3D](docs/images/hero.png)
+![Web Ocean 3D](docs/images/boat.png)
 
 <p align="center">
   <img alt="Three.js r185" src="https://img.shields.io/badge/three.js-r185-000000?style=flat-square&logo=three.js&logoColor=white">
@@ -48,29 +48,41 @@ node scripts/fetch-assets.mjs --verify    # offline integrity check
 Nine environment presets. Each moves the sun, sea state, water optics, aerial perspective
 and weather together — so switching reads as a different *place*, not a colour filter.
 
-| Clear Day | Storm |
+| Under way | Underwater |
 |---|---|
-| ![Clear day](docs/images/hero.png) | ![Storm](docs/images/storm.png) |
-| Cumulus, 15 m/s wind, turquoise shallows | 21 m/s, overcast deck, rain, heavy chop |
+| ![Boat](docs/images/boat.png) | ![Underwater](docs/images/underwater.png) |
+| Chase camera at ~8 m/s: Kelvin wake, bow wave, hull in wave contact | Snell's window overhead, the hull's silhouette and its shadow in the shafts |
 
-| Sunset | Moonlit |
+| Storm | Moonlit |
 |---|---|
-| ![Sunset](docs/images/sunset.png) | ![Moonlit](docs/images/moonlit.png) |
-| Low sun, warm haze, near-glassy swell | Sun below horizon, star field, long swell |
+| ![Storm](docs/images/storm.png) | ![Moonlit](docs/images/moonlit.png) |
+| 21 m/s, overcast attenuating the key light, rain on the lens | Sun below the horizon: moon glitter, star field, long swell |
 
-| Wave detail | Underwater |
+| Sunset | Wave detail |
 |---|---|
-| ![Waves](docs/images/waves.png) | ![Underwater](docs/images/underwater.png) |
-| Jacobian-driven whitecaps at 19 m/s | Hull from below, particulates, caustics |
+| ![Sunset](docs/images/sunset.png) | ![Waves](docs/images/waves.png) |
+| Anisotropic glitter stretching down the sun's track | Whitecaps where the surface genuinely folds, at 15 m/s |
 
 ![Interface](docs/images/interface.png)
 
 *The control panel and HUD. Buoyancy probes are switched on here, showing the four hull
 sample points the physics solves against.*
 
-> Gallery shots are captured with the UI hidden. The FPS readout is omitted from the
-> interface shot on purpose — see [Performance](#performance) for why a frame-rate number
-> captured under browser automation would be meaningless.
+Regenerate every image above from the current renderer:
+
+```bash
+CAPTURE_GALLERY=1 npx playwright test --project=visual gallery
+```
+
+That runs through the same deterministic harness the visual baselines use, at 1600 × 900,
+one fresh page per image. Scene shots come from an offscreen render, so the UI is absent by
+construction rather than hidden; the interface shot is a compositor screenshot precisely
+because it is *about* the UI. The FPS readout is omitted from it on purpose — see
+[Performance](#performance) for why a frame-rate number captured under browser automation
+would be meaningless.
+
+> These images were previously captured by hand and had gone stale by months of renderer
+> work, with nothing able to tell. That is why regenerating them is now one command.
 
 ---
 
@@ -306,6 +318,13 @@ Full methodology, cost model and the honest list of what remains unmeasured:
   Both are written once, from whatever tier the session boots on. Changing either at runtime
   destroys a GPU resource that an in-flight command buffer still references, which WebGPU
   reports as *"Destroyed texture used in a submit"*. See `Atmosphere.setShadowMapSize`.
+- **`resetDeterministic` does not fully isolate a shot from the one before it.** Capturing
+  the boat shot straight after the storm gives visibly heavier foam than capturing it first,
+  so something in the sea state survives the reset. The rain rate is now pushed in *before*
+  anything rewinds, which fixed the lens and hull wetness leaking the same way, but the foam
+  path still carries something. The baselines are self-consistent because the suite always
+  runs the shots in one order; the gallery works around it by reloading between images. It
+  is a defect in the harness, not a property of the renderer.
 - **Rain wetting is uniform over an object.** The hull darkens and glosses in a squall and
   dries out over the following half-minute, but a real hull wets from *above* — the deck soaks
   while the underside of a beam stays dry, and water runs down and pools. Expressing that needs
