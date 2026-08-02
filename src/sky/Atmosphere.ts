@@ -348,28 +348,38 @@ export class Atmosphere {
    * next shadow pass.
    */
   /**
-   * Sun shadow map resolution per side. **Honoured once, then fixed.**
+   * Sun shadow map resolution per side.
    *
-   * Three creates a light's shadow node lazily inside `setup()` and caches it on
-   * the material. Any runtime change to the shadow's configuration can leave that
-   * cached node holding a null render target, and the planar reflector — which
-   * renders the whole scene from its own `updateBefore` — reliably gets there
-   * first and reads `depthTexture` off it. That crash has now been chased through
-   * three different triggers: `renderer.shadowMap.enabled`, `shadow.dispose()`,
-   * and `castShadow`. Each fix removed one and the next appeared.
+   * This was honoured once and then frozen, because changing it mid-session
+   * crashed the renderer. Three creates a light's shadow node lazily inside
+   * `setup()` and caches it on the material, so a runtime change could leave that
+   * node holding a null render target, and the planar reflector — which renders
+   * the whole scene from its own `updateBefore` — reliably got there first and
+   * read `depthTexture` off it. The crash was chased through four triggers
+   * (`renderer.shadowMap.enabled`, `shadow.dispose()`, `castShadow`, and the
+   * mipmapped reflector resize) and each fix moved it rather than removing it.
    *
-   * So the shadow's configuration is written once, at startup, from whatever tier
-   * the session begins on, and never touched again. Switching to Max mid-session
-   * therefore keeps the shadow resolution it booted with. That is a real
-   * limitation and it is the honest trade: a slightly softer shadow at Max
-   * against a renderer that cannot crash on a tier change.
+   * The reason it kept moving is that none of those was the cause. The cause was
+   * destroying a resource still referenced by a command buffer that had been
+   * submitted but not retired — WebGPU reports it as "Destroyed texture used in a
+   * submit", and *any* of those four could be the thing that happened to trip it.
+   * It is now fixed at the source: `App.drainQualityRequests` pauses the loop,
+   * awaits the frame already inside `renderAsync`, fences on
+   * `queue.onSubmittedWorkDone()`, and only then applies the tier. The GPU is
+   * provably idle at this point, so releasing the old map is safe.
+   *
+   * Releasing it is also required rather than optional: the shadow allocates its
+   * target lazily from `mapSize` and then keeps it, so writing a new size without
+   * disposing leaves the old target bound and the tier change does nothing at all.
    */
   setShadowMapSize(size: number): void {
-    if (this.shadowConfigured) return;
-    this.shadowConfigured = true;
     this.sunLight.castShadow = true;
     const side = Math.max(256, Math.round(size));
+    if (this.shadowConfigured && this.sunLight.shadow.mapSize.x === side) return;
+    this.shadowConfigured = true;
     this.sunLight.shadow.mapSize.set(side, side);
+    this.sunLight.shadow.map?.dispose();
+    this.sunLight.shadow.map = null;
   }
 
   /** Current sun shadow map resolution per side. */

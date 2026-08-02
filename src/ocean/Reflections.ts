@@ -29,27 +29,6 @@ export class Reflections {
   readonly node: any;
 
   private readonly base: any;
-  /**
-   * Set once `setQuality` has written the resolution scale.
-   *
-   * Changing `resolutionScale` resizes the reflector's render target, and that
-   * target now carries a mip chain for the surface's roughness-aware sampling.
-   * Rebuilding a mipmapped target while the scene is mid-rebuild is what finally
-   * explained a crash that had survived three previous fixes: a tier change
-   * resized this, three tore down and re-created the affected node graphs
-   * asynchronously, and the reflector — which renders the whole scene from its
-   * own `updateBefore` — reached a shadow node that had not finished rebuilding
-   * and read `depthTexture` off null.
-   *
-   * The reflection therefore keeps whatever scale the session booted at. That is
-   * a real cost: someone who starts on Low and switches to Max gets a
-   * quarter-resolution reflection. It buys a renderer that cannot crash on a tier
-   * change, and the reflection is sampled through a normal perturbed by every
-   * ripple and at a roughness-driven mip level, so the resolution is the least
-   * visible thing about it.
-   */
-  private resolutionFixed = false;
-
   constructor(resolutionScale = 0.5) {
     // `reflector` mirrors about the target's local XY plane, so the target is
     // rotated to put its normal along +Y. Sea level, not the camera's height:
@@ -80,12 +59,36 @@ export class Reflections {
    * it is never seen sharp — half resolution is indistinguishable from full in
    * motion, and a quarter is acceptable wherever the sea state is rough enough
    * to break the image up anyway.
+   *
+   * This was latched shut for a while — honoured once at boot and ignored after
+   * — because resizing a mipmapped target during a tier change crashed the
+   * renderer: the reflector renders the whole scene from its own `updateBefore`,
+   * so it reached node graphs three had not finished rebuilding. The latch
+   * treated the symptom. The cause was that a tier change destroyed resources
+   * still referenced by a submitted command buffer, and it is now fixed where it
+   * belongs — `App.drainQualityRequests` pauses the loop, joins the frame in
+   * flight, fences on `onSubmittedWorkDone`, and only then applies the tier. With
+   * the GPU provably idle there is nothing left for the latch to protect, and
+   * someone who starts on Low and switches to Max gets the reflection they paid
+   * for instead of a quarter-resolution one.
+   *
+   * Dropping the old targets is the point rather than a side effect. `reflector`
+   * keys its targets by camera, and changing `resolutionScale` alone leaves the
+   * existing entry at its old size, so the scale would apply only to a camera
+   * the reflector had not seen before — which, in a session with one camera, is
+   * never.
    */
   setQuality(scale: number): void {
-    // Honoured once, then fixed — see `resolutionFixed`.
-    if (this.resolutionFixed) return;
-    this.resolutionFixed = true;
-    this.base.resolutionScale = Math.max(0.1, Math.min(1, scale));
+    const next = Math.max(0.1, Math.min(1, scale));
+    if (next === this.base.resolutionScale) return;
+    this.base.resolutionScale = next;
+    for (const target of this.base.renderTargets.values()) target.dispose();
+    this.base.renderTargets.clear();
+  }
+
+  /** Current resolution scale, so a test can prove the tier reached it. */
+  get resolutionScale(): number {
+    return this.base.resolutionScale;
   }
 
   dispose(): void {
