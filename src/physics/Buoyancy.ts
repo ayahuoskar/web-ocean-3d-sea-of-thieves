@@ -23,6 +23,11 @@ import type { OceanSampler } from '../ocean/Sampler';
  *  - **Damping uses relative velocity.** Water is not stationary; a probe moving
  *    up at the same rate as the surface under it should feel no drag at all.
  *    The surface's vertical velocity is differentiated per probe across frames.
+ *  - **Buoyancy does not stop growing when the probe plane goes under.** See
+ *    `reserveBuoyancy`. The probes sit on the waterline, so once they are
+ *    `probeDepth` under there is nothing left for the ramp to say — but the body
+ *    still has all its volume *above* that plane left to displace, and that
+ *    reserve is what actually rights a hull that has been driven under.
  *  - **Semi-implicit Euler, substepped.** Velocity is updated before position,
  *    which is unconditionally stable for a spring-damper at these frequencies,
  *    and the substep is capped so a 200 ms browser stall cannot fling the ship
@@ -53,6 +58,29 @@ export interface BuoyantBodyOptions {
    * body sinks; 2.2 puts the resting waterline at 45% of `probeDepth`.
    */
   buoyancyStrength?: number;
+  /**
+   * Buoyant force once the body is *completely* under, as a multiple of weight.
+   * Must be >= `buoyancyStrength`; equal to it restores the old hard ceiling.
+   *
+   * `buoyancyStrength` is the force when the **probe plane** is fully immersed,
+   * and the probes lie on the waterline — so that is the force at roughly the
+   * design draft, not the force at full immersion. A hull has most of its volume
+   * *above* the waterline (this ship floats at 31% of its depth), and displacing
+   * that volume is what stops a boat that has been driven under from staying
+   * under. Clamping the ramp at `buoyancyStrength` threw all of it away: past
+   * about 1.7 m of immersion the restoring force stopped growing while the
+   * wave-following damper below did not, and in a steep sea the surface's own
+   * vertical velocity is fast enough for that damper to exceed the frozen
+   * buoyancy — a net *downward* force on a fully submerged hull, measured at up
+   * to 1.4x weight against a ceiling of 2.2x. Nothing then brings the hull back
+   * before the next crest arrives.
+   *
+   * The default doubles it. That is deliberately conservative: for this hull the
+   * true ratio of hull volume to displaced volume is nearer 4, and for a sealed
+   * barrel it is an order of magnitude. It is enough to make deep immersion
+   * self-correcting without turning the body into a cork.
+   */
+  reserveBuoyancy?: number;
   /** Vertical damping as a fraction of critical. 0.3–0.5 reads like a hull. */
   linearDamping?: number;
   /** Extra rotational damping as a fraction of critical, on top of the probes'. */
@@ -120,6 +148,12 @@ export class BuoyantBody {
   private readonly buoyancyStrength: number;
   private readonly probeDepth: number;
   private readonly restSubmersion: number;
+  /**
+   * How far past full probe-plane immersion the submersion term may still climb,
+   * in units of `restSubmersion`-normalised submersion. Zero disables the
+   * reserve entirely and reproduces the old hard clamp.
+   */
+  private readonly reserveSpan: number;
   private readonly naturalFrequency: number;
   private readonly linearDampingRatio: number;
   private readonly angularDampingRatio: number;
@@ -162,6 +196,14 @@ export class BuoyantBody {
 
     this.buoyancyStrength = Math.max(1.05, options.buoyancyStrength ?? 2.2);
     this.restSubmersion = 1 / this.buoyancyStrength;
+
+    // Held as a span rather than a ratio because that is the form the curve in
+    // `substep` needs, and because it makes "no reserve" exactly zero.
+    const reserveBuoyancy = Math.max(
+      this.buoyancyStrength,
+      options.reserveBuoyancy ?? this.buoyancyStrength * 2,
+    );
+    this.reserveSpan = reserveBuoyancy / this.buoyancyStrength - 1;
 
     const extent = probeExtent(this.probesLocal, this.tmp);
     this.probeDepth = Math.max(
@@ -281,11 +323,30 @@ export class BuoyantBody {
       this.lastWaterY[i] = waterY;
       this.hasLastWaterY[i] = 1;
 
-      const submersion = clamp(
-        this.restSubmersion + (waterY - world.y) / this.probeDepth,
-        0,
-        1,
-      );
+      // Displaced volume, normalised so that 1 means "the probe plane is
+      // `probeDepth` under". The ramp below 1 is the waterplane: linear in
+      // immersion, and the whole basis of the derived stiffness and of the
+      // damping ratios, so it is left exactly as it was.
+      //
+      // Above 1 the body is displacing volume the probe plane cannot see, and
+      // the curve continues into `reserveSpan` — saturating exponentially,
+      // because a hull runs out of hull. Two properties matter and neither is
+      // free: the join at 1 is C1 (the exponential's initial slope is exactly
+      // the ramp's, so there is no step in stiffness for the solver to ring on),
+      // and the whole thing is bounded, so a probe that ends up a hundred metres
+      // under still produces a finite force. A clamp at 1 with a stiffer ramp
+      // above it was tried instead and excited a roll oscillation to 66 degrees
+      // — the discontinuity in stiffness, not the extra force, is what does it.
+      const immersion = this.restSubmersion + (waterY - world.y) / this.probeDepth;
+      let submersion: number;
+      if (immersion <= 1) {
+        submersion = immersion > 0 ? immersion : 0;
+      } else if (this.reserveSpan > 0) {
+        submersion =
+          1 + this.reserveSpan * (1 - Math.exp(-(immersion - 1) / this.reserveSpan));
+      } else {
+        submersion = 1;
+      }
       if (submersion > 0) submergedProbes++;
 
       // v_probe = v + omega x r

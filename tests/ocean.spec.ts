@@ -1258,6 +1258,10 @@ test.describe('interaction', () => {
    * effect is disconnected, and the second one fails if it regresses to uniform.
    */
   test('rain darkens the hull, unevenly, and it dries afterwards', async ({ page }) => {
+    // The drying leg steps 900 frames of a scene that now carries an island,
+    // and deterministic stepping is synchronous with the GPU — so this test's
+    // cost is set by how much there is to draw, not by how much it asserts.
+    test.setTimeout(600_000);
     await page.goto('/');
     await waitForOcean(page);
 

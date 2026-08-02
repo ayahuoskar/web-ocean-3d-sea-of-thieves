@@ -17,11 +17,33 @@ import type { OceanSimulation } from './OceanSimulation';
  * for not generating foam).
  */
 
-const READBACK_SIZE = 64;
-
+/**
+ * Readback grid per cascade, in texels per side.
+ *
+ * This used to be a constant 64, read as `readRenderTargetPixelsAsync(target,
+ * 0, 0, 64, 64)` from a target that is `fftSize` square — 128, 256 or 512. That
+ * is not a downsample. It is the **bottom-left corner**, and `sampleBilinear`
+ * then spread those 64 texels across the whole tile, so the physics floated the
+ * hull on the corner quarter of the wave field stretched over all of it.
+ *
+ * The two seas had the same amplitude and nothing else: measured against the
+ * true field reconstructed from the same targets, correlation was 0.075 and the
+ * rms difference 2.30 m, worst 6.26 m. The hull's height relative to the water
+ * a viewer can see was therefore very nearly uncorrelated with it, which is what
+ * "the ship sometimes goes under" actually was — not a buoyancy failure but the
+ * solver and the renderer disagreeing about where the water is. It also explains
+ * why it was intermittent: whether the hull sat high or low depended on where it
+ * happened to be relative to a phase error, not on the sea state.
+ *
+ * The slice now covers the whole target. The size is per-cascade because a tier
+ * change moves `fftSize`, and it is read back from the target rather than
+ * assumed.
+ */
 interface CascadeSlice {
   tileSize: number;
-  /** RGBA half-float texels, READBACK_SIZE^2. */
+  /** Texels per side of this slice. Matches the target it was read from. */
+  size: number;
+  /** RGBA half-float texels, `size^2`. */
   data: Float32Array | null;
 }
 
@@ -46,7 +68,7 @@ export class OceanSampler {
   rebuild(): void {
     this.slices.length = 0;
     for (const tileSize of this.simulation.tileSizes) {
-      this.slices.push({ tileSize, data: null });
+      this.slices.push({ tileSize, size: 0, data: null });
     }
     this.everResolved = false;
   }
@@ -84,13 +106,19 @@ export class OceanSampler {
     try {
       const targets = this.simulation.displacementTargets;
       for (let i = 0; i < this.slices.length && i < targets.length; i++) {
+        // The whole target. Half-float RGBA is 8 bytes a texel, so a 256 row is
+        // 2048 bytes and a 512 row 4096 — both multiples of the 256-byte
+        // alignment the readback needs, so no padding rows appear and the
+        // partial-read trap that produced the corner bug cannot recur.
+        const size = targets[i].width;
         const raw = await this.renderer.readRenderTargetPixelsAsync(
           targets[i],
           0,
           0,
-          READBACK_SIZE,
-          READBACK_SIZE,
+          size,
+          size,
         );
+        this.slices[i].size = size;
         this.slices[i].data = decodeInto(raw, this.slices[i]);
       }
       this.everResolved = true;
@@ -110,7 +138,13 @@ export class OceanSampler {
     out.set(0, 0, 0);
     for (const slice of this.slices) {
       if (!slice.data) continue;
-      sampleBilinear(slice.data, x / slice.tileSize, z / slice.tileSize, this.scratchTexel);
+      sampleBilinear(
+        slice.data,
+        slice.size,
+        x / slice.tileSize,
+        z / slice.tileSize,
+        this.scratchTexel,
+      );
       out.x += this.scratchTexel[0];
       out.y += this.scratchTexel[1];
       out.z += this.scratchTexel[2];
@@ -158,8 +192,13 @@ export class OceanSampler {
 }
 
 /** Wraps to [0,1) then samples with bilinear interpolation. */
-function sampleBilinear(data: Float32Array, u: number, v: number, out: Float32Array): void {
-  const size = READBACK_SIZE;
+function sampleBilinear(
+  data: Float32Array,
+  size: number,
+  u: number,
+  v: number,
+  out: Float32Array,
+): void {
   const fx = (((u % 1) + 1) % 1) * size - 0.5;
   const fz = (((v % 1) + 1) % 1) * size - 0.5;
   const x0 = Math.floor(fx);
