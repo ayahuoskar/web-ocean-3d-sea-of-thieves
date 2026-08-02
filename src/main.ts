@@ -582,6 +582,20 @@ class App {
       console.error('[ocean] scene props failed to load', propsResult.reason);
     }
 
+    // Compile what just arrived, before it is first drawn.
+    //
+    // `prewarm` runs before this function is even called — it has to, because
+    // the loop must start without waiting on the network — so every material the
+    // ship and the dressing bring with them was compiling inline on the frame
+    // that first rendered it. That is a shader compile during gameplay, which
+    // this project's constraints rule out, and placing the scene dressing made
+    // it considerably worse: twenty more models, each with its own materials.
+    //
+    // It is safe to await here because `sceneContentLoaded` is not set until it
+    // returns, so nothing observes a half-compiled scene, and `compileAsync` is
+    // best-effort by construction.
+    await this.prewarm();
+
     this.sceneContentLoaded = true;
   }
 
