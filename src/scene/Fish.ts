@@ -18,10 +18,10 @@ import {
   vec4,
 } from 'three/tsl';
 import { mulberry32 } from '../core/random';
-import { seafloorHeight } from './Seafloor';
+import { ISLAND, seafloorHeight } from './Seafloor';
 
 /**
- * Schools of reef fish over the shallow plateau.
+ * Schools of fish, over the plateau, the reef and the island's shallows.
  *
  * **Why the geometry is procedural rather than a downloaded asset.** A rigged
  * glTF fish under a licence this project can verify was not obtainable, and for
@@ -48,9 +48,18 @@ import { seafloorHeight } from './Seafloor';
  * its centre, heading and bank for any `t` in a handful of trig calls — and,
  * crucially, can call `seafloorHeight` there. The floor clamp therefore uses
  * the *real* heightfield rather than a shader approximation of it, and only
- * two `vec4`s per school ever reach the GPU. Individual fish are placed as
+ * three `vec4`s per school ever reach the GPU. Individual fish are placed as
  * offsets in that frame, weaving on their own phases, so the school has volume
  * and is not a rigid formation.
+ *
+ * **A school is not one behaviour.** The same closed-form machinery drives two
+ * very different animals, because the difference between them is entirely in the
+ * constants. An open-water shoal runs a two-hundred-metre circuit at cruise,
+ * spread over thirty-four metres, holding a fixed depth below the surface. A
+ * reef resident orbits a fixed piece of structure at a third of a metre a
+ * second, packed into a third of the volume, and holds its depth above the
+ * *floor* rather than below the surface — so it follows the bottom over an
+ * outcrop instead of sliding across it. See `SCHOOL_LAYOUT`.
  *
  * **Nothing accumulates.** Every visible quantity is a pure function of the
  * clock: `resetClock(t)` and `update()`-ing to `t` produce a bit-identical
@@ -100,17 +109,74 @@ const FISH_SEED = 0x5f15c4;
 const MAX_FISH = 480;
 
 /**
- * Independent schools.
+ * The schools, in the order the tier's budget populates them.
  *
- * More than one because a single shoal is off camera most of the time: the
- * circuit takes ten minutes and the viewer is usually near the origin looking
- * one way. Four covers the reef well enough that something is nearly always in
- * frame, and it is a compile-time constant so the per-school uniforms can be
- * chosen with a `select` chain instead of a dynamically indexed array — the
- * latter is legal on both backends but is the kind of thing WebGL2 drivers have
- * historically been bad at, for no gain at four entries.
+ * Three ways of being a fish, not one:
+ *
+ *   `open`    a shoal crossing open water on a wide circuit round the origin.
+ *             The original behaviour, unchanged in character.
+ *   `reef`    residents holding station over one patch of the reef — milling
+ *             about a fixed piece of structure rather than travelling anywhere,
+ *             and holding their depth above the floor rather than below the
+ *             surface.
+ *   `island`  the same behaviour, in the island's shallows.
+ *   `patrol`  one wide, slow lap round the island, so its shelf has something
+ *             crossing it as well as something sitting on it.
+ *
+ * Every fish in this project used to be in the first kind, on a circuit centred
+ * on the world origin, which meant that the two places a viewer will
+ * deliberately go and dive — the reef and the island — had nothing living over
+ * them. This is a redistribution and not an increase: the tier counts are
+ * untouched and the same fish are spread over more places worth finding.
+ *
+ * **The order is the priority**, and the interleaving is not decorative — see
+ * `SCHOOL_ACTIVATION`. At the lowest populated tier only the first four schools
+ * exist, so an order that put the four open-water shoals first would leave
+ * Medium with exactly the empty reef this change is about.
+ *
+ * Ten is still a compile-time constant, so the per-school uniforms are chosen
+ * with a `select` chain rather than a dynamically indexed array — legal on both
+ * backends, but the kind of thing WebGL2 drivers have historically been bad at,
+ * and the chain costs a few ternaries on a population whose entire vertex count
+ * is under eleven thousand.
  */
-const SCHOOLS = 4;
+type SchoolKind = 'open' | 'reef' | 'island' | 'patrol';
+
+const SCHOOL_LAYOUT: readonly SchoolKind[] = [
+  'open',
+  'reef',
+  'open',
+  'island',
+  'reef',
+  'open',
+  'island',
+  'reef',
+  'open',
+  'patrol',
+];
+
+const SCHOOLS = SCHOOL_LAYOUT.length;
+
+/** How many of each kind there are, for the stratified layouts below. */
+const OPEN_SCHOOLS = SCHOOL_LAYOUT.filter((kind) => kind === 'open').length;
+const REEF_SCHOOLS = SCHOOL_LAYOUT.filter((kind) => kind === 'reef').length;
+const ISLAND_SCHOOLS = SCHOOL_LAYOUT.filter((kind) => kind === 'island').length;
+
+/**
+ * Fish index at which each school starts to be populated.
+ *
+ * The problem: ten schools sharing Medium's forty fish is four fish each, and
+ * four fish is not a school — it is four fish. Splitting a budget evenly is only
+ * right when the budget is large, and this one runs from 40 to 220.
+ *
+ * So a school does not exist until the population can support it. `i % SCHOOLS`
+ * becomes "give this fish to the emptiest school that has activated by now",
+ * which still depends only on `i` — fish `i` therefore keeps its school at every
+ * tier, and a tier change re-scales the population instead of reshuffling it,
+ * exactly as before. The thresholds land each tier near twenty fish per active
+ * school: 40 fills four schools, 90 fills six, 140 fills eight, 220 fills ten.
+ */
+const SCHOOL_ACTIVATION: readonly number[] = [0, 0, 14, 30, 48, 70, 96, 126, 160, 196];
 
 // ------------------------------------------------------------------ the circuit
 
@@ -123,12 +189,12 @@ const SCHOOLS = 4;
  * put a corner in the path, and the heading and bank are read from finite
  * differences of it, so a corner would be a visible flick of the whole school.
  *
- * The four base radii are *stratified* over the band — one per quarter, jittered
- * inside it — rather than drawn independently. Four independent draws from this
- * range land within 40 m of each other about a fifth of the time, and the seed
- * this module shipped with was one of those: every school ended up beyond 165 m,
- * where a 0.45 m fish through this water is a smudge. Stratifying makes the
- * coverage a property of the layout instead of a property of the seed.
+ * The open-water base radii are *stratified* over the band — one per quarter,
+ * jittered inside it — rather than drawn independently. Four independent draws
+ * from this range land within 40 m of each other about a fifth of the time, and
+ * the seed this module shipped with was one of those: every school ended up
+ * beyond 165 m, where a 0.45 m fish through this water is a smudge. Stratifying
+ * makes the coverage a property of the layout instead of a property of the seed.
  */
 const RADIUS_MIN = 55;
 const RADIUS_MAX = 200;
@@ -149,38 +215,29 @@ const DEPTH_MAX = 10.5;
 const DEPTH_SWING = 2.8;
 
 /**
- * School envelope, metres. Length runs along the heading, width across it.
+ * Open-water school envelope, metres. Length runs along the heading, width
+ * across it. Also the reference the weave amplitudes are scaled against, so a
+ * tighter school automatically weaves less — see `WEAVE_ALONG`.
  *
  * A tension, resolved toward the tighter shoal: a wide school is in frame more
  * often, a tight one actually looks like a school. At 34 x 18 m a full-tier
  * shoal of 120 sits about three metres apart — loose for a reef fish, but this
  * is a school crossing open water between outcrops rather than one balled up
- * against a predator, and the four separate circuits already buy back the
- * coverage a wider envelope would have.
+ * against a predator, and the separate circuits already buy back the coverage a
+ * wider envelope would have.
  */
 const SCHOOL_LENGTH = 34;
 const SCHOOL_WIDTH = 18;
 const SCHOOL_HALF_HEIGHT = 3.0;
 
 /**
- * Half-size of the square the floor is probed over, metres.
- *
- * Covers the school envelope at any heading: the corner of the 34 x 18 m box
- * plus the weave amplitudes sits at 22.5 m from the centre, whichever way it is
- * rotated. Probed on a 3x3 grid rather than densely — measured against a 3 m
- * scan of the same square over the whole radial band, the grid underestimates
- * the true maximum by at most 0.33 m, which `FLOOR_CLEARANCE` absorbs several
- * times over.
- */
-const FOOTPRINT = 23;
-
-/**
- * Metres of water kept between the lowest fish and the sand.
+ * Metres of water kept between the lowest open-water fish and the sand.
  *
  * The floor under the reef band tops out at -14.7 m, so this leaves the school
  * at least 2 m of clearance in the worst place on the circuit and several times
  * that in the typical one. It is not a safety epsilon — it is the height a
- * school of fish visibly holds off the bottom.
+ * school of fish visibly holds off the bottom. Residents get their own, much
+ * smaller: see `RESIDENT_CLEARANCE`.
  */
 const FLOOR_CLEARANCE = 2.5;
 
@@ -192,6 +249,202 @@ const FLOOR_CLEARANCE = 2.5;
  * a bug instantly. Three metres survives the swell this project generates.
  */
 const SURFACE_CLEARANCE = 3.0;
+
+// ---------------------------------------------------------------- the residents
+
+/**
+ * The resident circuit: a loop small enough to read as station-keeping.
+ *
+ * A reef fish's home range is metres, not hundreds of metres, and the thing that
+ * makes a resident school look resident is that it never *goes* anywhere — it
+ * turns over the same rock for as long as you watch it. A ten-metre orbit at a
+ * third of a metre a second takes about three minutes to close, and the radial
+ * wander below drifts the whole loop over a neighbourhood roughly twice that
+ * wide, which together read as milling rather than as a fish on a rail.
+ *
+ * The wander stays well under the base radius on purpose. `r` is a polar radius
+ * and a negative one turns the circuit inside out, taking the heading with it —
+ * and the heading is read from finite differences, so it would arrive as the
+ * whole school flipping end for end in a single frame.
+ */
+const RESIDENT_RADIUS_MIN = 9;
+const RESIDENT_RADIUS_MAX = 15;
+const RESIDENT_CRUISE_MIN = 0.3;
+const RESIDENT_CRUISE_MAX = 0.45;
+const RESIDENT_WANDER_R1 = 5;
+const RESIDENT_WANDER_R2 = 2.5;
+
+/**
+ * Metres a resident school holds *above the floor beneath it*.
+ *
+ * The single most important difference between the two kinds, and the reason the
+ * vertical reference is a per-school choice rather than a constant. A school at
+ * a fixed depth below the surface passes over an outcrop without noticing it; a
+ * school at a fixed height above the floor rises over the outcrop and settles
+ * again behind it, which is what reef fish do and what makes the structure they
+ * are holding to legible from a distance.
+ */
+const RESIDENT_HOVER_MIN = 2.2;
+const RESIDENT_HOVER_MAX = 4.0;
+const RESIDENT_HOVER_SWING = 1.0;
+
+/**
+ * Resident envelope, metres — a third of the open-water shoal's volume.
+ *
+ * Reef fish school tighter than pelagic ones because the structure is what they
+ * are spacing themselves against, not each other. At 13 x 10 m a full school of
+ * twenty-two sits a little over a metre and a half apart, which is dense enough
+ * to read as one animal moving rather than as twenty-two.
+ */
+const RESIDENT_LENGTH = 13;
+const RESIDENT_WIDTH = 10;
+const RESIDENT_HALF_HEIGHT = 2.0;
+
+/**
+ * Water a resident school keeps between its lowest fish and the sand, metres.
+ *
+ * Far less than the open-water shoals' 2.5, and it has to be, or the clamp would
+ * undo the hover: a school asking to sit 2.2 m off the bottom with a 2 m half
+ * envelope and a 2.5 m clearance gets pushed to 4.5 m and is no longer near the
+ * structure it is supposed to be holding to. A metre is what a reef fish
+ * actually leaves under itself.
+ */
+const RESIDENT_CLEARANCE = 1.0;
+
+/**
+ * Resident tail beat and weave, as multiples of the open-water rates.
+ *
+ * The beat drops far less than the speed does, and deliberately. Scaled
+ * linearly with ground speed, a school cruising at 0.35 m/s instead of 1.2 would
+ * beat at 1 Hz, and a fish beating at 1 Hz does not look like it is holding
+ * station — it looks dead and drifting. A fish holding position is not gliding:
+ * it is working against the surge in short strokes and using its pectorals, so
+ * the tail keeps moving even where the fish does not.
+ *
+ * The weave goes the other way. A resident mills, so its individuals cycle
+ * through their own offsets faster than a cruising shoal's do, even though the
+ * offsets themselves are smaller.
+ */
+const RESIDENT_BEAT_SCALE = 0.7;
+const RESIDENT_WEAVE_SCALE = 1.55;
+
+/**
+ * The island patrol: a long shelf circuit rather than a lap of the island.
+ *
+ * The first version of this *was* a circumnavigation, at a fixed fraction of
+ * `ISLAND.radius`, and it was wrong the moment the island stopped being a cone.
+ * The coast now runs from 0.70 radii at the head of the bay to 1.25 at the tip
+ * of the headland, so no circle centred on the island is entirely in water: at
+ * 1.15 radii a fifth of the lap is over dry ground, and the floor clamp's answer
+ * to a school over dry ground is to collapse its envelope and park it three
+ * metres under mean sea level — which is to say, inside the hill.
+ *
+ * So the patrol is anchored to a station like the residents are, and simply
+ * given a much larger circuit, a faster cruise and a surface-referenced depth.
+ * It reads as a school working a stretch of shelf, which is the thing that was
+ * wanted, and it cannot leave the water because `fitCircuit` shrinks it until it
+ * does not.
+ */
+const PATROL_RADIUS = 90;
+const PATROL_WANDER_R1 = 22;
+const PATROL_WANDER_R2 = 9;
+const PATROL_CRUISE = 0.75;
+const PATROL_LENGTH = 26;
+const PATROL_WIDTH = 14;
+const PATROL_HALF_HEIGHT = 2.6;
+
+/** Where a resident school may hold station: an annulus and a depth band. */
+interface StationBand {
+  x: number;
+  z: number;
+  minRadius: number;
+  maxRadius: number;
+  minDepth: number;
+  maxDepth: number;
+}
+
+/**
+ * The reef's stations.
+ *
+ * `Props` owns the rock scatter and does not export its extent, so the annulus
+ * is stated rather than imported — but it only decides where to *look*, and the
+ * heightfield decides what is accepted. The depth floor is what matters, and it
+ * is derived rather than chosen: see `depthForSchool`.
+ */
+const REEF_STATION_BAND: StationBand = {
+  x: 0,
+  z: 0,
+  minRadius: 45,
+  maxRadius: 190,
+  minDepth: depthForSchool(RESIDENT_CLEARANCE, RESIDENT_HALF_HEIGHT) + 1,
+  maxDepth: 22,
+};
+
+/**
+ * The island's stations — its *shallows*, which is a narrower thing.
+ *
+ * In radii, because the island's size is not this module's to know, and because
+ * it demonstrably changes. On the shelf as it stands the mean waterline is at
+ * about one radius, so 0.85 to 1.35 brackets the shelf on both sides while the
+ * depth band picks the part of it a school can actually occupy; about one sample
+ * in ten is accepted, which forty-eight tries covers comfortably.
+ *
+ * The ceiling is what keeps the word "shallows" honest. Without it every station
+ * slid to the outer edge of the annulus, into the twenty-odd metres of water off
+ * the drop, and the island schools quietly became open-water schools that
+ * happened to be near an island.
+ */
+const ISLAND_STATION_BAND: StationBand = {
+  x: ISLAND.x,
+  z: ISLAND.z,
+  minRadius: ISLAND.radius * 0.85,
+  maxRadius: ISLAND.radius * 1.35,
+  minDepth: depthForSchool(RESIDENT_CLEARANCE, RESIDENT_HALF_HEIGHT) + 3,
+  maxDepth: 18,
+};
+
+/**
+ * The patrol's anchor: the outer shelf, and deliberately deep.
+ *
+ * 22 m is twice what the envelope strictly needs, and the margin is the whole
+ * point. What shrinks a long circuit is not the mean depth at its centre but the
+ * *relief* within ninety metres of it, and the island's inner shelf has plenty:
+ * anchored at the minimum depth the school fits in, `fitCircuit` found a bump
+ * every time and collapsed a 90 m lap to fifteen — a school that had stopped
+ * patrolling anything and was simply a wide resident. Out here the slope is
+ * smooth and the same nominal circuit survives at 63 m, which is a school
+ * working a 170 m stretch of shelf.
+ */
+const PATROL_STATION_BAND: StationBand = {
+  x: ISLAND.x,
+  z: ISLAND.z,
+  minRadius: ISLAND.radius,
+  maxRadius: ISLAND.radius * 1.7,
+  minDepth: 22,
+  maxDepth: 44,
+};
+
+/** Candidate stations tried before the closest near-miss is taken. */
+const STATION_TRIES = 48;
+
+/** Bearings and radii the circuit fit probes, and how far it will shrink. */
+const CIRCUIT_PROBES = 12;
+const CIRCUIT_FIT_STEPS = 6;
+const CIRCUIT_FIT_RATIO = 0.7;
+
+/**
+ * The shallowest water a school of this shape fits in, metres.
+ *
+ * Straight out of `solveAnchor`'s own arithmetic rather than judged: the centre
+ * has to sit at least `clearance + halfHeight` above the floor and at least
+ * `SURFACE_CLEARANCE + halfHeight` below the surface, so anything shallower than
+ * their sum collapses the envelope and stacks the whole school into a plane.
+ * Written as a function so the station bands and the circuit fit cannot drift
+ * apart from the clamp they are both feeding.
+ */
+function depthForSchool(clearance: number, halfHeight: number): number {
+  return clearance + 2 * halfHeight + SURFACE_CLEARANCE;
+}
 
 /**
  * Central-difference half-step for heading and bank, seconds.
@@ -233,15 +486,25 @@ const PITCH_MAX = 0.25;
 /**
  * Fundamental of the individual weave, rad/s. About a minute per cycle.
  *
- * Every other weave frequency in the shader is an integer multiple of this one,
- * which is what lets the phase uniform wrap at 2pi with no discontinuity. Fish
- * do not really share a fundamental; the seeded phase offsets hide it
- * completely, and the alternative — independent rates — is what forces the
- * float32 clock this module exists to avoid.
+ * Every other weave frequency in the shader is an integer multiple of *the
+ * school's own* phase, which is what lets each phase uniform wrap at 2pi with no
+ * discontinuity — and, because the CPU reduces each school's phase separately in
+ * float64, is also what lets the residents weave at a different rate for free.
+ * Fish do not really share a fundamental; the seeded phase offsets hide it
+ * completely, and the alternative — independent rates per *fish* — is what
+ * forces the float32 clock this module exists to avoid.
  */
 const WEAVE_OMEGA = 0.11;
 
-/** Weave amplitudes within the school frame, metres. */
+/**
+ * Weave amplitudes within the school frame, metres, at the open-water envelope.
+ *
+ * Scaled in the shader by the school's own envelope against `SCHOOL_LENGTH` and
+ * `SCHOOL_WIDTH`, so a resident school weaving inside a 13 x 10 m box swings
+ * about a metre rather than two and a half. Deriving it rather than giving each
+ * kind its own constant is what keeps a fish from weaving out of the envelope
+ * the CPU proved clear of the sand.
+ */
 const WEAVE_ALONG = 2.5;
 const WEAVE_LATERAL = 2.2;
 
@@ -329,14 +592,39 @@ const SHEEN = 0.07;
 
 /** One school's circuit. Every field is a constant of a closed-form path. */
 interface SchoolPath {
+  /** Circuit centre, world XZ. The origin for the open-water shoals. */
+  cx: number;
+  cz: number;
   theta0: number;
   omega: number;
   radius: number;
+  wanderR1: number;
+  wanderR2: number;
   r1Phase: number;
   r2Phase: number;
+  /**
+   * Which surface `depth` is measured from.
+   *
+   * `false` — metres below mean sea level, for anything swimming in the water
+   * column. `true` — metres above the highest floor under the school's
+   * footprint, for anything holding to structure. See `RESIDENT_HOVER_MIN`.
+   */
+  fromFloor: boolean;
   depth: number;
+  depthSwing: number;
   depthRate: number;
   depthPhase: number;
+  /** Envelope, metres, and the square the floor is probed over. */
+  length: number;
+  width: number;
+  halfHeight: number;
+  footprint: number;
+  clearance: number;
+  /** Weave and tail-beat rates, rad/s. Reduced to a phase every frame. */
+  weaveOmega: number;
+  beatOmega: number;
+  /** Body-length multiplier for this school's fish. */
+  scale: number;
 }
 
 export interface FishSchoolOptions {
@@ -345,7 +633,8 @@ export interface FishSchoolOptions {
 }
 
 /**
- * A population of reef fish in `SCHOOLS` independent shoals.
+ * A population of fish in `SCHOOLS` independent shoals — see `SCHOOL_LAYOUT`
+ * for where they are and how the three kinds differ.
  *
  * Add `object` to the scene. It carries an identity transform and the vertex
  * stage emits world coordinates directly, so it must be parented to something
@@ -373,14 +662,20 @@ export class FishSchool {
   private time = 0;
 
   // --- uniforms -------------------------------------------------------------
-  /** Weave phase, radians in [0, 2pi). See `WEAVE_OMEGA`. */
-  private readonly uWeave = uniform(0);
-  /** Tail-beat phase, radians in [0, 2pi). */
-  private readonly uBeat = uniform(0);
   /** Per school: xyz = centre, w = vertical half-extent the clamp allows. */
   private readonly uAnchors: Node[] = [];
   /** Per school: xyz = unit heading, w = bank angle. */
   private readonly uHeadings: Node[] = [];
+  /**
+   * Per school: x = envelope length, y = width, z = weave phase, w = beat phase.
+   *
+   * The two phases ride here rather than in their own global uniforms because
+   * they now differ per school — a resident beats slower and weaves faster than
+   * a cruiser — and this vec4 had two free slots. It costs nothing: the shader
+   * already selects one of these per instance, so a per-school rate is the same
+   * number of instructions as a shared one.
+   */
+  private readonly uShapes: Node[] = [];
   private readonly uSunDir = uniform(new THREE.Vector3(0.35, 0.62, 0.7).normalize());
   private readonly uSunColor = uniform(new THREE.Color(SUN_COLOR));
   private readonly uAmbient = uniform(new THREE.Color(AMBIENT_COLOR));
@@ -399,20 +694,16 @@ export class FishSchool {
     this.count = Math.max(0, Math.min(MAX_FISH, Math.floor(count)));
 
     const random = mulberry32(options.seed ?? FISH_SEED);
+    for (const path of buildSchools(random)) this.paths.push(path);
 
-    // Per-school size class, drawn before the paths so both stay stable if
-    // either gains a parameter later.
-    const schoolScale: number[] = [];
-    for (let k = 0; k < SCHOOLS; k++) schoolScale.push(0.8 + random() * 0.55);
-    for (let k = 0; k < SCHOOLS; k++) this.paths.push(buildPath(k, random));
-
-    for (let k = 0; k < SCHOOLS; k++) {
-      this.uAnchors.push(uniform(new THREE.Vector4(0, -8, 0, SCHOOL_HALF_HEIGHT)));
+    for (const path of this.paths) {
+      this.uAnchors.push(uniform(new THREE.Vector4(0, -8, 0, path.halfHeight)));
       this.uHeadings.push(uniform(new THREE.Vector4(1, 0, 0, 0)));
+      this.uShapes.push(uniform(new THREE.Vector4(path.length, path.width, 0, 0)));
     }
 
     this.geometry = buildFishGeometry();
-    attachInstanceAttributes(this.geometry, schoolScale, options.seed ?? FISH_SEED);
+    attachInstanceAttributes(this.geometry, this.paths, options.seed ?? FISH_SEED);
 
     this.material = this.buildMaterial();
 
@@ -487,9 +778,10 @@ export class FishSchool {
    * Runs whether or not the schools are visible, and that is deliberate: making
    * the clock depend on visibility would make the pose depend on the history of
    * `setVisible` calls, which is exactly the class of hidden state
-   * `resetClock` exists to rule out. The cost is 108 heightfield evaluations —
-   * four schools, three time samples, nine probes — which is well under a
-   * hundredth of a millisecond.
+   * `resetClock` exists to rule out. The cost is 270 heightfield evaluations —
+   * ten schools, three time samples, nine probes — which is a few hundredths of
+   * a millisecond, and is the price of the floor clamp being exact rather than a
+   * shader's guess at the same field.
    */
   update(dt: number): void {
     if (this.disposed) return;
@@ -528,10 +820,6 @@ export class FishSchool {
   private refresh(): void {
     const t = this.time;
 
-    // Phases, reduced in float64 so the shader never sees a large argument.
-    this.uWeave.value = wrapTau(t * WEAVE_OMEGA);
-    this.uBeat.value = wrapTau(t * BEAT_HZ * Math.PI * 2);
-
     for (let k = 0; k < SCHOOLS; k++) {
       const path = this.paths[k];
       const half = solveAnchor(path, t, this.here);
@@ -555,6 +843,13 @@ export class FishSchool {
 
       (this.uAnchors[k].value as THREE.Vector4).set(this.here.x, this.here.y, this.here.z, half);
       (this.uHeadings[k].value as THREE.Vector4).set(f.x, f.y, f.z, bank);
+      // Phases, reduced in float64 so the shader never sees a large argument.
+      (this.uShapes[k].value as THREE.Vector4).set(
+        path.length,
+        path.width,
+        wrapTau(t * path.weaveOmega),
+        wrapTau(t * path.beatOmega),
+      );
     }
   }
 
@@ -575,6 +870,7 @@ export class FishSchool {
 
     const anchor = pickPerSchool(this.uAnchors, trait.x);
     const heading = pickPerSchool(this.uHeadings, trait.x);
+    const shape = pickPerSchool(this.uShapes, trait.x);
 
     // --- the school's horizontal frame -------------------------------------
     //
@@ -589,15 +885,24 @@ export class FishSchool {
 
     // --- the individual's weave --------------------------------------------
     const phase = trait.w.mul(Math.PI * 2);
-    const w: Node = this.uWeave;
+    const w: Node = shape.z;
     const weave = w.add(phase);
     const sLat = sin(weave);
     const cLat = cos(weave);
     const sVert = sin(w.mul(2).add(phase.mul(1.7)));
     const sAlong = sin(w.mul(3).add(phase.mul(2.3)));
 
-    const along = seed.x.sub(0.5).mul(SCHOOL_LENGTH).add(sAlong.mul(WEAVE_ALONG));
-    const lateral = seed.y.sub(0.5).mul(SCHOOL_WIDTH).add(sLat.mul(WEAVE_LATERAL));
+    // The envelope and the weave inside it both come from the school's own
+    // uniform, so a resident is genuinely a tighter school and not a cruiser
+    // drawn smaller: its fish are packed closer *and* swing less far.
+    const along = seed.x
+      .sub(0.5)
+      .mul(shape.x)
+      .add(sAlong.mul(shape.x).mul(WEAVE_ALONG / SCHOOL_LENGTH));
+    const lateral = seed.y
+      .sub(0.5)
+      .mul(shape.y)
+      .add(sLat.mul(shape.y).mul(WEAVE_LATERAL / SCHOOL_WIDTH));
     // Scaled by the clamp's own half-extent and bounded by construction: the
     // fixed and weaving parts sum to at most one, so no fish can leave the band
     // the CPU proved clear of the sand and the surface.
@@ -628,7 +933,7 @@ export class FishSchool {
     // caudal tips, which is why the tail sweeps hardest without needing a
     // separate term for the fin.
     const s = float(0.5).sub(p.x);
-    const beat = this.uBeat.add(seed.w.mul(Math.PI * 2)).sub(s.mul(WAVE_K));
+    const beat = shape.w.add(seed.w.mul(Math.PI * 2)).sub(s.mul(WAVE_K));
     const amp = s.mul(s).mul(WAVE_AMP);
     const swing = sin(beat).mul(amp);
 
@@ -718,9 +1023,49 @@ export class FishSchool {
 
 // --------------------------------------------------------------------- the path
 
-function buildPath(index: number, random: () => number): SchoolPath {
+/**
+ * Every school, in `SCHOOL_LAYOUT` order.
+ *
+ * Drawn from one generator in a fixed order, so the layout is a pure function of
+ * the seed — the same property the instance attributes rely on, and for the same
+ * reason: a baseline capture that cannot survive a reload is not a baseline.
+ */
+function buildSchools(random: () => number): SchoolPath[] {
+  const paths: SchoolPath[] = [];
+  let open = 0;
+  let reef = 0;
+  let island = 0;
+
+  for (const kind of SCHOOL_LAYOUT) {
+    switch (kind) {
+      case 'open':
+        paths.push(buildOpenPath(open++, random));
+        break;
+      case 'reef':
+        paths.push(
+          buildResidentPath(random, findStation(random, REEF_STATION_BAND, reef++, REEF_SCHOOLS)),
+        );
+        break;
+      case 'island':
+        paths.push(
+          buildResidentPath(
+            random,
+            findStation(random, ISLAND_STATION_BAND, island++, ISLAND_SCHOOLS),
+          ),
+        );
+        break;
+      case 'patrol':
+        paths.push(buildPatrolPath(random, findStation(random, PATROL_STATION_BAND, 0, 1)));
+        break;
+    }
+  }
+
+  return paths;
+}
+
+function buildOpenPath(index: number, random: () => number): SchoolPath {
   // One school per quarter of the radial band, jittered within it. See RADIUS_MIN.
-  const slice = (RADIUS_MAX - RADIUS_MIN) / SCHOOLS;
+  const slice = (RADIUS_MAX - RADIUS_MIN) / OPEN_SCHOOLS;
   const radius = RADIUS_MIN + (index + 0.15 + random() * 0.7) * slice;
   const cruise = CRUISE_MIN + random() * (CRUISE_MAX - CRUISE_MIN);
   // Angular rate derived from a cruise speed rather than chosen directly, so a
@@ -729,15 +1074,251 @@ function buildPath(index: number, random: () => number): SchoolPath {
   const direction = random() < 0.5 ? -1 : 1;
 
   return {
+    cx: 0,
+    cz: 0,
     theta0: random() * Math.PI * 2,
     omega: (direction * cruise) / radius,
     radius,
+    wanderR1: WANDER_R1,
+    wanderR2: WANDER_R2,
     r1Phase: random() * Math.PI * 2,
     r2Phase: random() * Math.PI * 2,
+    fromFloor: false,
     depth: DEPTH_MIN + random() * (DEPTH_MAX - DEPTH_MIN),
+    depthSwing: DEPTH_SWING,
     depthRate: 0.012 + random() * 0.018,
     depthPhase: random() * Math.PI * 2,
+    length: SCHOOL_LENGTH,
+    width: SCHOOL_WIDTH,
+    halfHeight: SCHOOL_HALF_HEIGHT,
+    footprint: footprintFor(SCHOOL_LENGTH, SCHOOL_WIDTH),
+    clearance: FLOOR_CLEARANCE,
+    weaveOmega: WEAVE_OMEGA,
+    beatOmega: BEAT_HZ * Math.PI * 2,
+    scale: 0.8 + random() * 0.55,
   };
+}
+
+/**
+ * A school that lives somewhere rather than travelling through it.
+ *
+ * Same closed form, different constants — and one structural difference:
+ * `fromFloor`, which measures the school's depth up from the bottom instead of
+ * down from the surface. See `RESIDENT_HOVER_MIN`.
+ */
+function buildResidentPath(random: () => number, station: Station): SchoolPath {
+  const nominal = RESIDENT_RADIUS_MIN + random() * (RESIDENT_RADIUS_MAX - RESIDENT_RADIUS_MIN);
+  const cruise = RESIDENT_CRUISE_MIN + random() * (RESIDENT_CRUISE_MAX - RESIDENT_CRUISE_MIN);
+  const direction = random() < 0.5 ? -1 : 1;
+
+  const fit = fitCircuit(
+    station,
+    nominal,
+    RESIDENT_WANDER_R1 + RESIDENT_WANDER_R2,
+    footprintFor(RESIDENT_LENGTH, RESIDENT_WIDTH),
+    depthForSchool(RESIDENT_CLEARANCE, RESIDENT_HALF_HEIGHT),
+  );
+  const radius = nominal * fit;
+
+  return {
+    cx: station.x,
+    cz: station.z,
+    theta0: random() * Math.PI * 2,
+    omega: (direction * cruise) / radius,
+    radius,
+    wanderR1: RESIDENT_WANDER_R1 * fit,
+    wanderR2: RESIDENT_WANDER_R2 * fit,
+    r1Phase: random() * Math.PI * 2,
+    r2Phase: random() * Math.PI * 2,
+    fromFloor: true,
+    depth: RESIDENT_HOVER_MIN + random() * (RESIDENT_HOVER_MAX - RESIDENT_HOVER_MIN),
+    depthSwing: RESIDENT_HOVER_SWING,
+    depthRate: 0.02 + random() * 0.03,
+    depthPhase: random() * Math.PI * 2,
+    length: RESIDENT_LENGTH,
+    width: RESIDENT_WIDTH,
+    halfHeight: RESIDENT_HALF_HEIGHT,
+    footprint: footprintFor(RESIDENT_LENGTH, RESIDENT_WIDTH),
+    clearance: RESIDENT_CLEARANCE,
+    weaveOmega: WEAVE_OMEGA * RESIDENT_WEAVE_SCALE,
+    beatOmega: BEAT_HZ * RESIDENT_BEAT_SCALE * Math.PI * 2,
+    // Reef residents are smaller fish than the pelagic shoals; the size class is
+    // most of what distinguishes them at the range they are seen from.
+    scale: 0.6 + random() * 0.42,
+  };
+}
+
+/** A long circuit of the island's shelf. See `PATROL_RADIUS`. */
+function buildPatrolPath(random: () => number, station: Station): SchoolPath {
+  const fit = fitCircuit(
+    station,
+    PATROL_RADIUS,
+    PATROL_WANDER_R1 + PATROL_WANDER_R2,
+    footprintFor(PATROL_LENGTH, PATROL_WIDTH),
+    depthForSchool(FLOOR_CLEARANCE, PATROL_HALF_HEIGHT),
+  );
+  const radius = PATROL_RADIUS * fit;
+  const direction = random() < 0.5 ? -1 : 1;
+
+  return {
+    cx: station.x,
+    cz: station.z,
+    theta0: random() * Math.PI * 2,
+    omega: (direction * PATROL_CRUISE) / radius,
+    radius,
+    wanderR1: PATROL_WANDER_R1 * fit,
+    wanderR2: PATROL_WANDER_R2 * fit,
+    r1Phase: random() * Math.PI * 2,
+    r2Phase: random() * Math.PI * 2,
+    fromFloor: false,
+    depth: DEPTH_MIN + random() * (DEPTH_MAX - DEPTH_MIN),
+    depthSwing: DEPTH_SWING,
+    depthRate: 0.012 + random() * 0.018,
+    depthPhase: random() * Math.PI * 2,
+    length: PATROL_LENGTH,
+    width: PATROL_WIDTH,
+    halfHeight: PATROL_HALF_HEIGHT,
+    footprint: footprintFor(PATROL_LENGTH, PATROL_WIDTH),
+    clearance: FLOOR_CLEARANCE,
+    weaveOmega: WEAVE_OMEGA,
+    beatOmega: BEAT_HZ * 0.85 * Math.PI * 2,
+    scale: 0.85 + random() * 0.5,
+  };
+}
+
+/** A patch of bottom worth holding station over. */
+interface Station {
+  x: number;
+  z: number;
+}
+
+/**
+ * Finds water a resident school can actually live in.
+ *
+ * Sampled and rejected against `seafloorHeight` rather than written down,
+ * because the island's shape belongs to another module and is being changed —
+ * a station in metres would be a station on dry land the moment it grew. The
+ * band it samples is only a hint about where to look; the heightfield decides.
+ *
+ * Sectors rather than free angles, for the same reason the open-water radii are
+ * stratified: three independent draws from a full circle put two schools on the
+ * same side of the reef about half the time, and a viewer who dives on the other
+ * side finds nothing.
+ *
+ * Always returns. If nothing in the band is the right depth, the closest
+ * near-miss is taken and the floor clamp does the rest.
+ */
+function findStation(
+  random: () => number,
+  band: StationBand,
+  sector: number,
+  sectors: number,
+): Station {
+  let best: Station = { x: band.x + band.minRadius, z: band.z };
+  let bestMiss = Number.POSITIVE_INFINITY;
+
+  for (let attempt = 0; attempt < STATION_TRIES; attempt++) {
+    const angle = ((sector + random()) / sectors) * Math.PI * 2;
+    // Uniform in radius, not in area. An area-even draw is right for scattering
+    // ninety rocks and wrong for choosing three places: it puts two thirds of
+    // the draw in the outer third of the annulus, and all three reef stations
+    // came out within fifteen metres of the same radius. Three points want
+    // spread, not an even density.
+    const r = band.minRadius + random() * (band.maxRadius - band.minRadius);
+    const x = band.x + Math.cos(angle) * r;
+    const z = band.z + Math.sin(angle) * r;
+    const depth = -seafloorHeight(x, z);
+
+    if (depth >= band.minDepth && depth <= band.maxDepth) return { x, z };
+
+    const miss = Math.max(band.minDepth - depth, depth - band.maxDepth);
+    if (miss < bestMiss) {
+      bestMiss = miss;
+      best = { x, z };
+    }
+  }
+
+  return best;
+}
+
+/**
+ * Shrinks a circuit until everywhere it can reach is deep enough, returning the
+ * factor to scale its radius and both wander amplitudes by.
+ *
+ * `findStation` guarantees the *centre* is in usable water. It says nothing
+ * about the circuit drawn around it, and on a coast like this one that gap is
+ * not academic: the island's shelf runs at a gradient of a fifth, so a school
+ * orbiting twenty metres out from a station in nine metres of water can find
+ * itself over the beach. The floor clamp's response to that is to collapse the
+ * school's envelope and hold it three metres under mean sea level — inside the
+ * hill, where nothing can see it and nothing reports it.
+ *
+ * What is probed is the whole annulus the school's *volume* can occupy, which is
+ * the circuit plus its radial wander plus the school's own footprint. All three
+ * matter, and the third is the one that was originally missed: the patrol's
+ * centre stayed in eight metres of water for its whole lap while the corner of
+ * its 26 x 14 m box reached ground the clamp measured at five, so the band
+ * between floor and surface closed and the school flattened into a single
+ * horizontal plane. That does not look like a bug, it looks like a decal, and it
+ * survived a thirty-minute sweep of the circuit unnoticed until the half-extent
+ * itself was asserted on.
+ *
+ * **The footprint is not scaled and the circuit is.** Shrinking a school's
+ * circuit does not shrink the school; scaling all three together was the second
+ * version of this function and it made the fit *stop working as it converged* —
+ * by the time the scale reached a quarter, the probe was covering a fifth of the
+ * ground the clamp would actually sample, so it reported clear water and left a
+ * fourteen-percent squeeze behind it. Everything else about the search stayed
+ * the same and the numbers did not move at all, which is what gave it away.
+ *
+ * Scaling both the radius and the wander is what makes this converge — shrinking
+ * the radius alone leaves a wander that can be larger than the circuit it is
+ * perturbing. The limit is the station itself, which `findStation` already
+ * checked, so six steps of 0.7 always terminate somewhere acceptable.
+ */
+function fitCircuit(
+  station: Station,
+  radius: number,
+  wander: number,
+  footprint: number,
+  minDepth: number,
+): number {
+  let scale = 1;
+
+  for (let step = 0; step < CIRCUIT_FIT_STEPS; step++) {
+    let shallowest = Number.POSITIVE_INFINITY;
+
+    for (let b = 0; b < CIRCUIT_PROBES; b++) {
+      const angle = (b / CIRCUIT_PROBES) * Math.PI * 2;
+      const ca = Math.cos(angle);
+      const sa = Math.sin(angle);
+      const reach = wander * scale + footprint;
+      for (let edge = -1; edge <= 1; edge++) {
+        const r = Math.max(0, radius * scale + edge * reach);
+        const depth = -seafloorHeight(station.x + ca * r, station.z + sa * r);
+        if (depth < shallowest) shallowest = depth;
+      }
+    }
+
+    if (shallowest >= minDepth) return scale;
+    scale *= CIRCUIT_FIT_RATIO;
+  }
+
+  return scale;
+}
+
+/**
+ * Half-size of the square the floor is probed over, metres.
+ *
+ * Covers the school envelope at any heading — the corner of the box plus the
+ * weave amplitude, whichever way it is rotated, plus a metre. For the
+ * open-water envelope that comes to 22.7 m, which is the constant this replaced.
+ * Probed on a 3x3 grid rather than densely: measured against a 3 m scan of the
+ * same square over the whole radial band, the grid underestimates the true
+ * maximum by at most 0.33 m, which the clearance absorbs several times over.
+ */
+function footprintFor(length: number, width: number): number {
+  return Math.hypot(length, width) * 0.5 + WEAVE_ALONG + 1;
 }
 
 /**
@@ -751,31 +1332,39 @@ function buildPath(index: number, random: () => number): SchoolPath {
  * where the two limits cross — the band collapses to a single depth *under the
  * surface* rather than resolving in favour of the floor, because a fish in the
  * sand is a curiosity and a fish in the air is a bug report.
+ *
+ * `fromFloor` chooses what the school is asking for before any of that: metres
+ * below the surface, or metres above the same `floorMax` the clamp is built
+ * from. Reusing that value is what makes a resident follow the bottom exactly
+ * rather than approximately — it is holding station against the surface the
+ * clamp is measuring, not against a separate probe of it.
  */
 function solveAnchor(path: SchoolPath, t: number, out: THREE.Vector3): number {
   const theta = path.theta0 + path.omega * t;
   const r =
     path.radius +
-    WANDER_R1 * Math.sin(WANDER_W1 * t + path.r1Phase) +
-    WANDER_R2 * Math.sin(WANDER_W2 * t + path.r2Phase);
+    path.wanderR1 * Math.sin(WANDER_W1 * t + path.r1Phase) +
+    path.wanderR2 * Math.sin(WANDER_W2 * t + path.r2Phase);
 
-  const x = Math.cos(theta) * r;
-  const z = Math.sin(theta) * r;
-  const wanted = -(path.depth + DEPTH_SWING * Math.sin(path.depthRate * t + path.depthPhase));
+  const x = path.cx + Math.cos(theta) * r;
+  const z = path.cz + Math.sin(theta) * r;
 
   let floorMax = Number.NEGATIVE_INFINITY;
   for (let ix = -1; ix <= 1; ix++) {
     for (let iz = -1; iz <= 1; iz++) {
-      const h = seafloorHeight(x + ix * FOOTPRINT, z + iz * FOOTPRINT);
+      const h = seafloorHeight(x + ix * path.footprint, z + iz * path.footprint);
       if (h > floorMax) floorMax = h;
     }
   }
 
+  const swing = path.depthSwing * Math.sin(path.depthRate * t + path.depthPhase);
+  const wanted = path.fromFloor ? floorMax + path.depth + swing : -(path.depth + swing);
+
   const top = -SURFACE_CLEARANCE;
-  let bottom = floorMax + FLOOR_CLEARANCE;
+  let bottom = floorMax + path.clearance;
   if (bottom > top) bottom = top;
 
-  const half = Math.min(SCHOOL_HALF_HEIGHT, (top - bottom) * 0.5);
+  const half = Math.min(path.halfHeight, (top - bottom) * 0.5);
   out.set(x, clampNumber(wanted, bottom + half, top - half), z);
   return half;
 }
@@ -892,15 +1481,16 @@ function buildFishGeometry(): THREE.BufferGeometry {
  */
 function attachInstanceAttributes(
   geometry: THREE.BufferGeometry,
-  schoolScale: readonly number[],
+  paths: readonly SchoolPath[],
   seed: number,
 ): void {
   const random = mulberry32(seed ^ 0x9e3779b9);
   const seeds = new Float32Array(MAX_FISH * 4);
   const traits = new Float32Array(MAX_FISH * 4);
+  const assignment = buildSchoolAssignment();
 
   for (let i = 0; i < MAX_FISH; i++) {
-    const school = i % SCHOOLS;
+    const school = assignment[i];
 
     seeds[i * 4 + 0] = random();
     // Lateral and vertical are pulled toward the middle of the envelope. A
@@ -911,13 +1501,52 @@ function attachInstanceAttributes(
     seeds[i * 4 + 3] = random();
 
     traits[i * 4 + 0] = school;
-    traits[i * 4 + 1] = FISH_LENGTH * (0.78 + random() * 0.5) * schoolScale[school];
+    traits[i * 4 + 1] = FISH_LENGTH * (0.78 + random() * 0.5) * paths[school].scale;
     traits[i * 4 + 2] = random();
     traits[i * 4 + 3] = random();
   }
 
   geometry.setAttribute('fishSeed', new THREE.InstancedBufferAttribute(seeds, 4));
   geometry.setAttribute('fishTrait', new THREE.InstancedBufferAttribute(traits, 4));
+}
+
+/**
+ * Which school each of the `MAX_FISH` instances belongs to.
+ *
+ * A pure function of the index — no seed, no randomness — because that is the
+ * whole requirement: fish `i` must be in the same school whatever the tier is,
+ * so that `setCount` thins the schools rather than reshuffling them.
+ *
+ * The rule is "give this fish to the emptiest school that has activated by now",
+ * scanned in `SCHOOL_LAYOUT` order. Two properties fall out of it. A school that
+ * has just activated is empty, so it fills first and catches up within a dozen
+ * fish rather than staying starved for the rest of the buffer. And between
+ * activations the assignment is a plain round robin, so the active schools stay
+ * within one fish of each other at every prefix length — which is what makes
+ * "40 fish across four schools" come out as exactly ten each rather than as a
+ * tail-heavy distribution nobody chose.
+ *
+ * `SCHOOLS` is ten and `MAX_FISH` is 480, so this is five thousand comparisons,
+ * once, at construction.
+ */
+function buildSchoolAssignment(): Uint8Array {
+  const counts = new Int32Array(SCHOOLS);
+  const out = new Uint8Array(MAX_FISH);
+
+  for (let i = 0; i < MAX_FISH; i++) {
+    let active = 0;
+    while (active < SCHOOLS && SCHOOL_ACTIVATION[active] <= i) active++;
+
+    let best = 0;
+    for (let k = 1; k < active; k++) {
+      if (counts[k] < counts[best]) best = k;
+    }
+
+    out[i] = best;
+    counts[best]++;
+  }
+
+  return out;
 }
 
 /** Maps a uniform draw in [0, 1) to one biased toward 0.5, preserving the range. */

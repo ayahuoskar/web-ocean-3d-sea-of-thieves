@@ -119,6 +119,22 @@ export interface QualitySettings {
    * never its shape.
    */
   propsDetail: number;
+  /**
+   * Blades of kelp and seagrass drawn on the shallow bottom.
+   *
+   * Instanced, and every transform is derived on the GPU from a seed and the
+   * clock, so this moves `instanceCount` and nothing else. Low draws none for
+   * the same reason it draws no fish: it has no underwater pass worth dressing.
+   */
+  kelp: number;
+  /**
+   * Coconut palms on the island.
+   *
+   * Instanced and animated on the GPU like the kelp, so this is `instanceCount`.
+   * The island is 1.4 km from the play area, so at the lower tiers this is
+   * thinning a silhouette rather than removing anything a viewer is looking at.
+   */
+  palms: number;
 }
 
 export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
@@ -142,6 +158,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     lensRainQuality: 1,
     wakeDisplacement: 0,
     propsDetail: 0.3,
+    kelp: 0,
+    palms: 0,
   },
   medium: {
     fftSize: 128,
@@ -163,6 +181,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     lensRainQuality: 2,
     wakeDisplacement: 0.75,
     propsDetail: 0.5,
+    kelp: 800,
+    palms: 28,
   },
   high: {
     fftSize: 256,
@@ -182,6 +202,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     lensRainQuality: 3,
     wakeDisplacement: 1,
     propsDetail: 0.75,
+    kelp: 1800,
+    palms: 64,
   },
   ultra: {
     fftSize: 256,
@@ -201,6 +223,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     lensRainQuality: 3,
     wakeDisplacement: 1,
     propsDetail: 1,
+    kelp: 2900,
+    palms: 110,
   },
   max: {
     fftSize: 512,
@@ -220,6 +244,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     lensRainQuality: 3,
     wakeDisplacement: 1,
     propsDetail: 1,
+    kelp: 4000,
+    palms: 160,
   },
 };
 

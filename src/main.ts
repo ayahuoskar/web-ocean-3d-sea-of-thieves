@@ -2,7 +2,20 @@ import * as THREE from 'three/webgpu';
 import { pass, positionWorld, rtt } from 'three/tsl';
 import { createRenderer, clampPixelRatio, type Backend } from './core/Renderer';
 import { Caustics, UnderwaterParticles, UnderwaterPass } from './underwater';
-import { AssetLoader, Birds, FishSchool, Props, Seafloor, Ship, SurfaceWetness } from './scene';
+import {
+  AssetLoader,
+  Birds,
+  FishSchool,
+  KelpForest,
+  Palms,
+  Props,
+  Remains,
+  Seafloor,
+  ISLAND,
+  scatterPalms,
+  Ship,
+  SurfaceWetness,
+} from './scene';
 import { AudioSystem, DEFAULT_AUDIO_SCENE_PARAMS } from './audio';
 import {
   BuoyancySystem,
@@ -20,7 +33,7 @@ import { DEFAULT_APPEARANCE, OceanMaterial } from './ocean/OceanMaterial';
 import { Reflections } from './ocean/Reflections';
 import { DEFAULT_SSR_STEPS, ScreenSpaceReflection } from './ocean/ScreenSpaceReflection';
 import { OceanSampler } from './ocean/Sampler';
-import { DEFAULT_SPECTRUM } from './ocean/Spectrum';
+import { DEFAULT_SPECTRUM, significantWaveHeight } from './ocean/Spectrum';
 import { Atmosphere, Clouds, Weather } from './sky';
 import { VolumetricFog } from './post/VolumetricFog';
 import { LensRain } from './post/LensRain';
@@ -97,6 +110,9 @@ class App {
   private birds!: Birds;
   /** Reef school. Parented to the scene root: its vertex stage emits world space. */
   private fish!: FishSchool;
+  private kelp!: KelpForest;
+  private palms!: Palms;
+  private remains!: Remains;
   /**
    * Procedural audio.
    *
@@ -228,10 +244,21 @@ class App {
     // shader had already been built without it. It owns no assets, so there is
     // nothing to wait for.
     this.buoyancy = new BuoyancySystem();
-    this.wake = new Wake({
-      derivativeTextures: this.simulation.derivativeTextures,
-      tileSizes: this.simulation.tileSizes,
-    });
+    this.wake = new Wake(
+      {
+        derivativeTextures: this.simulation.derivativeTextures,
+        tileSizes: this.simulation.tileSizes,
+      },
+      1024,
+      420,
+      {
+        // The same depth field the water shades its shallows from, which is what
+        // lets the foam buffer know land exists at all. Passing it is what builds
+        // the surf term into the node graph; without it the term is not compiled
+        // and the buffer costs exactly what it did before.
+        floorDepthNode: (worldPosition) => this.seafloor.depthNode(worldPosition),
+      },
+    );
     this.scene.add(this.wake.debugObject);
 
     // Planar reflection, on WebGPU only. Whether it exists is baked into the
@@ -275,6 +302,34 @@ class App {
 
     this.fish = new FishSchool(quality.fish);
     this.scene.add(this.fish.object);
+
+    this.kelp = new KelpForest(quality.kelp);
+    this.scene.add(this.kelp.object);
+
+    // Palms and the wreck's owner. Poly Haven publishes neither a coconut palm
+    // nor a skeleton, and every CC0 source that does is low-poly stylised and
+    // would sit badly against photoscanned rock — so both are built, which is
+    // also how this project already solves gulls and fish.
+    this.palms = new Palms({ count: quality.palms });
+    this.palms.setPlacements(scatterPalms(Palms.MAX_COUNT));
+    this.scene.add(this.palms.object);
+
+    this.remains = new Remains();
+    // Above the tideline on the cove's own bearing, but off to one side of the
+    // landing: a body found on the way somewhere, rather than staged in the
+    // middle of the beach where it would read as a signpost. The class seats
+    // itself on whatever ground is under the point, so this survives the island
+    // being reshaped again.
+    {
+      const bearing = 0.52;
+      const radius = ISLAND.radius * 0.94;
+      this.remains.place(
+        ISLAND.x + Math.cos(bearing) * radius,
+        ISLAND.z + Math.sin(bearing) * radius,
+        bearing + 1.9,
+      );
+    }
+    this.scene.add(this.remains.object);
 
     this.audio = new AudioSystem({ volume: this.state.volume, quality: this.state.quality });
     this.audio.resumeOnGesture();
@@ -823,6 +878,8 @@ class App {
     // its own circuit across the change.
     this.birds.setCount(quality.birds);
     this.fish.setCount(quality.fish);
+    this.kelp.setCount(quality.kelp);
+    this.palms.setCount(quality.palms);
     this.audio.setQuality(tier);
 
     // WebGL2 gets the analytic path regardless of tier. The backdrop and depth
@@ -1184,6 +1241,24 @@ class App {
     this.fish.setSunDirection(this.atmosphere.sunDirection);
     this.fish.update(dt);
 
+    // The bed follows the same swell the surface does, so the water and the
+    // weed under it agree about which way the sea is running.
+    this.kelp.setSunDirection(this.atmosphere.sunDirection);
+    this.kelp.setSwell(
+      getPreset(this.state.preset).sea.windDirection,
+      this.state.windSpeed,
+      this.state.peakWavelength,
+    );
+    this.kelp.update(dt);
+
+    this.palms.setSun(this.atmosphere.sunDirection, this.atmosphere.sunColor);
+    this.palms.setWind(
+      getPreset(this.state.preset).sea.windDirection,
+      this.state.windSpeed,
+    );
+    this.palms.update(dt);
+    this.remains.setSun(this.atmosphere.sunDirection, this.atmosphere.sunColor);
+
 
     this.clouds.update(dt);
     this.weather.update(dt, this.camera.position);
@@ -1231,6 +1306,10 @@ class App {
     // surface material downwind at roughly 3% of the wind speed.
     const driftBearing = getPreset(this.state.preset).sea.windDirection;
     const driftSpeed = this.state.windSpeed * 0.03;
+    // Where the shore breaks depends on how big the waves arriving at it are:
+    // a bigger swell trips in deeper water, so the surf line walks seaward with
+    // the sea state instead of sitting on a fixed contour.
+    this.wake.setSwell(significantWaveHeight(this.simulation.spectrumParams), driftBearing);
     this.wake.setDrift(
       Math.cos(driftBearing) * driftSpeed,
       Math.sin(driftBearing) * driftSpeed,
@@ -1302,6 +1381,10 @@ class App {
     audio.rain = raining;
     audio.submersion = submersion;
     audio.hullSpeed = this.shipControls?.getState(this.shipStateOut).speed ?? 0;
+    // The gull scheduler takes the flock's actual size rather than the tier's,
+    // so a sky with no birds in it stays silent instead of the audio inventing
+    // some. Low draws none, and hears none.
+    audio.birdCount = this.birds.getCount();
     this.audio.update(dt, audio);
 
     // Rain on the lens. Placed here rather than with the other rain wiring
@@ -1600,6 +1683,8 @@ class App {
           this.clouds.resetWind();
           this.birds.resetClock(start);
           this.fish.resetClock(start);
+          this.kelp.resetClock(start);
+          this.palms.resetClock(start);
           this.audio.resetClock(start);
           // The cinematic carries a position on its own 120 s loop, which is
           // state exactly like a clock: without this, a capture taken in
@@ -1701,6 +1786,9 @@ class App {
     this.clouds?.dispose();
     this.birds?.dispose();
     this.fish?.dispose();
+    this.kelp?.dispose();
+    this.palms?.dispose();
+    this.remains?.dispose();
     this.audio?.dispose();
     this.weather?.dispose();
     this.underwater?.dispose();

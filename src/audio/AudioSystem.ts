@@ -31,6 +31,10 @@ import { ParamTarget } from './ParamTarget';
  *  - **Underwater.** Not a switch: `submersion` continuously ducks and closes a
  *    low-pass over everything above, brings up a rumble, and starts entraining
  *    bubbles.
+ *  - **Gulls.** The one thing in here that is alive, and the only layer that is
+ *    not continuous: a synthesised cry, scheduled in sparse flurries against the
+ *    flock the renderer is actually drawing, silent under water and thinned out
+ *    by rain and by a gale.
  *
  * Three constraints shaped the implementation more than the sound design did.
  *
@@ -69,6 +73,20 @@ export interface AudioSceneParams {
   submersion: number;
   /** Hull speed over ground, m/s. `ShipControlState.speed`; 0 with no ship. */
   hullSpeed: number;
+  /**
+   * Gulls currently being drawn. `Birds.getCount()`, which is the quality tier's
+   * `birds`.
+   *
+   * A count rather than a reference to the flock, because the audio has no
+   * business knowing what a bird is — and because this is the one number that
+   * matters to it. It is what makes Low, which draws none, hear none, and it is
+   * what stops the sky sounding equally busy whether there are fourteen birds in
+   * it or sixty-four.
+   *
+   * Optional, and 0 by default: a system that has not been told there are birds
+   * does not invent them.
+   */
+  birdCount?: number;
 }
 
 export const DEFAULT_AUDIO_SCENE_PARAMS: AudioSceneParams = {
@@ -78,6 +96,7 @@ export const DEFAULT_AUDIO_SCENE_PARAMS: AudioSceneParams = {
   rain: 0,
   submersion: 0,
   hullSpeed: 0,
+  birdCount: 0,
 };
 
 export interface AudioQualitySettings {
@@ -92,6 +111,15 @@ export interface AudioQualitySettings {
    * scheduler outright, which is what makes Low genuinely oscillator-free.
    */
   bubbleRate: number;
+  /**
+   * Calling flurries per second from a reference flock, in a calm. 0 silences
+   * the gulls outright, which is what Low needs: it draws no birds at all, and
+   * hearing one from an empty sky is worse than hearing nothing.
+   *
+   * A flurry is one to three overlapping calls — see `scheduleGullFlurry` — so
+   * the rate of *cries* is roughly half again this.
+   */
+  gullRate: number;
   /**
    * Concurrent one-shot voices. Events past the cap are dropped, never queued —
    * a queued splash arrives after the thing that splashed has gone.
@@ -109,11 +137,21 @@ export interface AudioQualitySettings {
  * as somebody moving the mix.
  */
 export const AUDIO_QUALITY_TIERS: Record<QualityTier, AudioQualitySettings> = {
-  low: { stereoSurf: false, rigging: false, rainHiss: false, bubbleRate: 0, voices: 3 },
-  medium: { stereoSurf: false, rigging: true, rainHiss: true, bubbleRate: 1.2, voices: 5 },
-  high: { stereoSurf: true, rigging: true, rainHiss: true, bubbleRate: 2.0, voices: 8 },
-  ultra: { stereoSurf: true, rigging: true, rainHiss: true, bubbleRate: 2.6, voices: 10 },
-  max: { stereoSurf: true, rigging: true, rainHiss: true, bubbleRate: 3.4, voices: 12 },
+  low: {
+    stereoSurf: false, rigging: false, rainHiss: false, bubbleRate: 0, gullRate: 0, voices: 3,
+  },
+  medium: {
+    stereoSurf: false, rigging: true, rainHiss: true, bubbleRate: 1.2, gullRate: 0.055, voices: 5,
+  },
+  high: {
+    stereoSurf: true, rigging: true, rainHiss: true, bubbleRate: 2.0, gullRate: 0.08, voices: 8,
+  },
+  ultra: {
+    stereoSurf: true, rigging: true, rainHiss: true, bubbleRate: 2.6, gullRate: 0.095, voices: 10,
+  },
+  max: {
+    stereoSurf: true, rigging: true, rainHiss: true, bubbleRate: 3.4, gullRate: 0.11, voices: 12,
+  },
 };
 
 export interface AudioSystemOptions {
@@ -138,6 +176,10 @@ const AUDIO_SEEDS = {
   gusts: 0x9c5751,
   oneShots: 0x5c1a5d,
   thunderShape: 0x7d0c4a,
+  // Deliberately not the flock's own seed. The cries are not tied to individual
+  // birds — nothing here knows where bird 7 is — and sharing a seed would imply
+  // a correspondence that does not exist.
+  gulls: 0x9b1ac5,
 } as const;
 
 /** Clock wrap, seconds. Matches the other animated systems in this project. */
@@ -473,6 +515,240 @@ const UI_CLICK_FALL = 0.62;
 const UI_CLICK_SECONDS = 0.045;
 const UI_CLICK_LEVEL = 0.13;
 
+// --- gulls -----------------------------------------------------------------
+//
+// The hardest thing in this file to keep on the right side of the line between a
+// bird and a synthesiser, for the same reason the bubble's rising chirp is the
+// difference between a bubble and a beep: what identifies an animal is not its
+// spectrum, it is what its pitch *does*.
+//
+// A herring gull's long call is a gesture, not a note. Each cry scoops up into a
+// hard onset, holds while the bill is open, and glides back down as it closes;
+// the cries run in a series that swells over the first two and then falls away,
+// accelerating slightly as it goes. Every constant below describes one part of
+// that gesture. A stack this rich played at a steady pitch is a car alarm.
+//
+// Structurally the whole call is **one oscillator**. The notes are stretches of
+// automation on its frequency and on a gain that closes between them, not
+// separate voices — which is what lets a seven-note call cost one slot out of a
+// budget that has to keep room for a splash and a thunderclap.
+
+/**
+ * Partials in the cry's waveform, the slope they fall at, and the weight given
+ * to the fundamental.
+ *
+ * A bird's syrinx is a pressure-driven valve, i.e. a relaxation oscillator: it
+ * emits a pulse train, and a pulse train is a full harmonic stack falling at
+ * about 6 dB per octave. 0.85 is a little shallower than that (a sawtooth is
+ * exactly 1.0) because a gull's call is built to carry across open water, and
+ * what carries is the 1–4 kHz band rather than the fundamental. The fundamental
+ * is then pulled down below its own slope for the reason a spectrogram of the
+ * species shows: the second and third partials are the loud ones, and a wave
+ * with a dominant fundamental reads as a flute no matter what is done to it
+ * afterwards.
+ *
+ * 18 partials on the highest fundamental here is 16 kHz, so the table is never
+ * band-limited hard enough for the timbre to change across the pitch range.
+ */
+const GULL_PARTIALS = 18;
+const GULL_PARTIAL_SLOPE = 0.85;
+const GULL_FUNDAMENTAL_WEIGHT = 0.45;
+
+/**
+ * Fundamental of one bird, Hz, and the spread across individuals.
+ *
+ * Low for what is heard: the cry reads an octave up, at the second and third
+ * partials — 1.2 to 2.7 kHz — which is where a herring gull's energy actually
+ * sits and what the 800–1600 Hz a listener would name refers to. Drawn once per
+ * call and held for the whole series, because a bird does not change size
+ * between notes; the variation between calls is the flock having members.
+ */
+const GULL_F0_MIN = 620;
+const GULL_F0_SPAN = 280;
+
+/**
+ * The contour of a single note, as fractions of its own length.
+ *
+ * `SCOOP` is where the note enters from — about a fourth below pitch. A gull
+ * does not begin a note *on* the note; the same air pulse that makes the sound
+ * has to spin the syrinx up, and starting on pitch is the single most synthetic
+ * thing this could do. `PEAK` overshoots slightly, `FALL` is the glide the ear
+ * would imitate if asked to do a gull, and `WAVER` is the small unsteadiness in
+ * the held body — real notes are never flat, and a flat one at this harmonic
+ * density is unmistakably an oscillator.
+ *
+ * `HOLD` is before `GLIDE` on purpose: the level starts falling while the pitch
+ * is still up, so the note fades *into* its glide rather than doing both at once.
+ */
+const GULL_NOTE_MIN = 0.17;
+const GULL_NOTE_SPAN = 0.11;
+const GULL_NOTE_SCOOP = 0.72;
+const GULL_NOTE_PEAK = 1.05;
+const GULL_NOTE_FALL = 0.68;
+const GULL_NOTE_RISE = 0.2;
+const GULL_NOTE_HOLD = 0.5;
+const GULL_NOTE_GLIDE = 0.6;
+const GULL_NOTE_WAVER = 0.045;
+/** Attack, seconds. Fast enough to read as a shout, slow enough not to click. */
+const GULL_NOTE_ATTACK = 0.009;
+
+/**
+ * The series.
+ *
+ * A third of calls are a single drawn-out mew rather than a long call, because a
+ * flock that only ever produces its full display call is a loop. The rest run
+ * three to seven notes that accelerate (`ACCEL`), shorten (`SHRINK`) and drop in
+ * pitch (`PITCH_FALL`) as the bird runs out of the breath it started with, under
+ * an amplitude arc that swells over the first two notes and then fades. That arc
+ * is most of what makes a series read as one utterance instead of a repeat.
+ */
+const GULL_SINGLE_CHANCE = 0.34;
+const GULL_MEW_STRETCH = 1.45;
+const GULL_NOTES_MIN = 3;
+const GULL_NOTES_SPAN = 5;
+const GULL_NOTE_GAP_MIN = 0.11;
+const GULL_NOTE_GAP_SPAN = 0.08;
+const GULL_NOTE_GAP_FLOOR = 0.06;
+const GULL_NOTE_ACCEL = 0.9;
+const GULL_NOTE_SHRINK = 0.95;
+const GULL_PITCH_FALL = 0.972;
+const GULL_SWELL_NOTES = 2;
+const GULL_SERIES_FADE = 0.86;
+/** Grace after the last note before the oscillator is stopped, seconds. */
+const GULL_TAIL = 0.06;
+
+/**
+ * The formant, Hz, and how far it closes.
+ *
+ * The resonator is the bird's throat and its open bill, and the gape is not
+ * fixed — a gull throws its head back and opens wide on the loud part of a note,
+ * then closes as it glides down. So the emphasis sweeps with the note and lands
+ * back where it started, which is why this is a peaking filter driven per note
+ * rather than a fixed voicing. A formant that stays put while the pitch slides
+ * under it is the sound of a filter, not of a throat.
+ *
+ * 1950 Hz with a moderate Q sits on the second and third partials of this pitch
+ * range: +9 dB there is a strident cry, and the same +9 dB two octaves up would
+ * be a whistle.
+ */
+const GULL_FORMANT_HZ = 1950;
+const GULL_FORMANT_CLOSED = 0.62;
+const GULL_FORMANT_Q = 1.5;
+const GULL_FORMANT_DB = 9;
+
+/**
+ * Where the bird is.
+ *
+ * The flock flies 45–115 m circuits at 14–58 m up, so 30 to 240 m covers what is
+ * plausibly audible; the distance is invented per cry rather than taken from any
+ * particular bird, since nothing here knows where bird 7 is and a listener
+ * cannot tell. It is drawn uniformly *over the annulus* — d = sqrt(near² + u
+ * (far² − near²)) — because birds are spread over an area and there is far more
+ * area far away. A uniform draw on the radius puts half the flock inside the
+ * near half of it, which sounds like a colony on the rail.
+ */
+const GULL_NEAR_METRES = 30;
+const GULL_FAR_METRES = 240;
+const GULL_REFERENCE_METRES = 60;
+const GULL_LEVEL = 0.15;
+
+/**
+ * Brightness against distance: corner = `BRIGHT * exp(-d / ABSORPTION)`.
+ *
+ * A distant gull is not a quiet near gull, and getting that difference right is
+ * most of the sense of space this adds. Molecular absorption in ordinary sea air
+ * is of order 1 dB per 100 m at 2 kHz and 3 dB per 100 m at 6 kHz, so across the
+ * 200 m the flock spans it is a few dB of tilt on the top octave — real, but on
+ * its own not enough to hear under a broadband sea. 170 m is deliberately
+ * stronger than the molecular figure: turbulent scattering over water adds to
+ * it, and the harmonics above 4 kHz are precisely the part that says *near*.
+ * The floor keeps the formant band intact, so the farthest bird is dull and
+ * still a bird rather than a hum.
+ */
+const GULL_BRIGHT_HZ = 9000;
+const GULL_ABSORPTION_METRES = 170;
+const GULL_DULL_HZ = 1900;
+
+/**
+ * Stereo placement, and how far it moves across one call.
+ *
+ * Not full width: a gull hard against one speaker is inside the listener's head,
+ * and these are meant to be out over the water. The drift is a real cue and
+ * nearly free — a bird cruising at 10 m/s covers 20 m during a long call, which
+ * at 60 m is a visible change of bearing and at 240 m is almost none, so it
+ * scales with the same inverse distance the level does.
+ */
+const GULL_PAN_SPREAD = 0.85;
+const GULL_PAN_DRIFT = 0.14;
+
+/**
+ * Flock scaling. The rate goes as the square root of the count, not linearly.
+ *
+ * A tier that draws 64 birds instead of 26 does have more birds in the sky, so
+ * the rate has to move — but linearly it would make Max nearly two and a half
+ * times as talkative as High, and the constraint here is the listener rather
+ * than the population. A gull every couple of seconds is a nesting colony; this
+ * scene is a flock at sea. The cap is what a caller passing an implausible count
+ * runs into.
+ */
+const GULL_REFERENCE_FLOCK = 26;
+const GULL_MAX_FLOCK_SCALE = 2;
+
+/**
+ * Flurries: how many cries arrive together, and how far apart.
+ *
+ * Gulls answer each other, so cries come in loose clusters rather than singly —
+ * but the count is drawn *squared*, so most flurries are one bird and an answer
+ * is the exception. Birds answering every single time is a pattern, and a
+ * pattern is exactly what this is trying not to be.
+ */
+const GULL_FLURRY_MAX = 3;
+const GULL_ANSWER_MIN = 0.6;
+const GULL_ANSWER_SPAN = 1.4;
+
+/**
+ * Floor on the gap between flurries, seconds, and the wait before the first one.
+ *
+ * The floor does the same job `BUBBLE_MIN_GAP` does — a Poisson interval is
+ * legitimately zero for an unlucky draw — but it is seconds rather than
+ * milliseconds because it is also doing the sound design: the thing that makes
+ * sparse events read as wildlife is the length of the silences between them.
+ *
+ * The initial delay exists because a gull on the first frame after the viewer
+ * unlocks the audio reads as a trigger rather than as a world. It is also what
+ * the timer is held at while the gulls are gated off, so surfacing from a dive
+ * does not fire one on the frame the lens clears the water.
+ */
+const GULL_FLURRY_FLOOR = 2.5;
+const GULL_FIRST_DELAY = 6;
+
+/**
+ * One-shot slots kept clear of gulls.
+ *
+ * The voice cap is shared with splashes, thunder and bubbles, and those are
+ * responses to something the viewer just did or just saw — a splash that is
+ * dropped because three birds are mid-call is a missing sound with a visible
+ * cause. Gulls are ambience and can afford to lose one, so they stop two slots
+ * short of the cap and never take the last of them.
+ */
+const GULL_VOICE_RESERVE = 2;
+
+/**
+ * The gates.
+ *
+ * Under water there are no gulls: the surface reflects almost everything, and a
+ * quarter submerged is already past the point where hearing one would be wrong.
+ * In heavy rain and in a gale they sit it out — which is both true of the bird
+ * and true of the mix, since by then the rain bed and the wind bed have taken
+ * the band the cry lives in. 13 m/s is the top of a fresh breeze and 22 m/s is a
+ * whole gale, by which point nothing is flying for pleasure.
+ */
+const GULL_SUBMERSION_SILENT = 0.25;
+const GULL_RAIN_THIN = 0.25;
+const GULL_RAIN_SILENT = 0.8;
+const GULL_WIND_THIN = 13;
+const GULL_WIND_SILENT = 22;
+
 /**
  * Per-bed playback rates and buffer offsets.
  *
@@ -535,6 +811,15 @@ export class AudioSystem {
   private readonly targets: ParamTarget[] = [];
 
   private white!: AudioBuffer;
+  /**
+   * The gull's waveform, built once and shared by every cry.
+   *
+   * A `PeriodicWave` is immutable and stateless — it is a wavetable, not a node —
+   * so one instance serves every voice and a cry costs no allocation for its
+   * timbre. Building it per call would be an allocation, and a large one, on a
+   * path that can fire three times in a second.
+   */
+  private gullWave!: PeriodicWave;
 
   // --- state ----------------------------------------------------------------
   private volume = 0.8;
@@ -550,10 +835,12 @@ export class AudioSystem {
   private gustTarget = 1;
   private gustTimer = 0;
   private bubbleTimer = 0;
+  private gullTimer = GULL_FIRST_DELAY;
 
   private bubbleRandom = mulberry32(AUDIO_SEEDS.bubbles);
   private gustRandom = mulberry32(AUDIO_SEEDS.gusts);
   private oneShotRandom = mulberry32(AUDIO_SEEDS.oneShots);
+  private gullRandom = mulberry32(AUDIO_SEEDS.gulls);
 
   private crackCurve!: Float32Array;
   private rollCurve!: Float32Array;
@@ -690,6 +977,7 @@ export class AudioSystem {
     const rain = clamp01(finite(params.rain, 0));
     const submersion = clamp01(finite(params.submersion, 0));
     const hullSpeed = clampNumber(finite(params.hullSpeed, 0), 0, 40);
+    const birdCount = clampNumber(finite(params.birdCount, 0), 0, 1024);
 
     // --- gusting ------------------------------------------------------------
     this.gustTimer -= step;
@@ -820,6 +1108,35 @@ export class AudioSystem {
       }
     } else if (this.bubbleTimer < 0) {
       this.bubbleTimer = 0;
+    }
+
+    // --- gulls --------------------------------------------------------------
+    // Everything about this is a product of gates rather than a branch, so a
+    // rising wind or a closing squall thins the flock out continuously instead
+    // of switching it off at a threshold — the same reason `submersion` is not a
+    // boolean anywhere else in this file.
+    const gullRate =
+      this.settings.gullRate *
+      Math.min(GULL_MAX_FLOCK_SCALE, Math.sqrt(birdCount / GULL_REFERENCE_FLOCK)) *
+      (1 - smoothstepNumber(submersion, 0, GULL_SUBMERSION_SILENT)) *
+      (1 - smoothstepNumber(rain, GULL_RAIN_THIN, GULL_RAIN_SILENT)) *
+      (1 - smoothstepNumber(wind, GULL_WIND_THIN, GULL_WIND_SILENT));
+
+    if (live && gullRate > 1e-4) {
+      this.gullTimer -= step;
+      // An `if` rather than the bubbles' `while`: the interval is floored at
+      // seconds, so a frame can never owe more than one flurry, and a loop here
+      // would be a loop that provably runs once.
+      if (this.gullTimer <= 0) {
+        this.scheduleGullFlurry(now);
+        const u = this.gullRandom();
+        this.gullTimer = GULL_FLURRY_FLOOR + -Math.log(1 - u) / gullRate;
+      }
+    } else if (this.gullTimer < GULL_FLURRY_FLOOR) {
+      // Held at the floor rather than at zero while the gate is shut. Parked at
+      // zero, coming up from a dive or out of a squall would fire a cry on the
+      // very frame the gate opened, every time — which is a trigger, not a bird.
+      this.gullTimer = GULL_FLURRY_FLOOR;
     }
   }
 
@@ -1066,6 +1383,36 @@ export class AudioSystem {
     );
   }
 
+  /**
+   * One gull's call, synthesised.
+   *
+   * Not needed to hear gulls — `update` schedules them from `birdCount` on its
+   * own — but a caller that knows a bird just did something (broke off the mast,
+   * dived on the wake) can place one itself, and it is the way to hear the voice
+   * on demand without waiting on the scheduler.
+   *
+   * Refused outright on a tier whose `gullRate` is 0, so an explicit call cannot
+   * put a bird in Low's empty sky.
+   *
+   * @param distanceMetres How far off the bird is, clamped to 30..240 m.
+   *                       Distance does not merely quieten it — see
+   *                       `GULL_ABSORPTION_METRES`.
+   * @param pan            Placement, -1..1. 0 puts the bird dead ahead.
+   */
+  playGullCry(distanceMetres = GULL_REFERENCE_METRES, pan = 0): void {
+    const ctx = this.ctx;
+    if (ctx === null || !this.canPlay() || this.settings.gullRate <= 0) return;
+    this.spawnGullCall(
+      ctx.currentTime,
+      clampNumber(
+        finite(distanceMetres, GULL_REFERENCE_METRES),
+        GULL_NEAR_METRES,
+        GULL_FAR_METRES,
+      ),
+      clampNumber(finite(pan, 0), -1, 1),
+    );
+  }
+
   /** UI feedback. Deliberately not routed through the underwater muffle. */
   playUiClick(): void {
     const ctx = this.ctx;
@@ -1105,10 +1452,14 @@ export class AudioSystem {
     this.bubbleRandom = mulberry32(AUDIO_SEEDS.bubbles);
     this.gustRandom = mulberry32(AUDIO_SEEDS.gusts);
     this.oneShotRandom = mulberry32(AUDIO_SEEDS.oneShots);
+    this.gullRandom = mulberry32(AUDIO_SEEDS.gulls);
     this.gust = 1;
     this.gustTarget = 1;
     this.gustTimer = 0;
     this.bubbleTimer = 0;
+    // Back to the initial delay, not to zero: a shot that opens on a gull cry is
+    // a shot whose first second is about the gull.
+    this.gullTimer = GULL_FIRST_DELAY;
     this.stopVoices();
   }
 
@@ -1141,6 +1492,7 @@ export class AudioSystem {
   private build(ctx: AudioContext): void {
     this.white = createNoiseBuffer(ctx, 'white', AUDIO_SEEDS.white);
     const brown = createNoiseBuffer(ctx, 'brown', AUDIO_SEEDS.brown);
+    this.gullWave = buildGullWave(ctx);
 
     const shape = mulberry32(AUDIO_SEEDS.thunderShape);
     // Two shapes, not one: a crack and a roll are different envelopes, and a
@@ -1383,6 +1735,11 @@ export class AudioSystem {
     return this.voices.length < this.settings.voices;
   }
 
+  /** The same cap, held short so ambience cannot starve an event. See `GULL_VOICE_RESERVE`. */
+  private acquireGullVoice(): boolean {
+    return this.voices.length + GULL_VOICE_RESERVE < this.settings.voices;
+  }
+
   /**
    * Registers a one-shot's nodes for cleanup.
    *
@@ -1437,6 +1794,137 @@ export class AudioSystem {
     osc.stop(when + decay + 0.02);
     this.trackVoice(osc, gain);
   }
+
+  /**
+   * One cluster of cries, placed around the listener.
+   *
+   * Each call in the flurry gets its own distance and its own side, because a
+   * flock is spread out and the answer comes from somewhere else — two birds at
+   * the same distance and the same pan are one bird with an echo. The calls are
+   * scheduled *ahead*, at their real offsets, rather than re-triggered from the
+   * frame loop: the audio thread's clock is the accurate one, and a cry placed
+   * by the render loop lands wherever the frame did.
+   */
+  private scheduleGullFlurry(now: number): void {
+    const random = this.gullRandom;
+
+    // Squared, so most flurries are a single bird. See GULL_FLURRY_MAX.
+    const u = random();
+    const calls = 1 + Math.floor(u * u * GULL_FLURRY_MAX);
+
+    // Uniform over the annulus rather than over the radius: see GULL_NEAR_METRES.
+    // `d = sqrt(near^2 + u (far^2 - near^2))`.
+    const near = GULL_NEAR_METRES * GULL_NEAR_METRES;
+    const far = GULL_FAR_METRES * GULL_FAR_METRES;
+
+    let when = now;
+    for (let i = 0; i < calls; i++) {
+      const distance = Math.sqrt(near + random() * (far - near));
+      this.spawnGullCall(when, distance, GULL_PAN_SPREAD * (random() * 2 - 1));
+      when += GULL_ANSWER_MIN + GULL_ANSWER_SPAN * random();
+    }
+  }
+
+  /**
+   * A whole call — one oscillator, one formant, one distance filter, one gain.
+   *
+   * The series lives entirely in the automation: `writeGullNote` appends one
+   * note's worth of events to the three parameters, the gain closes between
+   * notes, and nothing starts or stops until the last note has decayed. Seven
+   * notes therefore cost seven envelopes and one voice, where seven voices would
+   * empty the tier's budget on a single bird.
+   */
+  private spawnGullCall(when: number, distanceMetres: number, pan: number): void {
+    const ctx = this.ctx;
+    if (ctx === null || !this.acquireGullVoice()) return;
+
+    const random = this.gullRandom;
+
+    const single = random() < GULL_SINGLE_CHANCE;
+    const notes = single ? 1 : GULL_NOTES_MIN + Math.floor(random() * GULL_NOTES_SPAN);
+
+    // Spherical spreading, which is 1/d in pressure and therefore 1/d here.
+    const level = GULL_LEVEL * (GULL_REFERENCE_METRES / distanceMetres);
+    const cutoff = clampNumber(
+      GULL_BRIGHT_HZ * Math.exp(-distanceMetres / GULL_ABSORPTION_METRES),
+      GULL_DULL_HZ,
+      // Nine tenths of Nyquist, for the reason `NoiseBed` gives: a biquad parked
+      // at half the sample rate is unstable rather than transparent.
+      Math.min(GULL_BRIGHT_HZ, ctx.sampleRate * 0.45),
+    );
+
+    const osc = ctx.createOscillator();
+    osc.setPeriodicWave(this.gullWave);
+
+    const formant = ctx.createBiquadFilter();
+    formant.type = 'peaking';
+    formant.Q.value = GULL_FORMANT_Q;
+    formant.gain.value = GULL_FORMANT_DB;
+    formant.frequency.value = GULL_FORMANT_HZ * GULL_FORMANT_CLOSED;
+
+    const tone = ctx.createBiquadFilter();
+    tone.type = 'lowpass';
+    tone.Q.value = 0.7;
+    tone.frequency.value = cutoff;
+
+    const gain = ctx.createGain();
+
+    let cursor = when;
+    let duration = (GULL_NOTE_MIN + GULL_NOTE_SPAN * random()) * (single ? GULL_MEW_STRETCH : 1);
+    let gap = GULL_NOTE_GAP_MIN + GULL_NOTE_GAP_SPAN * random();
+    // One draw for the whole series: a bird is the size it is. See GULL_F0_MIN.
+    let pitch = GULL_F0_MIN + GULL_F0_SPAN * random();
+
+    for (let k = 0; k < notes; k++) {
+      // The arc: up over the first two notes, then away. A lone mew has no
+      // crescendo to make and lands at full level.
+      const swell = single ? 1 : Math.min(1, (k + 1) / GULL_SWELL_NOTES);
+      const fade = Math.pow(GULL_SERIES_FADE, Math.max(0, k - GULL_SWELL_NOTES + 1));
+      writeGullNote(
+        osc.frequency,
+        formant.frequency,
+        gain.gain,
+        cursor,
+        duration,
+        pitch,
+        level * swell * fade,
+        random,
+      );
+      cursor += duration + gap;
+      duration *= GULL_NOTE_SHRINK;
+      gap = Math.max(GULL_NOTE_GAP_FLOOR, gap * GULL_NOTE_ACCEL);
+      pitch *= GULL_PITCH_FALL;
+    }
+
+    const end = cursor + GULL_TAIL;
+
+    osc.connect(formant);
+    formant.connect(tone);
+    tone.connect(gain);
+
+    // Into the air bus rather than past it, unlike the UI click: a gull heard
+    // with the lens half under the surface is supposed to be muffled, and
+    // muffling what is above the water is exactly what that bus is for.
+    //
+    // The pan ramp is bearing drift across the call — the bird is flying — and it
+    // is scaled by the same inverse distance the level is, because a far bird's
+    // bearing hardly moves while a near one's sweeps.
+    const panner = createStereoPanner(ctx);
+    if (panner === null) {
+      gain.connect(this.airBus);
+    } else {
+      const drift = GULL_PAN_DRIFT * (GULL_REFERENCE_METRES / distanceMetres) * (random() * 2 - 1);
+      panner.pan.setValueAtTime(pan, when);
+      panner.pan.linearRampToValueAtTime(clampNumber(pan + drift, -1, 1), end);
+      gain.connect(panner);
+      panner.connect(this.airBus);
+    }
+
+    osc.start(when);
+    osc.stop(end);
+    if (panner === null) this.trackVoice(osc, formant, tone, gain);
+    else this.trackVoice(osc, formant, tone, gain, panner);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1462,6 +1950,109 @@ function envelope(
   param.setValueAtTime(0, start);
   param.linearRampToValueAtTime(level, start + attack);
   param.exponentialRampToValueAtTime(level * 1e-4, start + attack + decay);
+}
+
+/**
+ * One note of a gull's call, appended to three parameters that are already live.
+ *
+ * A note is a stretch of automation, not a voice: the notes of a call are
+ * separated by this gain envelope closing, and the oscillator underneath runs
+ * from the first note to the last. Every event written here is strictly after
+ * the previous note's, which is what makes appending safe.
+ *
+ * The pitch contour has three parts and they are the whole difference between a
+ * bird and a beep:
+ *
+ *  - **The scoop.** The note enters a fourth low and reaches pitch in its first
+ *    fifth. The air pulse that makes the sound also has to spin the syrinx up;
+ *    starting on pitch is the sound of an oscillator being switched on.
+ *  - **The waver.** Two small, unequal excursions across the held body, drawn
+ *    rather than fixed so no two notes wobble identically. A dead-steady pitch
+ *    under a stack this rich is unmistakably synthetic.
+ *  - **The glide.** The last two fifths fall by about a third. This is the part
+ *    a person imitating a gull would produce, and it is the bill closing — which
+ *    is why the formant is dragged down with it rather than held.
+ *
+ * The amplitude holds before it falls, and starts falling *before* the glide
+ * does. A note that decays from its attack is plucked, and plucked is a
+ * different family of sound entirely; a gull leans on the note.
+ */
+function writeGullNote(
+  frequency: AudioParam,
+  formant: AudioParam,
+  gain: AudioParam,
+  start: number,
+  duration: number,
+  pitch: number,
+  level: number,
+  random: () => number,
+): void {
+  const peak = pitch * GULL_NOTE_PEAK;
+  const openAt = start + duration * GULL_NOTE_RISE;
+  const holdAt = start + duration * GULL_NOTE_HOLD;
+  const glideAt = start + duration * GULL_NOTE_GLIDE;
+  const end = start + duration;
+
+  // Unequal on purpose: a symmetric wobble is a vibrato, and vibrato is a
+  // trained human, not a bird.
+  const waverA = peak * (1 - GULL_NOTE_WAVER * (0.4 + 0.6 * random()));
+  const waverB = peak * (1 + GULL_NOTE_WAVER * (0.2 + 0.5 * random()));
+
+  frequency.setValueAtTime(pitch * GULL_NOTE_SCOOP, start);
+  frequency.exponentialRampToValueAtTime(peak, openAt);
+  frequency.exponentialRampToValueAtTime(waverA, openAt + (glideAt - openAt) * 0.45);
+  frequency.exponentialRampToValueAtTime(waverB, glideAt);
+  frequency.exponentialRampToValueAtTime(pitch * GULL_NOTE_FALL, end);
+
+  // The `setValueAtTime` in the middle is what creates the hold: without it the
+  // closing ramp would start at `openAt` and the gape would be sliding shut
+  // through the whole note.
+  formant.setValueAtTime(GULL_FORMANT_HZ * GULL_FORMANT_CLOSED, start);
+  formant.exponentialRampToValueAtTime(GULL_FORMANT_HZ, openAt);
+  formant.setValueAtTime(GULL_FORMANT_HZ, glideAt);
+  formant.exponentialRampToValueAtTime(GULL_FORMANT_HZ * GULL_FORMANT_CLOSED, end);
+
+  // Floored for the same reason `envelope` floors its peak: an exponential ramp
+  // is undefined from zero, and the quietest note of a distant series is small.
+  const loudness = Math.max(1e-4, level);
+  gain.setValueAtTime(0, start);
+  gain.linearRampToValueAtTime(loudness, start + Math.min(GULL_NOTE_ATTACK, duration * 0.2));
+  gain.setValueAtTime(loudness, holdAt);
+  gain.exponentialRampToValueAtTime(loudness * 1e-4, end);
+}
+
+/**
+ * The gull's wavetable. See `GULL_PARTIALS` for the spectrum it describes.
+ *
+ * Normalisation is left on — the default — so these coefficients are purely a
+ * *shape*: the wave comes out peaking at 1 whatever slope is chosen, and the
+ * level of a cry stays the business of its envelope. Retuning the timbre then
+ * cannot silently retune the mix, which is exactly the trap a hand-summed
+ * harmonic stack sets.
+ */
+function buildGullWave(ctx: BaseAudioContext): PeriodicWave {
+  // Index 0 is DC and stays zero; a wave with a DC term is an offset, not a
+  // sound, and it would eat headroom on the bus for something inaudible.
+  const real = new Float32Array(GULL_PARTIALS + 1);
+  const imag = new Float32Array(GULL_PARTIALS + 1);
+  for (let h = 1; h <= GULL_PARTIALS; h++) {
+    const slope = Math.pow(h, -GULL_PARTIAL_SLOPE);
+    imag[h] = h === 1 ? slope * GULL_FUNDAMENTAL_WEIGHT : slope;
+  }
+  return ctx.createPeriodicWave(real, imag);
+}
+
+/**
+ * A panner, or `null` where there is none.
+ *
+ * `createStereoPanner` is the one node this file uses that is not universal on
+ * the browsers targeted, and a platform without it should lose the flock its
+ * spread and nothing else — the same guard, and the same reasoning, as `NoiseBed`.
+ */
+function createStereoPanner(ctx: BaseAudioContext): StereoPannerNode | null {
+  const factory = (ctx as BaseAudioContext & { createStereoPanner?: () => StereoPannerNode })
+    .createStereoPanner;
+  return typeof factory === 'function' ? ctx.createStereoPanner() : null;
 }
 
 /**

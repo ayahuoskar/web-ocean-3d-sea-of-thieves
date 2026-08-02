@@ -1,6 +1,7 @@
 import * as THREE from 'three/webgpu';
-import { Fn, float, mix, texture, uniform, uv, vec2, vec4 } from 'three/tsl';
+import { Fn, If, float, mix, texture, uniform, uv, vec2, vec3, vec4 } from 'three/tsl';
 import { smoothstepDown } from '../core/tslMath';
+import { seafloorDepth } from '../scene/Seafloor';
 
 /**
  * World-anchored wake buffer: foam in R, surface elevation in G.
@@ -64,6 +65,17 @@ import { smoothstepDown } from '../core/tslMath';
  * stationary in the hull's frame. Far astern, where the stamp has faded, the
  * world-space phase laid down on earlier frames persists — which is what lets a
  * turning ship leave a curved wake instead of swinging a rigid one around with it.
+ *
+ * **The surf line is a depth contour, not a distance from land.** A wave breaks
+ * where it runs out of water under it, so the band of white along a shore is the
+ * `depth = height / BREAKER_INDEX` contour of the bathymetry — it wanders in and
+ * out along a headland because the bottom does, and it steps offshore when the
+ * swell gets up. Nothing in this file knows where the island is, only how deep
+ * the water is; the floor is handed in as a node and the term works against
+ * whatever shape produces it. Evaluating that field is not free, so it sits
+ * behind a uniform branch the CPU leaves false whenever the buffer's footprint
+ * has no shoreline in it — which is nearly always, and is the case the frame
+ * budget is set by.
  *
  * Runs as two fullscreen fragment passes per frame. No compute, no storage
  * textures — this has to work on the WebGL2 backend unchanged.
@@ -273,6 +285,215 @@ const DIVERGENT_COS = Math.cos(DIVERGENT_ANGLE);
 const DIVERGENT_SIN = Math.sin(DIVERGENT_ANGLE);
 const DIVERGENT_K = 1 / (DIVERGENT_COS * DIVERGENT_COS);
 
+// ------------------------------------------------------------------ shore break
+
+/**
+ * Wave height over still-water depth at which a shoaling wave overturns.
+ *
+ * McCowan's limit for a solitary wave, and the number every surf-zone model
+ * starts from. It is the whole breaking criterion: a wave of height H finds its
+ * limit in `H / 0.78` metres of water, so the surf line is wherever the bottom
+ * comes up to that depth. Everything else in this section is about how wide to
+ * make the band and how hard to deposit inside it.
+ */
+const BREAKER_INDEX = 0.78;
+
+/**
+ * Shoaling amplification between deep water and the break point.
+ *
+ * A wave does not arrive at the bar with its offshore height. It slows as it
+ * feels bottom, the energy it carries has to go somewhere, and by Green's law
+ * `H ~ d^-1/4` it is a fifth or so taller by the time it overturns. Leaving this
+ * out puts the surf line about a metre of depth too far inshore, which on a
+ * steep face is the difference between a band and a rim.
+ */
+const SHOALING_GAIN = 1.2;
+
+/**
+ * Bounds on the break depth, metres.
+ *
+ * The cap is applied as `MAX * tanh(d/MAX)` rather than `min`, and the softness
+ * is the point. Depth-limited breaking is real physics — a shelf can only
+ * deliver `BREAKER_INDEX * depth` of wave height to the surf zone no matter what
+ * is running at it from offshore, so past a certain sea state the breaker line
+ * stops moving out. A hard `min` expresses that too, but it also kills the
+ * response, and the response is most of what sells this: with the spectrum's
+ * `Hs = 0.22 U^2/g` a hard cap at 8 m binds from 16 m/s upward, so the surf line
+ * would sit dead still across the top third of the wind slider. `tanh` stays
+ * monotonic all the way to a 13 m sea — measured along the island's windward
+ * radial the break depth still walks from 1.2 m at 6 m/s to 7.9 m at 24, and the
+ * outer edge of the white with it, 47 m further out at the top of the range than
+ * the bottom — while never letting that edge past `MAX * SURF_OUTER_REACH`, 15 m
+ * of water. That is the number that bounds the white region's width: divided by
+ * the local bottom slope it *is* that width, and past 15 m there is no slope
+ * gentle enough in this bathymetry for the result to still read as a line.
+ *
+ * The floor keeps a thread of white at the waterline on a glassy day, because
+ * there is always a shorebreak.
+ */
+const SURF_DEPTH_MAX = 8;
+const SURF_DEPTH_MIN = 0.5;
+
+/**
+ * Outer edge of the generating band, as a multiple of the break depth.
+ *
+ * The band has to be a gradient, not a wire, and the reason it is one is the
+ * spectrum: `Hs` is the mean of the highest third, so the individual waves
+ * arriving are Rayleigh-distributed about it and the largest in a few hundred is
+ * roughly 1.9 times as tall. That wave breaks 1.9 times further out. Offshore of
+ * the significant-wave contour is therefore the sets — thinning outward exactly
+ * as the tail of the distribution does, and doing the thing a real surf line
+ * does when it wanders seaward for a few waves and comes back.
+ */
+const SURF_OUTER_REACH = 1.9;
+
+/**
+ * How far seaward the shoaling test looks, metres, and the slopes it ramps over.
+ *
+ * Depth alone is not a breaking criterion, and assuming it was is what made the
+ * first version of this term a sheet of paper: `band` is 1 at *every* depth
+ * inshore of the break, so it whitened the whole of a shallow floor at once —
+ * the lagoon behind the spit went solid, and over half the worst 420 m footprint
+ * near the island was white at 15 m/s.
+ *
+ * What was missing is that waves break where they *shoal*. The energy that
+ * becomes white water comes from the wave losing height as the bottom rises
+ * under it, so the quantity that matters is the depth gradient along the
+ * direction the swell is travelling, not the depth. One extra sample one
+ * nearshore wavelength to seaward gives it: `(depthSeaward - depthHere) / reach`
+ * is that slope, positive where the bottom is climbing toward the beach.
+ *
+ * Everything falls out of that one sample:
+ *
+ *  - a flat lagoon behind a bar reads zero slope and gets nothing;
+ *  - a lee shore reads a *negative* slope, because seaward of it is the island
+ *    it sits behind, so an island shelters its own back — which is both true and
+ *    the single most convincing thing this term does;
+ *  - a windward beach face reads a strong positive slope and breaks along its
+ *    whole length, waterline included.
+ *
+ * With it, the worst 420 m footprint near the island goes from 55% white to 18%
+ * at 15 m/s, and from 62% to 22% at 24. 55 m is roughly one shallow-water
+ * wavelength for an 8 s swell over the surf zone. The ramp is wide and its exact
+ * edges do not matter — 0.004 to 0.03 and 0.01 to 0.05 land within 0.3 points of
+ * each other — because real beach faces sit an order of magnitude above it and
+ * the floors this is rejecting sit at zero.
+ */
+const SHELTER_REACH = 55;
+const SHOAL_INNER = 0.004;
+const SHOAL_OUTER = 0.03;
+
+/**
+ * Foam deposited per second by fully-broken shore water.
+ *
+ * `SURF_RATE * WAKE_FOAM_TAU` is 1.4, which is above white — and unlike every
+ * other deposit in this file, a texel in the impact zone really is exposed
+ * indefinitely, because the band is pinned to the bottom instead of being towed
+ * over the water by a hull. So this number is chosen knowing the equilibrium is
+ * reached, and the surf band is *supposed* to reach white.
+ *
+ * What stops that from becoming the sheet of paper this file has twice been
+ * burnt by is that nothing outside a band ever sees the full rate:
+ *
+ *  - `exposure` is zero wherever the bottom is not climbing toward the shore,
+ *    which is what turns a shallow *region* into a shore-following *band*. See
+ *    `SHELTER_REACH`; it is the load-bearing one.
+ *  - `band` is zero beyond `SURF_OUTER_REACH` break depths, so the band's width
+ *    on the ground is `SURF_OUTER_REACH * breakDepth / slope` and the
+ *    *bathymetry* sets it, not this constant. Measured along the island's
+ *    windward radial, the white runs 6 m wide at 6 m/s and 52 m at 24, always
+ *    anchored at the waterline and growing seaward.
+ *  - `wet` is zero on dry sand, so it cannot paint the beach.
+ *  - `surge` and `cells` multiply to a mean near 0.45 and only approach 1 where a
+ *    set is breaking through a boil, so the sustained level across the band is
+ *    around 0.6 and only the cells go white.
+ *  - the CPU gate holds the whole term at zero unless a shoreline is inside the
+ *    footprint, which keeps it off the open-water plateau the whitecap coverage
+ *    test measures.
+ *
+ * Together those hold the worst 420 m footprint anywhere near the island to 5%
+ * white at 6 m/s and 22% at 24. Raising this constant does not widen any of
+ * that, it only fills in the gaps between the cells — which is the same trade
+ * the wedge lost twice, and the same answer.
+ */
+const SURF_RATE = 0.28;
+
+/**
+ * How much of the surf deposit the arriving swell modulates, versus a floor.
+ *
+ * All pulse and no floor and the beach blinks off between sets; all floor and no
+ * pulse and it is a painted stripe. 0.55 leaves the band running at a bit under
+ * half rate continuously with each set driving it to white, which against a 5 s
+ * time constant reads as a band that breathes rather than one that flashes.
+ */
+const SURF_PULSE = 0.55;
+
+/**
+ * Fold values the swell modulation ramps between.
+ *
+ * Far looser than `uBreakThreshold`, and deliberately: that threshold asks "is
+ * this water folding", which only a few percent of the sea ever is, while this
+ * asks "is a crest arriving here", which is most of what a shore sees. Ramping
+ * over the same tight window would have the surf pulse only on the rare texels
+ * that whitecap on their own, which is not what makes a shore break.
+ */
+const SURF_FOLD_INNER = 0.15;
+const SURF_FOLD_OUTER = 0.95;
+
+/** World scale of the second `wakeBoil` octave, relative to the first. */
+const SURF_CELL_SCALE = 0.31;
+
+/**
+ * Depth below which the CPU calls the footprint "coastal", metres.
+ *
+ * Fixed, rather than derived from the sea state, and that is the load-bearing
+ * choice. A threshold that grew with the swell would switch the term — and its
+ * per-texel evaluation of the seafloor field — on and off as the wind slider
+ * moved, which is a frame-time cliff triggered by weather; worse, it would arm
+ * the surf over open shelf that has no shoreline anywhere on it, including the
+ * play area's own plateau, and that is the water Monahan's whitecap law is
+ * measured against. 6 m is shallow enough that only real coast reaches it: the
+ * shallowest water the gate sees at the camera's spawn is 13.7 m down, and no
+ * centre within 260 m of the origin sees anything above 9.2 m, so there is a
+ * clear factor of 1.5 between this threshold and the water the coverage test
+ * reads.
+ *
+ * Conservative in the safe direction: a shoal whose crown never comes up to 6 m
+ * gets no surf even if a big enough sea would technically break over it. The
+ * alternative error is white water in open ocean.
+ */
+const SHORE_GATE_DEPTH = 6;
+
+/**
+ * Grid the gate samples the floor on, and how far past the footprint it reaches.
+ *
+ * 11 samples over 1.15 footprints is a 48 m stride, against a heightfield whose
+ * finest octave is a ~25 m cell riding on shelf and bar features hundreds of
+ * metres across. Checked against a 4 m dense scan of the same footprint at 1576
+ * centres over the island: no misses, and 149 armed early, which is the margin
+ * doing its job. The margin is what arms the term *before* the shore crosses
+ * into the buffer, so the band has the whole approach to settle instead of
+ * appearing at the edge of view.
+ *
+ * 121 evaluations of the CPU heightfield per frame — 5.7 us, measured, and the
+ * entire cost of this feature in open water. Near a shore it early-outs sooner
+ * and the GPU branch is what starts costing anything.
+ */
+const SHORE_GATE_SAMPLES = 11;
+const SHORE_GATE_MARGIN = 1.15;
+
+/**
+ * Sea state assumed until `setSwell` is called: height in metres, bearing in
+ * radians on the same `(cos, sin) -> (x, z)` convention as `Spectrum`.
+ *
+ * Non-zero height so the band exists as soon as a floor node is wired rather
+ * than being a silent no-op until the caller notices the setter, and pi/4 to
+ * match `DEFAULT_SPECTRUM.windDirection`, so an unwired default has the surf on
+ * the same face of the island the swell is actually running at.
+ */
+const DEFAULT_SWELL_HEIGHT = 1.5;
+const DEFAULT_SWELL_BEARING = Math.PI * 0.25;
+
 /** Cascade slots the accumulate pass is built with. Matches `OceanMaterial`. */
 const WAKE_CASCADES = 3;
 
@@ -289,6 +510,19 @@ interface EmitterUniforms {
   direction: any;
   /** vec4: x = deposit amount, y = hull width, z = arm length, w = speed (m/s). */
   params: any;
+}
+
+export interface WakeOptions {
+  /**
+   * Metres of water above the floor at a world position, as a TSL node.
+   *
+   * Same shape and same contract as `Seafloor.depthNode` — takes a vec3 world
+   * position, reads xz, returns a float that goes negative over dry land. Bind
+   * it and the shore-break term is compiled into the accumulate pass; omit it
+   * and the term is not built at all, so an unwired `Wake` costs exactly what it
+   * did before and renders exactly what it did before.
+   */
+  floorDepthNode?: ((worldPosition: any) => any) | null;
 }
 
 export class Wake {
@@ -367,6 +601,39 @@ export class Wake {
   private readonly uRainRate = uniform(0.22);
 
   /**
+   * Still-water depth the significant wave breaks in, metres. See `BREAKER_INDEX`.
+   *
+   * A uniform rather than a constant because it is the whole coupling between the
+   * sea state and the shore: raise the swell and this grows, and the surf line
+   * walks offshore along the bathymetry instead of the band simply getting
+   * brighter where it already was.
+   */
+  private readonly uSurfDepth = uniform(1);
+  /**
+   * 1 when the buffer's footprint contains a shoreline, 0 otherwise.
+   *
+   * A uniform, so the branch it guards is coherent across the entire draw and
+   * the hardware skips the body rather than executing both sides — which matters
+   * because the body is sixteen texture fetches of the seafloor's FBM per texel,
+   * over a million texels, every frame. The CPU owns the buffer's centre, so the
+   * CPU is what answers the question. See `SHORE_GATE_DEPTH`.
+   */
+  private readonly uShoreActive = uniform(0);
+  /**
+   * World-space offset, metres, from a texel to the point the shoaling test
+   * samples: `SHELTER_REACH` seaward, against the swell's direction of travel.
+   *
+   * Carried as a vector rather than as a bearing so the shader adds it directly
+   * to the world position — the trigonometry is the same on every texel of every
+   * frame, and there are a million of them.
+   */
+  private readonly uSeaward = uniform(new THREE.Vector2());
+  /** See `WakeOptions.floorDepthNode`. Null means the term was never built. */
+  private readonly shoreDepthNode: ((worldPosition: any) => any) | null;
+  private swellHeight = DEFAULT_SWELL_HEIGHT;
+  private swellBearing = DEFAULT_SWELL_BEARING;
+
+  /**
    * Wave derivative bindings for the breaking-crest term.
    *
    * Built once for the maximum cascade count and re-pointed by `setCascades`,
@@ -407,9 +674,15 @@ export class Wake {
     waves: { derivativeTextures: THREE.Texture[]; tileSizes: number[] },
     resolution = 1024,
     extent = 420,
+    options: WakeOptions = {},
   ) {
     this.resolution = resolution;
     this.extent = extent;
+    // Read before the accumulate materials are built: whether the shore-break
+    // term exists is baked into their node graph, exactly as the cascade count
+    // is, and for the same reason — a material rebuilt later recompiles a shader
+    // mid-session and leaks the one it replaced.
+    this.shoreDepthNode = options.floorDepthNode ?? null;
 
     for (let i = 0; i < WAKE_CASCADES; i++) {
       const source = Math.min(i, waves.derivativeTextures.length - 1);
@@ -507,6 +780,23 @@ export class Wake {
   }
 
   /**
+   * The swell that is running at the shore: significant height in metres, and
+   * the bearing it travels along, `atan2(dz, dx)` — the same convention and the
+   * same number as `SpectrumParams.windDirection`.
+   *
+   * The height sets where the sea finds bottom and therefore how far offshore
+   * the surf line stands (`BREAKER_INDEX`); the bearing decides which face of a
+   * headland gets the surf and which one is in its lee (`SHELTER_REACH`).
+   * `significantWaveHeight(spectrumParams)` is the height this expects, the same
+   * value `AudioSystem` is given. No effect unless a floor node was supplied at
+   * construction.
+   */
+  setSwell(significantHeight: number, bearingRadians: number): void {
+    this.swellHeight = Number.isFinite(significantHeight) ? Math.max(0, significantHeight) : 0;
+    if (Number.isFinite(bearingRadians)) this.swellBearing = bearingRadians;
+  }
+
+  /**
    * The resolved foam target, for CPU readback.
    *
    * Exposed so a test can measure the *rendered* whitecap coverage against the
@@ -582,6 +872,27 @@ export class Wake {
     this.uWakeFoamDecay.value = Math.exp(-step / WAKE_FOAM_TAU);
     this.uStep.value = step;
     setVec2(this.uCenter.value as THREE.Vector2, this.centerX_, this.centerZ_);
+
+    if (this.shoreDepthNode !== null) {
+      const raw = (this.swellHeight * SHOALING_GAIN) / BREAKER_INDEX;
+      this.uSurfDepth.value = Math.max(
+        SURF_DEPTH_MIN,
+        SURF_DEPTH_MAX * Math.tanh(raw / SURF_DEPTH_MAX),
+      );
+      // Negated: the bearing is where the swell is going, and the shoaling test
+      // has to look at where it came from.
+      setVec2(
+        this.uSeaward.value as THREE.Vector2,
+        -Math.cos(this.swellBearing) * SHELTER_REACH,
+        -Math.sin(this.swellBearing) * SHELTER_REACH,
+      );
+      // Recomputed every frame from the centre alone, with no hysteresis and no
+      // cached scan. It is 121 heightfield samples, and making it cheaper by
+      // remembering the last answer would make the gate a function of the path
+      // taken to get here rather than of where the buffer is — which `reset`
+      // plus a settle has to be able to reproduce exactly.
+      this.uShoreActive.value = this.shoreInFootprint() ? 1 : 0;
+    }
 
     for (let i = 0; i < MAX_EMITTERS; i++) {
       const slot = this.emitters[i];
@@ -676,6 +987,29 @@ export class Wake {
 
   // ------------------------------------------------------------------ internals
 
+  /**
+   * Whether any water in (a little more than) the footprint is shore-shallow.
+   *
+   * Queries the same heightfield the floor mesh is built from, so the answer
+   * follows whatever bathymetry that file produces without this one knowing
+   * anything about the island's position or shape. No allocation: scalars only.
+   */
+  private shoreInFootprint(): boolean {
+    const span = this.extent * SHORE_GATE_MARGIN;
+    const stride = span / (SHORE_GATE_SAMPLES - 1);
+    const originX = this.centerX_ - span * 0.5;
+    const originZ = this.centerZ_ - span * 0.5;
+    for (let iz = 0; iz < SHORE_GATE_SAMPLES; iz++) {
+      const z = originZ + iz * stride;
+      for (let ix = 0; ix < SHORE_GATE_SAMPLES; ix++) {
+        // Dry land reports 0, which is below any threshold — so a beach arms the
+        // gate for the same reason a shoal does, without a separate test.
+        if (seafloorDepth(originX + ix * stride, z) < SHORE_GATE_DEPTH) return true;
+      }
+    }
+    return false;
+  }
+
   private createAccumulateMaterial(source: THREE.Texture): THREE.NodeMaterial {
     const extent = this.extent;
     const material = new THREE.NodeMaterial();
@@ -765,9 +1099,87 @@ export class Wake {
         this.uRainAgitation.mul(stipple.mul(0.7).add(0.3)).mul(this.uRainRate).mul(this.uStep),
       );
 
-      // Structure for the turbulent band, evaluated once because it depends only
-      // on where this texel is in the world. See `wakeBoil`.
+      // Structure for the turbulent band astern and for the surf line, evaluated
+      // once because it depends only on where this texel is in the world. Both
+      // are churned white water and both need the same metre-scale break-up. See
+      // `wakeBoil`.
       const boil = wakeBoil(world).mul(0.35).add(0.75).toVar();
+
+      // --- shore break --------------------------------------------------------
+      //
+      // The sea going white where it meets land. Two things decide where, and
+      // both are properties of the bottom rather than of the island:
+      //
+      //  - a wave overturns once its height reaches `BREAKER_INDEX` times the
+      //    depth under it, so the surf line is the `depth = height / gamma`
+      //    contour, and it walks offshore when the swell gets up;
+      //  - a wave only gets there by *shoaling*, so what breaks is the face the
+      //    swell is climbing, not every shallow patch. See `SHELTER_REACH`.
+      //
+      // It is expressed here and not in the water shader because what a shore
+      // actually produces is a *field of foam* — standing between sets, carried
+      // in by the drift — and that is what this buffer is. The surface can only
+      // ever draw where the water is white at this instant.
+      //
+      // Deposited into the hull-foam channel rather than the sea's, and for the
+      // reason the two channels exist at all. Surf is deeply aerated — a bore
+      // drives air metres down the way a transom does, not the shallow film a
+      // whitecap entrains — and against the whitecap's 1.5 s the band went out
+      // between sets instead of standing on the beach through them.
+      if (this.shoreDepthNode !== null) {
+        const floorDepth = this.shoreDepthNode;
+        If(this.uShoreActive.greaterThan(0.5), () => {
+          const depth = floorDepth(vec3(world.x, 0, world.y)).toVar();
+
+          // Inner edge at the depth the significant wave breaks in, outer edge
+          // where the biggest wave of a set does. Full strength everywhere
+          // inshore of the break is not an oversight: past the bar the wave has
+          // already broken and the whole surf zone is white water.
+          const band = smoothstepDown(
+            depth,
+            this.uSurfDepth,
+            this.uSurfDepth.mul(SURF_OUTER_REACH),
+          ).toVar();
+
+          // Which is exactly why the waterline needs its own cut. `band` is 1 at
+          // every depth below the break including the negative ones over dry
+          // sand, and without this the beach itself would be painted white.
+          const wet = depth.smoothstep(-0.15, 0.5).toVar();
+
+          // The shoaling test, and the second and last evaluation of the floor
+          // field in this pass. `uSeaward` already carries the direction and the
+          // reach, so this is one add and one subtract on top of the fetch.
+          const seaward = floorDepth(
+            vec3(world.x.add(this.uSeaward.x), 0, world.y.add(this.uSeaward.y)),
+          ).toVar();
+          const exposure = seaward
+            .sub(depth)
+            .div(SHELTER_REACH)
+            .smoothstep(SHOAL_INNER, SHOAL_OUTER)
+            .toVar();
+
+          // The sets. `fold` is already this texel's steepness in the open-water
+          // wave field, so borrowing it costs nothing and ties each pulse of the
+          // band to a crest the viewer can watch arrive. The floor under it is
+          // what keeps the surf running between sets. See `SURF_FOLD_INNER`.
+          const surge = smoothstepDown(fold, SURF_FOLD_INNER, SURF_FOLD_OUTER)
+            .mul(SURF_PULSE)
+            .add(1 - SURF_PULSE)
+            .toVar();
+
+          // Two scales of `wakeBoil`, because a surf line is a row of breaking
+          // cells with gaps between them and one scale gives an even stipple —
+          // which is the tell that a band was drawn rather than broken. Sines
+          // rather than a hash for the reason `wakeBoil` records: this buffer is
+          // resampled by a fractional texel offset every frame, and a hash would
+          // scintillate along the entire beach.
+          const cells = boil.mul(wakeBoil(world.mul(SURF_CELL_SCALE)).mul(0.4).add(0.68)).toVar();
+
+          wakeDeposit.addAssign(
+            band.mul(wet).mul(exposure).mul(surge).mul(cells).mul(SURF_RATE).mul(this.uStep),
+          );
+        });
+      }
 
       for (let i = 0; i < MAX_EMITTERS; i++) {
         const slot = this.emitters[i];

@@ -1,6 +1,8 @@
 import * as THREE from 'three/webgpu';
 import { Fn, float, mix, positionWorld, texture, uniform, vec2, vec3, vec4 } from 'three/tsl';
-import { smoothstepDown } from '../core/tslMath';
+// Aliased because this module needs a CPU twin of the same ramp under the
+// unqualified name; see `smoothstepDown` below.
+import { smoothstepDown as smoothstepDownNode } from '../core/tslMath';
 import { SEEDS, mulberry32 } from '../core/random';
 
 /**
@@ -118,14 +120,76 @@ function fbm(x: number, y: number): number {
 
 // ------------------------------------------------------------- floor structure
 
+function smoothstep(edge0: number, edge1: number, x: number): number {
+  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * CPU twin of `tslMath.smoothstepDown`, argument for argument.
+ *
+ * Every descending ramp in the heightfield now goes through this on the CPU and
+ * through the node version on the GPU, so the two implementations can be read
+ * against each other as the same three arguments in the same order. The shape
+ * this replaced spelled the same ramp two different ways — `smoothstep(outer,
+ * inner, x)` on the CPU against `smoothstepDown(x, inner, outer)` in TSL — and a
+ * mirrored pair like that is precisely what survives a careless edit to one side
+ * while looking correct in review.
+ */
+function smoothstepDown(x: number, inner: number, outer: number): number {
+  return 1 - smoothstep(inner, outer, x);
+}
+
+/**
+ * Directions on the island are unit vectors, never angles.
+ *
+ * Every directional term below is a dot product against one of these, which
+ * keeps `atan2` out of the heightfield entirely. That matters twice: TSL has
+ * moved its spelling of `atan2` across recent revisions, and the branch cut at
+ * +/-pi would draw a seam straight across the island on whichever bearing it
+ * happened to land. Harmonics of the bearing come back out of the dot product
+ * through the Chebyshev identities (cos 2t = 2c^2 - 1, cos 3t = 4c^3 - 3c),
+ * which are polynomials, and so agree between a float64 CPU and a float32 GPU
+ * to the last rounding — the same reason the noise is a texture and not a hash.
+ */
+interface Dir {
+  readonly x: number;
+  readonly z: number;
+}
+
+/** A direction plus the angular reach of the feature that sits on it. */
+interface Sector extends Dir {
+  /** cos of the half-width: the mask is a smoothstep in cosine, not in angle. */
+  readonly edge: number;
+}
+
+/** Bearing convention matches the scatter code in `Props`: x = cos, z = sin. */
+function dir(bearing: number): Dir {
+  return { x: Math.cos(bearing), z: Math.sin(bearing) };
+}
+
+function sector(bearing: number, halfWidth: number): Sector {
+  return { x: Math.cos(bearing), z: Math.sin(bearing), edge: Math.cos(halfWidth) };
+}
+
+/** 1 on the sector's bearing, 0 past its half-width. `u` must be a unit bearing. */
+function sectorMask(ux: number, uz: number, s: Sector): number {
+  return smoothstep(s.edge, 1, ux * s.x + uz * s.z);
+}
+
 /** Rocky island the props dress and the distant silhouette comes from. */
 export const ISLAND = {
   x: -1150,
   z: -780,
-  /** Radius at which the island rise has fully died out. */
-  radius: 260,
-  /** Height of the island core above mean sea level, before props. */
-  peak: 30,
+  /**
+   * Mean shoreline radius. The coast itself runs from about 0.70x this at the
+   * head of the bay to 1.25x at the tip of the headland, so this is the number
+   * to scale placement by and not a number to trust as a coastline — ask
+   * `seafloorHeight` where the water is.
+   */
+  radius: 500,
+  /** Height of the summit above mean sea level, before props and before relief. */
+  peak: 72,
 } as const;
 
 const DEEP_Y = -88;
@@ -136,32 +200,232 @@ const RELIEF = 11;
 /** World metres per noise cell of the coarsest octave. */
 const FEATURE_SCALE = 1 / 240;
 
-function smoothstep(edge0: number, edge1: number, x: number): number {
-  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
-  return t * t * (3 - 2 * t);
+/**
+ * Island shape.
+ *
+ * What this replaced was `peak * smoothstep(radius, radius * 0.18, dIsland)`:
+ * one radially symmetric dome. That is why the shoreline was a circle, why the
+ * cliff props could get away with assuming the shore ran tangent to one, and why
+ * sailing around the island showed the same silhouette from every bearing. The
+ * replacement is a sum of named terms, each doing one thing a reader can point
+ * at. Deliberately not another noise call: noise with enough amplitude to move a
+ * coastline this far is indistinguishable from static at this scale, and it
+ * leaves nothing to aim a set piece at.
+ *
+ * Everything vertical is expressed against `t` — distance from the island centre
+ * over the shoreline radius *on that bearing*. So `t = 1` is the waterline
+ * everywhere by construction, and the bay, the headland and the lobes deform the
+ * whole island rather than only its outline.
+ */
+
+// Shoreline radius, as a multiple of `ISLAND.radius`. Three harmonics of the
+// bearing, each about its own axis, so the outline repeats on no obvious period.
+/** cos 2t: the island is an ellipse before it is anything else. */
+const ELONGATION = 0.12;
+const ELONGATION_AXIS = dir(1.95);
+/** cos 3t: three broad lobes, which is what stops it reading as an ellipse. */
+const LOBES = 0.075;
+const LOBE_AXIS = dir(2.6);
+/** cos t: sand accretes on the downwind face, the upwind face is cut back. */
+const DRIFT = 0.07;
+const DRIFT_AXIS = dir(0.9);
+/** Floor under the summed fraction; a term deep enough to invert it sends `t` to infinity. */
+const SHORE_FLOOR = 0.35;
+
+/**
+ * The bay, cut into the windward shore — `Spectrum` blows toward pi/4 by
+ * default, so this is the face that takes the swell.
+ *
+ * It cuts the shore *radius* rather than the height, which is what makes it a
+ * bay a ship can enter instead of a dent in a hillside: the whole vertical
+ * profile moves inward with the coast, so the bay gets its own beach at its head
+ * and deepens toward its mouth for free.
+ */
+const BAY = sector(2.3, 0.44);
+const BAY_CUT = 0.42;
+
+/**
+ * The headland: the opposite move. Radius pushed out, and a ridge raised along
+ * the same bearing so the point ends in a bluff instead of tapering away to
+ * nothing. It forms the far arm of the cove from the spit; between them they are
+ * what encloses the lagoon.
+ *
+ * The ridge is windowed at both ends in `t`. The toe is not optional: a lift
+ * that only faded outward is still at full height at the island centre, where it
+ * stacks on the crest and puts the summit twenty-six metres above the value
+ * `ISLAND.peak` promises.
+ */
+const HEADLAND = sector(1.45, 0.42);
+const HEADLAND_REACH = 0.2;
+const HEADLAND_LIFT = 26;
+const HEADLAND_TOE = 0.42;
+const HEADLAND_CROWN = 0.7;
+const HEADLAND_BROW = 0.9;
+const HEADLAND_FALL = 1.06;
+
+/**
+ * The apron carries the floor from shelf depth up to the waterline and owns the
+ * beach gradient. `SHORE_LIFT` is solved, not tuned: it is exactly the lift that
+ * puts sea level at `t = 1`, so widening the apron to soften the beach cannot
+ * silently drag the coastline in or out.
+ */
+const APRON_IN = 0.78;
+const APRON_OUT = 1.34;
+const SHORE_LIFT = -PLATEAU_Y / smoothstepDown(1, APRON_IN, APRON_OUT);
+
+/**
+ * The summit sits inland of the island centre, upwind of it. Without that offset
+ * every contour is a scaled copy of the shoreline and the island reads as a
+ * shape stamped out of a cone however irregular its outline is.
+ *
+ * `CREST_SPAN` measures the crest against the *local* shore radius, so the crest
+ * has died out before the beach on every bearing including the short one at the
+ * head of the bay; a crest measured in metres would push land back into it.
+ * `CREST_LIFT` is solved like `SHORE_LIFT`: plateau plus apron plus crest is
+ * exactly `ISLAND.peak`, so that constant means what its name says.
+ */
+const CREST_IN = 0;
+const CREST_OUT = 0.94;
+const CREST_SPAN = 0.9;
+const CREST_LIFT = ISLAND.peak - PLATEAU_Y - SHORE_LIFT;
+const SUMMIT_DRIFT = 0.16;
+const SUMMIT_OFFSET: Dir = {
+  x: Math.cos(3.9) * ISLAND.radius * SUMMIT_DRIFT,
+  z: Math.sin(3.9) * ISLAND.radius * SUMMIT_DRIFT,
+};
+
+/**
+ * How far the island keeps its own shelf before the floor is allowed to fall to
+ * `DEEP_Y`. The inner edge is past `t = 1` deliberately: the apron's arithmetic
+ * assumes the floor under the beach is exactly `PLATEAU_Y`, and a skirt that had
+ * already begun to fall there would pull the waterline in by a few metres, by an
+ * amount that varied with bearing.
+ */
+const SKIRT_IN = 1.06;
+const SKIRT_OUT = 1.95;
+
+/**
+ * The spit: a recurved bar running out from the shore beside the cove.
+ *
+ * Two masks off one axis. The wide one lifts the *shelf* under the bar; the
+ * narrow one puts the bar on top of it. Without the shelf the bar would be a
+ * wall standing off fifty metres of water, because the gap between the island's
+ * skirt and the origin plateau is the deepest water anywhere near the island.
+ *
+ * `SPIT_CURVE` hooks the axis toward the lagoon as it runs — the shape longshore
+ * drift actually builds, and the cheapest way to stop a straight extrusion from
+ * looking like one.
+ */
+const SPIT = dir(-0.1);
+const SPIT_CURVE = 0.095 / ISLAND.radius;
+const SPIT_ROOT = 470;
+const SPIT_RISE = 90;
+const SPIT_TIP = 980;
+const SPIT_TAPER = 260;
+const SPIT_CORE = 22;
+const SPIT_EDGE = 62;
+const SPIT_SHOAL_CORE = 70;
+const SPIT_SHOAL_EDGE = 180;
+const SPIT_LIFT = 21;
+
+/**
+ * The lagoon: the water between the beach and the bar, on the lee shore.
+ *
+ * `Props` puts the pirate cove on this bearing, so the sector has to stay
+ * navigable and gently shelving. Hence a *floor* rather than a barrier: applied
+ * last and as a maximum, it can only ever raise the seabed toward `LAGOON_Y`.
+ * The beach and the spit crest are already above it and pass through untouched,
+ * which is also why the order of these last two terms is not free.
+ */
+const LAGOON = sector(0.68, 0.52);
+const LAGOON_IN = 0.98;
+const LAGOON_FULL = 1.16;
+const LAGOON_EDGE = 1.4;
+const LAGOON_OUT = 1.62;
+const LAGOON_Y = -5.5;
+
+/**
+ * Shoreline radius on the bearing `(ux, uz)`, as a multiple of `ISLAND.radius`.
+ */
+function shoreFraction(ux: number, uz: number): number {
+  const e = ux * ELONGATION_AXIS.x + uz * ELONGATION_AXIS.z;
+  const l = ux * LOBE_AXIS.x + uz * LOBE_AXIS.z;
+  const d = ux * DRIFT_AXIS.x + uz * DRIFT_AXIS.z;
+
+  const elongation = ELONGATION * (e * e * 2 - 1);
+  const lobes = LOBES * (l * l * l * 4 - l * 3);
+  const drift = DRIFT * d;
+  const bay = BAY_CUT * sectorMask(ux, uz, BAY);
+  const headland = HEADLAND_REACH * sectorMask(ux, uz, HEADLAND);
+
+  return Math.max(1 + elongation + lobes + drift - bay + headland, SHORE_FLOOR);
 }
 
 /**
  * Floor elevation in world metres (negative below sea level).
  *
  * Exported so `Props` can seat rocks and cliffs on the same surface the mesh is
- * built from, without either side owning the other.
+ * built from, without either side owning the other. Called per frame from
+ * buoyancy and per candidate from the placement loops, so it allocates nothing:
+ * every direction it needs is a module constant read component-wise.
  */
 export function seafloorHeight(x: number, z: number): number {
   const n = fbm(x * FEATURE_SCALE, z * FEATURE_SCALE);
 
   const rOrigin = Math.sqrt(x * x + z * z);
+
   const dx = x - ISLAND.x;
   const dz = z - ISLAND.z;
   const dIsland = Math.sqrt(dx * dx + dz * dz);
+  // Guarded so the bearing is finite at the centre. Every directional term reads
+  // it, and one NaN there would spread across the whole summit.
+  const inv = 1 / Math.max(dIsland, 1);
+  const ux = dx * inv;
+  const uz = dz * inv;
 
-  const shallowOrigin = 1 - smoothstep(PLATEAU_RADIUS, SHELF_RADIUS, rOrigin);
-  const shallowIsland = smoothstep(ISLAND.radius * 2.4, ISLAND.radius * 0.6, dIsland);
-  const shallowness = Math.max(shallowOrigin, shallowIsland);
+  const shore = ISLAND.radius * shoreFraction(ux, uz);
+  const t = dIsland / shore;
+
+  // Crest measured from the offset summit, in its own normalised frame.
+  const sx = dx - SUMMIT_OFFSET.x;
+  const sz = dz - SUMMIT_OFFSET.z;
+  const tCrest = Math.sqrt(sx * sx + sz * sz) / (shore * CREST_SPAN);
+
+  // Spit, in along/across metres about its own axis; `across` is measured
+  // against the hooked centreline rather than a straight one.
+  const along = dx * SPIT.x + dz * SPIT.z;
+  const across = dz * SPIT.x - dx * SPIT.z;
+  const offset = Math.abs(across - along * along * SPIT_CURVE);
+  const run =
+    smoothstep(SPIT_ROOT, SPIT_ROOT + SPIT_RISE, along) *
+    smoothstepDown(along, SPIT_TIP - SPIT_TAPER, SPIT_TIP);
+  const shoal = run * smoothstepDown(offset, SPIT_SHOAL_CORE, SPIT_SHOAL_EDGE);
+  const crest = run * smoothstepDown(offset, SPIT_CORE, SPIT_EDGE);
+
+  const shallowOrigin = smoothstepDown(rOrigin, PLATEAU_RADIUS, SHELF_RADIUS);
+  const shallowIsland = smoothstepDown(t, SKIRT_IN, SKIRT_OUT);
+  const shallowness = Math.max(Math.max(shallowOrigin, shallowIsland), shoal);
 
   let y = DEEP_Y + (PLATEAU_Y - DEEP_Y) * shallowness;
   y += (n - 0.5) * RELIEF * (0.35 + 0.65 * shallowness);
-  y += ISLAND.peak * smoothstep(ISLAND.radius, ISLAND.radius * 0.18, dIsland);
+  y += SHORE_LIFT * smoothstepDown(t, APRON_IN, APRON_OUT);
+  y += CREST_LIFT * smoothstepDown(tCrest, CREST_IN, CREST_OUT);
+  y +=
+    HEADLAND_LIFT *
+    sectorMask(ux, uz, HEADLAND) *
+    smoothstep(HEADLAND_TOE, HEADLAND_CROWN, t) *
+    smoothstepDown(t, HEADLAND_BROW, HEADLAND_FALL);
+  y += SPIT_LIFT * crest;
+
+  const lagoon =
+    sectorMask(ux, uz, LAGOON) *
+    smoothstep(LAGOON_IN, LAGOON_FULL, t) *
+    smoothstepDown(t, LAGOON_EDGE, LAGOON_OUT);
+  // Read `y` into `fill` before touching it. The TSL twin needs the same split
+  // so the value the lagoon is filling against is unambiguously the pre-lagoon
+  // floor rather than whatever a compound assignment decides to evaluate first.
+  const fill = Math.max(LAGOON_Y - y, 0);
+  y += lagoon * fill;
   return y;
 }
 
@@ -352,29 +616,55 @@ export class Seafloor {
       const wp = positionWorld.toVar();
       const depth = wp.y.negate().toVar();
 
-      // Wet sand is darker and greener than dry; the transition happens over
-      // the first couple of metres of water, which is what makes a beach read.
-      const dryRock = vec3(0.4, 0.34, 0.26);
-      const drySand = vec3(0.74, 0.65, 0.47);
-      const wetSand = vec3(0.56, 0.5, 0.36);
-      const deepSilt = vec3(0.14, 0.2, 0.22);
+      // Albedos are dim on purpose. The previous dry sand was 0.74 linear, and
+      // once the mottling's 1.16 ceiling and a clear-sky IBL were through with
+      // it the whole island clipped to white: no grain, no shading, no beach.
+      // Quartz beach sand reflects around 0.35-0.45 diffuse — but that figure is
+      // the *albedo*, and what a viewer sees is the albedo times the irradiance,
+      // which here is a 3.4-intensity key plus a hemisphere fill. Measured off
+      // the rendered frame, an albedo of 0.52 put the island at RGB 228,228,228:
+      // not clipped, but a neutral near-white with no grain and no colour, which
+      // reads as snow. These land it near 195 and keep the warm ratio a quartz
+      // beach actually has, so the normal map, the caustics and the swash band
+      // all have somewhere to go.
+      const dryRock = vec3(0.24, 0.21, 0.17);
+      const dryInland = vec3(0.31, 0.26, 0.18);
+      const beachSand = vec3(0.37, 0.32, 0.23);
+      const wetSand = vec3(0.19, 0.17, 0.13);
+      const shallowSand = vec3(0.42, 0.4, 0.3);
+      const deepSilt = vec3(0.1, 0.15, 0.17);
 
-      const aboveWater = wp.y.smoothstep(-1.5, 6.0).toVar();
-      const submerged = mix(deepSilt, wetSand, smoothstepDown(depth, 4, 70)).toVar();
-      const exposed = mix(drySand, dryRock, wp.y.smoothstep(4, 26)).toVar();
+      // Tight, because this is the beach edge. The 7.5 m ramp this replaced
+      // spanned the entire intertidal slope, so there was no elevation at which
+      // the floor was unambiguously sand rather than seabed.
+      const aboveWater = wp.y.smoothstep(-0.8, 1.6).toVar();
+      const submerged = mix(deepSilt, shallowSand, smoothstepDownNode(depth, 4, 70)).toVar();
+      // Inland is warmer and darker: the same sand, dry and dusted with what
+      // grows on it. The rock term takes over near the summit, which is why its
+      // edges are a fraction of `ISLAND.peak` rather than the old fixed metres.
+      const exposed = mix(beachSand, dryInland, wp.y.smoothstep(2, 15)).toVar();
+      const land = mix(exposed, dryRock, wp.y.smoothstep(ISLAND.peak * 0.42, ISLAND.peak * 0.85)).toVar();
 
-      const base = mix(submerged, exposed, aboveWater).toVar();
+      const base = mix(submerged, land, aboveWater).toVar();
+
+      // The swash band. Sand within a few metres of mean sea level is wet more
+      // often than it is dry, and without the band the beach meets the water as
+      // a join between two dry-looking materials — the strongest single tell
+      // that a shoreline is a displaced grid. It straddles y = 0 because the
+      // swash does.
+      const swash = smoothstepDownNode(wp.y.abs(), 1, 3.4).toVar();
+      const damp = mix(base, wetSand, swash).toVar();
 
       // Broad mottling: patches of weed and darker sediment, the dark blotches
       // visible through the shallows in the reference top-down shot.
       const patch = valueNoise(vec2(wp.x, wp.z).mul(1 / 26)).toVar();
-      const mottled = base.mul(patch.mul(0.42).add(0.74)).toVar();
+      const mottled = damp.mul(patch.mul(0.4).add(0.78)).toVar();
 
       if (caustics === null) return vec4(mottled, 1);
 
       // Caustics only exist under water, and fade out as the floor gets deep
       // enough that the surface pattern has diverged into ambient light.
-      const reach = smoothstepDown(depth, 2, 48).mul(float(1).sub(aboveWater)).toVar();
+      const reach = smoothstepDownNode(depth, 2, 48).mul(float(1).sub(aboveWater)).toVar();
       const lit = mix(float(1), caustics, reach.mul(strength)).toVar();
       return vec4(mottled.mul(lit), 1);
     })();
@@ -445,21 +735,89 @@ function buildNoiseNodes(map: THREE.Texture): NoiseNodes {
     return sum.mul(1 / FBM_NORM);
   });
 
-  /** Mirrors `seafloorHeight()` exactly. */
+  /**
+   * `sectorMask()` above, node for node. A plain arrow rather than an `Fn`
+   * because it takes everything it reads as an argument, so it inlines and the
+   * scoping hazard the header describes cannot apply.
+   */
+  const sectorMaskNode = (u: Node, s: Sector): Node =>
+    u.dot(vec2(s.x, s.z)).smoothstep(s.edge, 1);
+
+  /** `shoreFraction()` above, term for term and in the same order. */
+  const shoreFractionNode = (u: Node): Node => {
+    const e = u.dot(vec2(ELONGATION_AXIS.x, ELONGATION_AXIS.z)).toVar();
+    const l = u.dot(vec2(LOBE_AXIS.x, LOBE_AXIS.z)).toVar();
+    const d = u.dot(vec2(DRIFT_AXIS.x, DRIFT_AXIS.z)).toVar();
+
+    const elongation = e.mul(e).mul(2).sub(1).mul(ELONGATION).toVar();
+    const lobes = l.mul(l).mul(l).mul(4).sub(l.mul(3)).mul(LOBES).toVar();
+    const drift = d.mul(DRIFT).toVar();
+    const bay = sectorMaskNode(u, BAY).mul(BAY_CUT).toVar();
+    const headland = sectorMaskNode(u, HEADLAND).mul(HEADLAND_REACH).toVar();
+
+    return float(1).add(elongation).add(lobes).add(drift).sub(bay).add(headland).max(SHORE_FLOOR);
+  };
+
+  /**
+   * Mirrors `seafloorHeight()` exactly.
+   *
+   * Read the two side by side: same locals, same order, same constants, and the
+   * same three arguments to every ramp. That correspondence is the only thing
+   * keeping the buoyancy solver, the prop placement and the water's depth term
+   * on the same surface as this mesh, so a term added to one half without the
+   * other is not a cosmetic bug — it is props buried in sand and fish inside
+   * rock.
+   */
   const height = Fn(([p]: [Node]) => {
     const xz = p.toVar();
     const n = fbmFn(xz.mul(FEATURE_SCALE)).toVar();
 
     const rOrigin = xz.length().toVar();
-    const dIsland = xz.sub(vec2(ISLAND.x, ISLAND.z)).length().toVar();
 
-    const shallowOrigin = float(1).sub(rOrigin.smoothstep(PLATEAU_RADIUS, SHELF_RADIUS)).toVar();
-    const shallowIsland = smoothstepDown(dIsland, ISLAND.radius * 0.6, ISLAND.radius * 2.4).toVar();
-    const shallowness = shallowOrigin.max(shallowIsland).toVar();
+    // `dv` is (dx, dz); its `.y` is the world z offset throughout.
+    const dv = xz.sub(vec2(ISLAND.x, ISLAND.z)).toVar();
+    const dIsland = dv.length().toVar();
+    const inv = float(1).div(dIsland.max(1)).toVar();
+    const u = dv.mul(inv).toVar();
+
+    const shore = shoreFractionNode(u).mul(ISLAND.radius).toVar();
+    const t = dIsland.div(shore).toVar();
+
+    const sv = dv.sub(vec2(SUMMIT_OFFSET.x, SUMMIT_OFFSET.z)).toVar();
+    const tCrest = sv.length().div(shore.mul(CREST_SPAN)).toVar();
+
+    const along = dv.dot(vec2(SPIT.x, SPIT.z)).toVar();
+    const across = dv.y.mul(SPIT.x).sub(dv.x.mul(SPIT.z)).toVar();
+    const offset = across.sub(along.mul(along).mul(SPIT_CURVE)).abs().toVar();
+    const run = along
+      .smoothstep(SPIT_ROOT, SPIT_ROOT + SPIT_RISE)
+      .mul(smoothstepDownNode(along, SPIT_TIP - SPIT_TAPER, SPIT_TIP))
+      .toVar();
+    const shoal = run.mul(smoothstepDownNode(offset, SPIT_SHOAL_CORE, SPIT_SHOAL_EDGE)).toVar();
+    const crest = run.mul(smoothstepDownNode(offset, SPIT_CORE, SPIT_EDGE)).toVar();
+
+    const shallowOrigin = smoothstepDownNode(rOrigin, PLATEAU_RADIUS, SHELF_RADIUS).toVar();
+    const shallowIsland = smoothstepDownNode(t, SKIRT_IN, SKIRT_OUT).toVar();
+    const shallowness = shallowOrigin.max(shallowIsland).max(shoal).toVar();
 
     const y = float(DEEP_Y).add(float(PLATEAU_Y - DEEP_Y).mul(shallowness)).toVar();
     y.addAssign(n.sub(0.5).mul(RELIEF).mul(shallowness.mul(0.65).add(0.35)));
-    y.addAssign(float(ISLAND.peak).mul(smoothstepDown(dIsland, ISLAND.radius * 0.18, ISLAND.radius)));
+    y.addAssign(smoothstepDownNode(t, APRON_IN, APRON_OUT).mul(SHORE_LIFT));
+    y.addAssign(smoothstepDownNode(tCrest, CREST_IN, CREST_OUT).mul(CREST_LIFT));
+    y.addAssign(
+      sectorMaskNode(u, HEADLAND)
+        .mul(t.smoothstep(HEADLAND_TOE, HEADLAND_CROWN))
+        .mul(smoothstepDownNode(t, HEADLAND_BROW, HEADLAND_FALL))
+        .mul(HEADLAND_LIFT),
+    );
+    y.addAssign(crest.mul(SPIT_LIFT));
+
+    const lagoon = sectorMaskNode(u, LAGOON)
+      .mul(t.smoothstep(LAGOON_IN, LAGOON_FULL))
+      .mul(smoothstepDownNode(t, LAGOON_EDGE, LAGOON_OUT))
+      .toVar();
+    const fill = float(LAGOON_Y).sub(y).max(0).toVar();
+    y.addAssign(lagoon.mul(fill));
     return y;
   });
 
