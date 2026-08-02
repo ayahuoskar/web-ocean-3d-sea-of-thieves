@@ -310,8 +310,16 @@ class App {
     // nor a skeleton, and every CC0 source that does is low-poly stylised and
     // would sit badly against photoscanned rock — so both are built, which is
     // also how this project already solves gulls and fish.
-    this.palms = new Palms({ count: quality.palms });
-    this.palms.setPlacements(scatterPalms(Palms.MAX_COUNT));
+    this.palms = new Palms({
+      count: quality.palms,
+      prevailingWind: getPreset(this.state.preset).sea.windDirection,
+      // Placed at full capacity and drawn as a prefix, so a tier change thins
+      // the grove instead of relocating it. Weighted toward the cove's bearing
+      // — a coconut grove is a shoreline plant and the cove is the shoreline
+      // anyone actually arrives at — but with enough spread to reach round the
+      // bay rather than sitting in one clump.
+      placements: scatterPalms(Palms.MAX_COUNT, { bearing: 0.7, spread: 1.5 }),
+    });
     this.scene.add(this.palms.object);
 
     this.remains = new Remains();

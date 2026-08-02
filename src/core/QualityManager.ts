@@ -182,7 +182,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     wakeDisplacement: 0.75,
     propsDetail: 0.5,
     kelp: 800,
-    palms: 28,
+    palms: 16,
   },
   high: {
     fftSize: 256,
@@ -203,7 +203,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     wakeDisplacement: 1,
     propsDetail: 0.75,
     kelp: 1800,
-    palms: 64,
+    palms: 30,
   },
   ultra: {
     fftSize: 256,
@@ -224,7 +224,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     wakeDisplacement: 1,
     propsDetail: 1,
     kelp: 2900,
-    palms: 110,
+    palms: 48,
   },
   max: {
     fftSize: 512,
@@ -245,7 +245,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     wakeDisplacement: 1,
     propsDetail: 1,
     kelp: 4000,
-    palms: 160,
+    palms: 72,
   },
 };
 

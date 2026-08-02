@@ -126,16 +126,31 @@ const COAST_ROCKS_WIDE_COUNT = 4;
 const COAST_ROCKS_TALL_COUNT = 4;
 const LAND_ROCKS_COUNT = 4;
 const SAND_ROCKS_COUNT = 4;
-const JACARANDA_COUNT = 4;
-const TREE_COUNT = 12;
-const TREE_MID_COUNT = 12;
-const TREE_WIND_COUNT = 10;
-const PACHIRA_COUNT = 12;
-const ANTHURIUM_COUNT = 20;
-const CALATHEA_COUNT = 24;
-const FERN_COUNT = 30;
-const SORREL_COUNT = 36;
-const GRASS_COUNT = 150;
+/**
+ * Planting density, and these numbers are the difference between an island and
+ * a sandbank.
+ *
+ * The first pass at the enlarged island scaled the old counts by about 2.3x on
+ * 4x the land area, which is a *thinning* — and an aerial capture showed exactly
+ * that: a white dome with objects sprinkled on it. Canopy has to close over the
+ * interior for the island to read as vegetated at all, because what a viewer
+ * registers from a mile out is the ratio of green to sand and nothing else.
+ *
+ * These are per-kind capacities, thinned by `propsDetail` — 0.3 at Low — so the
+ * high-water mark is what Ultra and Max draw and the lower tiers keep the shape
+ * and lose the density. The reef, at 90 instances of a 15k-triangle rock, is
+ * still the largest single cost in this file; the entire canopy is less.
+ */
+const JACARANDA_COUNT = 14;
+const TREE_COUNT = 46;
+const TREE_MID_COUNT = 44;
+const TREE_WIND_COUNT = 26;
+const PACHIRA_COUNT = 40;
+const ANTHURIUM_COUNT = 70;
+const CALATHEA_COUNT = 84;
+const FERN_COUNT = 110;
+const SORREL_COUNT = 130;
+const GRASS_COUNT = 620;
 const SHELL_COUNT = 9;
 
 /**
@@ -229,8 +244,16 @@ const PINNACE_SCALE = 0.55;
 /** Metres the hull is lifted off the sand, so the keel bites rather than floats. */
 const PINNACE_KEEL_LIFT = 1.05;
 const PINNACE_HEEL = 0.17;
-/** Bow-up trim, radians. Negative pitches the bow up in a YXZ rotation. */
-const PINNACE_TRIM = -0.09;
+/**
+ * Bow-up trim, radians. Negative pitches the bow up in a YXZ rotation.
+ *
+ * This is the beach gradient and nothing else, so it moved when the beach did:
+ * the cove now falls about a tenth of a metre per metre instead of a fifth, and
+ * the hull lies mostly *along* the beach rather than up it, which leaves about a
+ * twentieth of grade under the keel. At the old -0.09 the boat was correcting
+ * for twice the slope it is actually sitting on and stood on its stern.
+ */
+const PINNACE_TRIM = -0.05;
 
 /**
  * The camp, on the dry beach above the swash. `Seafloor` washes the sand within
@@ -310,36 +333,40 @@ const FORT_AIM_OFFSHORE = 90;
  * broken curtain wall with a breach in it needs no piece to meet any other.
  */
 const FORT_PIECES = [
-  // The seaward tower, on the flank nearest the cove. The tall silhouette, and
-  // the only piece that reads from the play area.
-  { node: 'modular_fort_01_tower_round', x: 14.5, z: 5 },
-  // Curtain wall across the front, running along local X, so each 14.6 m
-  // section is turned a quarter turn out of its own Z.
-  { node: 'modular_fort_01_wall_thick_straight_01', x: -6, z: 10, yaw: Math.PI / 2 },
-  { node: 'modular_fort_01_wall_thick_straight_02', x: -20.6, z: 10, yaw: Math.PI / 2 },
-  // The broken end, leaning out and settled into the ground: where the wall
+  // The seaward tower, on the flank nearest the cove: 15.8 m across and 13.4 m
+  // tall, so it is the piece that carries the fort from the play area. Spans
+  // x +7.5..+23.3.
+  { node: 'modular_fort_01_tower_round', x: 15.4, z: 6.5 },
+  // Curtain wall across the front. The sections are authored running along
+  // their own Z, so each is turned a quarter turn to lie along the face. The
+  // two of them span x -26.3..+1.3, which leaves 6 m of nothing between the
+  // wall and the tower: the breach, and the reason the gun has a field of fire.
+  { node: 'modular_fort_01_wall_thick_straight_01', x: -4.4, z: 10, yaw: Math.PI / 2 },
+  { node: 'modular_fort_01_wall_thick_straight_02', x: -19, z: 10, yaw: Math.PI / 2 },
+  // The broken end, settled and tipped along its own length: where the wall
   // stops rather than where it was built to stop.
-  { node: 'modular_fort_01_wall_thick_end_02', x: -25.4, z: 10, y: -0.5, yaw: Math.PI / 2, tilt: 0.08 },
-  // Landward flank and its gate. Subsiding slightly, which is the cheapest
-  // legible difference between a ruin and a building site.
-  { node: 'modular_fort_01_wall_thin_straight_02', x: -28.5, z: 1, tilt: 0.05 },
-  { node: 'modular_fort_01_wall_thin_gate_01', x: -28.5, z: -11 },
+  { node: 'modular_fort_01_wall_thick_end_02', x: -28.7, z: 10, y: -0.5, yaw: Math.PI / 2, tilt: 0.08 },
+  // Landward flank and its gate, returning inland from that end. Subsiding
+  // slightly, which is the cheapest legible difference between a ruin and a
+  // building site.
+  { node: 'modular_fort_01_wall_thin_straight_02', x: -29, z: 1, tilt: 0.05 },
+  { node: 'modular_fort_01_wall_thin_gate_01', x: -29, z: -10.1 },
   // Inside: the stair up to the fighting step, and the step itself behind the
   // curtain. Without them the wall reads as a fence.
-  { node: 'modular_fort_01_wall_stairs_straight_01', x: -19, z: -0.5 },
-  { node: 'modular_fort_01_wall_walkway_straight_01', x: -6, z: 6.3, yaw: Math.PI / 2 },
+  { node: 'modular_fort_01_wall_stairs_straight_01', x: -22, z: 0 },
+  { node: 'modular_fort_01_wall_walkway_straight_01', x: -4.4, z: 6.2, yaw: Math.PI / 2 },
 ] as const;
 
 /**
  * The gun, in the fort's frame: laid in the breach between the end of the
- * curtain wall (which stops at x = +1.3) and the tower (which starts at +6.6).
+ * curtain wall (which stops at x = +1.3) and the tower (which starts at +7.5).
  *
  * Parented to the fort rather than placed in world space, for the same reason
  * the lantern is parented to the jetty — a gun in a breach is *in* the breach,
  * and moving the fort must not leave it standing in open grass. The local y
  * undoes `FORT_SINK`, so the carriage sits on the ground the walls are dug into.
  */
-const CANNON_LOCAL = { x: 3.9, z: 9.2, yaw: 0.18 } as const;
+const CANNON_LOCAL = { x: 4.4, z: 9.5, yaw: 0.18 } as const;
 const CANNON_SCALE = 1.7;
 
 /** Centre of the underwater find, world metres. A local high on the plateau. */
@@ -428,7 +455,11 @@ interface KitPiece {
   z: number;
   /** Yaw about the assembly's up axis, radians. */
   yaw?: number;
-  /** Tip about the assembly's X axis. What makes a wall read as subsiding. */
+  /**
+   * Tip about the piece's *own* X axis, applied before the yaw — so a wall
+   * leans along its own length and a jug rolls onto its side. What makes a
+   * ruin read as a ruin rather than as a building site.
+   */
   tilt?: number;
   scale?: number;
 }
@@ -1191,10 +1222,9 @@ export class Props {
       const bowX = -Math.cos(bearing) * 0.42 - Math.sin(bearing) * 0.91;
       const bowZ = -Math.sin(bearing) * 0.42 + Math.cos(bearing) * 0.91;
       // YXZ so the roll is about the model's own keel line and not about world Z
-      // — the heel is what says "aground" rather than "moored". The bow-up trim
-      // is the beach gradient: the hull spans about twenty metres of a shore that
-      // falls a tenth of a metre per metre, so a level ship buries its forefoot
-      // and floats its rudder.
+      // — the heel is what says "aground" rather than "moored", and the trim is
+      // the beach gradient (see `PINNACE_TRIM`): a level ship on a shelving
+      // beach buries its forefoot and floats its rudder.
       pinnace.rotation.set(PINNACE_TRIM, yawAlignZ(bowX, bowZ), PINNACE_HEEL, 'YXZ');
       pinnace.scale.setScalar(PINNACE_SCALE);
       cove.add(pinnace);

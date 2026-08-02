@@ -192,6 +192,26 @@ export const ISLAND = {
   peak: 72,
 } as const;
 
+/**
+ * Where the beach stops and the growth starts, metres above mean sea level.
+ *
+ * Not a hard line — the ramp between them is a treeline, and the sand mottling
+ * runs across it so the boundary is broken rather than a contour. Below
+ * `BEACH_TOP_METRES` is bare sand because that is what the swash and the wind
+ * keep clear.
+ */
+const BEACH_TOP_METRES = 3.5;
+const VEGETATION_FULL_METRES = 16;
+
+/**
+ * How completely the growth covers the ground it reaches.
+ *
+ * Deliberately short of 1. Even closed canopy shows sand and rock through it
+ * from above, and leaving a fraction of the substrate visible is what stops the
+ * interior reading as painted felt.
+ */
+const VEGETATION_COVER = 0.86;
+
 const DEEP_Y = -88;
 const PLATEAU_Y = -17;
 const PLATEAU_RADIUS = 320;
@@ -627,10 +647,10 @@ export class Seafloor {
       // reads as snow. These land it near 195 and keep the warm ratio a quartz
       // beach actually has, so the normal map, the caustics and the swash band
       // all have somewhere to go.
-      const dryRock = vec3(0.24, 0.21, 0.17);
-      const dryInland = vec3(0.31, 0.26, 0.18);
-      const beachSand = vec3(0.37, 0.32, 0.23);
-      const wetSand = vec3(0.19, 0.17, 0.13);
+      const dryRock = vec3(0.19, 0.16, 0.13);
+      const dryInland = vec3(0.24, 0.20, 0.14);
+      const beachSand = vec3(0.30, 0.26, 0.18);
+      const wetSand = vec3(0.15, 0.13, 0.10);
       const shallowSand = vec3(0.42, 0.4, 0.3);
       const deepSilt = vec3(0.1, 0.15, 0.17);
 
@@ -643,7 +663,36 @@ export class Seafloor {
       // grows on it. The rock term takes over near the summit, which is why its
       // edges are a fraction of `ISLAND.peak` rather than the old fixed metres.
       const exposed = mix(beachSand, dryInland, wp.y.smoothstep(2, 15)).toVar();
-      const land = mix(exposed, dryRock, wp.y.smoothstep(ISLAND.peak * 0.42, ISLAND.peak * 0.85)).toVar();
+
+      // The island is vegetated in the *ground*, not only in the instances.
+      //
+      // This is the difference between an island and a sandbank, and geometry
+      // cannot supply it. Reading as lush needs canopy over most of the
+      // interior; the interior is three quarters of a square kilometre, and a
+      // tree here is thirty thousand triangles. Even at two hundred trees — more
+      // than doubling what the dressing carries — that is one per six thousand
+      // square metres, which an aerial capture showed for exactly what it is: a
+      // white dome with objects sprinkled on it.
+      //
+      // So the biome lives in the terrain colour and the models are the hero
+      // layer standing in it, which is how open-world terrain has always worked.
+      // The band starts above the swash and stops below the summit rock, and the
+      // mottling below breaks its edge up so it is a treeline rather than a
+      // contour.
+      const canopy = vec3(0.075, 0.115, 0.05);
+      const scrub = vec3(0.17, 0.185, 0.095);
+      const growth = mix(scrub, canopy, wp.y.smoothstep(9, 34)).toVar();
+      const vegetated = mix(
+        exposed,
+        growth,
+        wp.y.smoothstep(BEACH_TOP_METRES, VEGETATION_FULL_METRES).mul(VEGETATION_COVER),
+      ).toVar();
+
+      const land = mix(
+        vegetated,
+        dryRock,
+        wp.y.smoothstep(ISLAND.peak * 0.42, ISLAND.peak * 0.85),
+      ).toVar();
 
       const base = mix(submerged, land, aboveWater).toVar();
 
@@ -657,8 +706,18 @@ export class Seafloor {
 
       // Broad mottling: patches of weed and darker sediment, the dark blotches
       // visible through the shallows in the reference top-down shot.
+      // Two scales, and a wider range than the 0.78-1.18 this replaced. That
+      // band was too tight to survive the tone curve: with the island already
+      // sitting high on the ACES shoulder, a +/-20% multiplier arrived as about
+      // four levels and the beach read as a single flat value. Sand is not
+      // uniform — it is shell, weed, damp patches and wind-sorted grain — and
+      // the variation is most of what separates a beach from a painted dome.
       const patch = valueNoise(vec2(wp.x, wp.z).mul(1 / 26)).toVar();
-      const mottled = damp.mul(patch.mul(0.4).add(0.78)).toVar();
+      const grain = valueNoise(vec2(wp.x, wp.z).mul(1 / 5.5)).toVar();
+      const mottled = damp
+        .mul(patch.mul(0.52).add(0.66))
+        .mul(grain.mul(0.16).add(0.92))
+        .toVar();
 
       if (caustics === null) return vec4(mottled, 1);
 

@@ -703,6 +703,435 @@ test.describe('interaction', () => {
         await context.close();
       }
     });
+
+    /**
+     * Freeboard, measured on the hull's own geometry, against the water that is
+     * actually drawn.
+     *
+     * `the hull stays finite and afloat while driven through a storm` above only
+     * asserts `|y| < 20`, which a hull sitting six metres under the surface
+     * passes comfortably — and that is exactly the reported defect. "Afloat" is
+     * not a statement about the origin's altitude; it is a statement about the
+     * hull relative to the water above it, and the two differ by the whole wave
+     * field.
+     *
+     * So this measures what the eye judges: for every corner of the hull's own
+     * bounding box, the height of that corner above the surface directly over
+     * it. The hull is afloat as long as at least one corner is dry. The box
+     * comes from the same meshes `Ship` measures its waterline from — `Ship`
+     * puts y = 0 at 31% of the box's height, so the deck edge sits about
+     * 0.69 * height above the origin and a buried deck is unambiguous.
+     *
+     * **Two water lines, and they are not the same water line.** The cheap one
+     * is `sampler.height()`, which is what the physics floats the hull on. The
+     * expensive one is rebuilt here from the displacement targets themselves —
+     * the same fields the surface is drawn from, inverted the same way — and it
+     * is the one the assertions use, because a hull can only *look* submerged
+     * against water that is on screen. Reporting both is the point: the gap
+     * between them is a defect of its own, and a test that consulted only the
+     * sampler would certify a hull the viewer can plainly see underwater.
+     */
+    const measureFreeboard = async (
+      page: import('@playwright/test').Page,
+      options: { steps: number; throttle: number; rudder: number; renderEvery: number },
+    ) =>
+      page.evaluate(async (o) => {
+        interface Vec3Like {
+          x: number;
+          y: number;
+          z: number;
+        }
+        interface Node3 {
+          isMesh?: boolean;
+          name: string;
+          parent: { name: string } | null;
+          matrixWorld: { elements: ArrayLike<number> };
+          position: Vec3Like;
+          quaternion: { x: number; y: number; z: number; w: number };
+          geometry?: {
+            computeBoundingBox(): void;
+            boundingBox: { min: Vec3Like; max: Vec3Like } | null;
+          };
+          traverse(callback: (node: Node3) => void): void;
+          updateMatrixWorld(force?: boolean): void;
+        }
+        const hooks = window.__ocean as unknown as {
+          scene: { getObjectByName(name: string): Node3 | undefined };
+          sampler: { ready: boolean; height(x: number, z: number): number };
+          simulation: { displacementTargets: { width: number }[]; tileSizes: number[] };
+          renderer: {
+            readRenderTargetPixelsAsync(
+              target: unknown, x: number, y: number, width: number, height: number,
+            ): Promise<ArrayLike<number>>;
+          };
+          step(dt: number, steps?: number): Promise<void>;
+          setShipInput(throttle: number, rudder: number): void;
+        };
+
+        const ship = hooks.scene.getObjectByName('ship');
+        if (!ship) throw new Error('no object named "ship" in the scene');
+        ship.updateMatrixWorld(true);
+
+        // --- the surface as drawn --------------------------------------------
+        // The displacement targets are RGBA16F; reading the raw Uint16 as a
+        // number gives tens of thousands of metres instead of tenths of one.
+        const halfToFloat = (bits: number) => {
+          const sign = bits & 0x8000 ? -1 : 1;
+          const exponent = (bits & 0x7c00) >> 10;
+          const mantissa = bits & 0x03ff;
+          if (exponent === 0) return sign * 2 ** -14 * (mantissa / 1024);
+          if (exponent === 31) return mantissa ? NaN : sign * Infinity;
+          return sign * 2 ** (exponent - 15) * (1 + mantissa / 1024);
+        };
+        const targets = hooks.simulation.displacementTargets;
+        const tileSizes = hooks.simulation.tileSizes;
+        const fieldSize = targets[0].width;
+        // Allocated once; the read runs hundreds of times.
+        const fields = targets.map(() => new Float64Array(fieldSize * fieldSize * 3));
+        const readFields = async () => {
+          for (let t = 0; t < targets.length; t++) {
+            const raw = await hooks.renderer.readRenderTargetPixelsAsync(
+              targets[t], 0, 0, fieldSize, fieldSize,
+            );
+            const half =
+              (raw as ArrayLike<number> & { BYTES_PER_ELEMENT?: number }).BYTES_PER_ELEMENT === 2;
+            const field = fields[t];
+            for (let i = 0; i < fieldSize * fieldSize; i++) {
+              field[i * 3] = half ? halfToFloat(raw[i * 4]) : raw[i * 4];
+              field[i * 3 + 1] = half ? halfToFloat(raw[i * 4 + 1]) : raw[i * 4 + 1];
+              field[i * 3 + 2] = half ? halfToFloat(raw[i * 4 + 2]) : raw[i * 4 + 2];
+            }
+          }
+        };
+        const texel = [0, 0, 0];
+        const bilinear = (field: Float64Array, u: number, v: number) => {
+          const fx = (((u % 1) + 1) % 1) * fieldSize - 0.5;
+          const fz = (((v % 1) + 1) % 1) * fieldSize - 0.5;
+          const x0 = Math.floor(fx);
+          const z0 = Math.floor(fz);
+          const tx = fx - x0;
+          const tz = fz - z0;
+          const wrap = (n: number) => ((n % fieldSize) + fieldSize) % fieldSize;
+          const x0w = wrap(x0);
+          const x1w = wrap(x0 + 1);
+          const z0w = wrap(z0);
+          const z1w = wrap(z0 + 1);
+          for (let c = 0; c < 3; c++) {
+            const a = field[(z0w * fieldSize + x0w) * 3 + c];
+            const b = field[(z0w * fieldSize + x1w) * 3 + c];
+            const d = field[(z1w * fieldSize + x0w) * 3 + c];
+            const e = field[(z1w * fieldSize + x1w) * 3 + c];
+            texel[c] = (a + (b - a) * tx) * (1 - tz) + (d + (e - d) * tx) * tz;
+          }
+        };
+        const total = [0, 0, 0];
+        const displacementAt = (x: number, z: number) => {
+          total[0] = 0;
+          total[1] = 0;
+          total[2] = 0;
+          for (let i = 0; i < fields.length; i++) {
+            bilinear(fields[i], x / tileSizes[i], z / tileSizes[i]);
+            total[0] += texel[0];
+            total[1] += texel[1];
+            total[2] += texel[2];
+          }
+        };
+        // The surface is choppy — the vertex at grid point p is drawn at
+        // p + D(p) — so the height *above* a world point needs that map
+        // inverted. The same fixed-point iteration `OceanSampler.height` uses,
+        // so the two numbers differ only where the underlying data does.
+        const renderedHeight = (x: number, z: number) => {
+          let gx = x;
+          let gz = z;
+          for (let i = 0; i < 4; i++) {
+            displacementAt(gx, gz);
+            gx = x - total[0];
+            gz = z - total[2];
+          }
+          displacementAt(gx, gz);
+          return total[1];
+        };
+
+        // --- the hull box -----------------------------------------------------
+        // From the hull meshes alone. Including the rigging would put the
+        // mastheads into it and nothing would ever read as submerged. Corners
+        // are kept in each mesh's own space and transformed per sample, so a
+        // rolled hull is measured exactly rather than through an inflated
+        // world-axis-aligned box.
+        const localCorners: number[][] = [];
+        const matrices: { elements: ArrayLike<number> }[] = [];
+        let boxMinY = Infinity;
+        let boxMaxY = -Infinity;
+        ship.traverse((node) => {
+          if (!node.isMesh || !node.geometry) return;
+          const label = `${node.name} ${node.parent ? node.parent.name : ''}`.toLowerCase();
+          if (!label.includes('hull') && !label.includes('base')) return;
+          node.geometry.computeBoundingBox();
+          const box = node.geometry.boundingBox;
+          if (!box) return;
+          const flat: number[] = [];
+          for (const x of [box.min.x, box.max.x]) {
+            for (const y of [box.min.y, box.max.y]) {
+              for (const z of [box.min.z, box.max.z]) flat.push(x, y, z);
+            }
+          }
+          localCorners.push(flat);
+          matrices.push(node.matrixWorld);
+        });
+        if (localCorners.length === 0) throw new Error('no hull mesh found under "ship"');
+
+        hooks.setShipInput(o.throttle, o.rudder);
+
+        let worstFreeboard = Infinity;
+        let worstAtStep = -1;
+        let freeboardSum = 0;
+        let submergedSamples = 0;
+        let worstRendered = Infinity;
+        let worstRenderedAtStep = -1;
+        let renderedSum = 0;
+        let renderedSubmerged = 0;
+        let renderedSamples = 0;
+        let disagreementSquares = 0;
+        let worstDisagreement = 0;
+        let ySum = 0;
+        let minY = Infinity;
+        let maxY = -Infinity;
+        let minRoll = Infinity;
+        let maxRoll = -Infinity;
+        let minPitch = Infinity;
+        let maxPitch = -Infinity;
+        // The sea the measurement was actually taken in. Without it a passing
+        // run is unfalsifiable: "the hull kept its freeboard" means nothing if
+        // the wave field turned out to be a millpond.
+        let waveSum = 0;
+        let waveSquares = 0;
+        let waveMin = Infinity;
+        let waveMax = -Infinity;
+
+        for (let i = 0; i < o.steps; i++) {
+          await hooks.step(1 / 60, 1);
+          ship.updateMatrixWorld(true);
+
+          // Reading three full displacement targets costs tens of milliseconds,
+          // so the drawn surface is consulted on a stride while the sampler —
+          // which is free — is consulted every step.
+          const useRendered = i % o.renderEvery === 0;
+          if (useRendered) await readFields();
+
+          // Highest dry corner: the hull is under only when even this is wet.
+          let highest = -Infinity;
+          let highestRendered = -Infinity;
+          let deckTop = -Infinity;
+          for (let m = 0; m < localCorners.length; m++) {
+            const e = matrices[m].elements;
+            const c = localCorners[m];
+            for (let k = 0; k < c.length; k += 3) {
+              const lx = c[k];
+              const ly = c[k + 1];
+              const lz = c[k + 2];
+              const wx = e[0] * lx + e[4] * ly + e[8] * lz + e[12];
+              const wy = e[1] * lx + e[5] * ly + e[9] * lz + e[13];
+              const wz = e[2] * lx + e[6] * ly + e[10] * lz + e[14];
+              if (wy > deckTop) deckTop = wy;
+              const freeboard = wy - hooks.sampler.height(wx, wz);
+              if (freeboard > highest) highest = freeboard;
+              if (useRendered) {
+                const drawn = wy - renderedHeight(wx, wz);
+                if (drawn > highestRendered) highestRendered = drawn;
+              }
+            }
+          }
+          if (deckTop > boxMaxY) boxMaxY = deckTop;
+          if (deckTop < boxMinY) boxMinY = deckTop;
+
+          freeboardSum += highest;
+          if (highest < worstFreeboard) {
+            worstFreeboard = highest;
+            worstAtStep = i;
+          }
+          if (highest <= 0) submergedSamples++;
+
+          if (useRendered) {
+            renderedSamples++;
+            renderedSum += highestRendered;
+            if (highestRendered < worstRendered) {
+              worstRendered = highestRendered;
+              worstRenderedAtStep = i;
+            }
+            if (highestRendered <= 0) renderedSubmerged++;
+            const gap = highest - highestRendered;
+            disagreementSquares += gap * gap;
+            if (Math.abs(gap) > Math.abs(worstDisagreement)) worstDisagreement = gap;
+          }
+
+          const y = ship.position.y;
+          ySum += y;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+
+          const here = hooks.sampler.height(ship.position.x, ship.position.z);
+          waveSum += here;
+          waveSquares += here * here;
+          if (here < waveMin) waveMin = here;
+          if (here > waveMax) waveMax = here;
+
+          const q = ship.quaternion;
+          // Local +X is the bow and local +Z is starboard; the world-y component
+          // of each rotated axis is the sine of pitch and of roll.
+          const pitch = Math.asin(Math.max(-1, Math.min(1, 2 * (q.x * q.y + q.w * q.z))));
+          const roll = Math.asin(Math.max(-1, Math.min(1, 2 * (q.y * q.z - q.w * q.x))));
+          if (pitch < minPitch) minPitch = pitch;
+          if (pitch > maxPitch) maxPitch = pitch;
+          if (roll < minRoll) minRoll = roll;
+          if (roll > maxRoll) maxRoll = roll;
+        }
+
+        const degrees = 180 / Math.PI;
+        const waveMean = waveSum / o.steps;
+        return {
+          samples: o.steps,
+          renderedSamples,
+          // 4 * sigma is the significant wave height, the number sea states are
+          // quoted in.
+          significantWaveHeight:
+            4 * Math.sqrt(Math.max(0, waveSquares / o.steps - waveMean * waveMean)),
+          waveMin,
+          waveMax,
+          worstFreeboard,
+          worstAtSeconds: worstAtStep / 60,
+          meanFreeboard: freeboardSum / o.steps,
+          submergedFraction: submergedSamples / o.steps,
+          worstRenderedFreeboard: worstRendered,
+          worstRenderedAtSeconds: worstRenderedAtStep / 60,
+          meanRenderedFreeboard: renderedSum / Math.max(1, renderedSamples),
+          renderedSubmergedFraction: renderedSubmerged / Math.max(1, renderedSamples),
+          waterLineDisagreementRms: Math.sqrt(disagreementSquares / Math.max(1, renderedSamples)),
+          worstWaterLineDisagreement: worstDisagreement,
+          meanY: ySum / o.steps,
+          minY,
+          maxY,
+          highestDeckPoint: boxMaxY,
+          lowestDeckPoint: boxMinY,
+          rollAmplitudeDeg: ((maxRoll - minRoll) / 2) * degrees,
+          pitchAmplitudeDeg: ((maxPitch - minPitch) / 2) * degrees,
+        };
+      }, options);
+
+    test('the hull keeps freeboard driven through the heaviest sea', async ({ page }) => {
+      await boot(page);
+      // The heaviest sea this app can actually be put into, which is not the
+      // one it looks like from the preset table. `windSpeed` does not appear in
+      // `spectrumAmplitude` at all — it only sets the wind *axis*, the foam
+      // rate, the glitter stretch and the clouds. Wave height comes entirely
+      // from `peakWavelength`, because JONSWAP energy at the peak goes as
+      // g^2 / omega^5: at the storm preset's own 60 m the field measures
+      // Hs 2.5 m, and at the slider's maximum of 150 m it measures Hs 6.7 m
+      // with crests over 5 m — which is the first sea in range of the ship's
+      // 5.2 m of freeboard. Both sliders are pushed anyway, because the wind
+      // still decides which way the sea runs relative to the hull.
+      await setState(page, { preset: 'storm', windSpeed: 25, peakWavelength: 150 });
+      await page.evaluate(() =>
+        window.__ocean.resetDeterministic(10, 120, { throttle: 1, rudder: 0.6 }),
+      );
+
+      // Full ahead and hard over, so the hull takes the sea on the bow, the
+      // beam and the quarter in turn over ~40 s — around six peak periods.
+      const report = await measureFreeboard(page, {
+        steps: 2400,
+        throttle: 1,
+        rudder: 0.6,
+        renderEvery: 8,
+      });
+
+      const summary =
+        `Hs ${report.significantWaveHeight.toFixed(2)} m (surface under the hull ` +
+        `${report.waveMin.toFixed(2)}..${report.waveMax.toFixed(2)} m); ` +
+        `deck top ${report.lowestDeckPoint.toFixed(2)}..${report.highestDeckPoint.toFixed(2)} m; ` +
+        `drawn water line: worst freeboard ${report.worstRenderedFreeboard.toFixed(2)} m at t+` +
+        `${report.worstRenderedAtSeconds.toFixed(1)} s, mean ` +
+        `${report.meanRenderedFreeboard.toFixed(2)} m, fully submerged on ` +
+        `${(report.renderedSubmergedFraction * 100).toFixed(1)}% of ${report.renderedSamples} ` +
+        `samples; physics water line: worst ${report.worstFreeboard.toFixed(2)} m at t+` +
+        `${report.worstAtSeconds.toFixed(1)} s, mean ${report.meanFreeboard.toFixed(2)} m; ` +
+        `the two disagree by rms ${report.waterLineDisagreementRms.toFixed(2)} m, worst ` +
+        `${report.worstWaterLineDisagreement.toFixed(2)} m; ` +
+        `y in [${report.minY.toFixed(2)}, ${report.maxY.toFixed(2)}], ` +
+        `roll +-${report.rollAmplitudeDeg.toFixed(1)} deg`;
+
+      // Printed, not just asserted: these are measurements, and the numbers are
+      // the only way to tell "comfortably afloat" from "one wave away from the
+      // failure this test exists for".
+      console.log(`[freeboard/storm] ${summary}`);
+
+      expect(
+        Number.isFinite(report.worstRenderedFreeboard) && Number.isFinite(report.worstFreeboard),
+        `freeboard went non-finite: ${summary}`,
+      ).toBe(true);
+      // The whole assertion: at every instant *some* part of the hull is above
+      // the water directly over it. Not "the origin stayed near zero".
+      expect(
+        report.worstRenderedFreeboard,
+        `the hull went completely under the water that is drawn — ${summary}`,
+      ).toBeGreaterThan(0);
+      expect(
+        report.worstFreeboard,
+        `the hull went completely under the water the physics sees — ${summary}`,
+      ).toBeGreaterThan(0);
+    });
+
+    /**
+     * The counterweight to the test above.
+     *
+     * Every cheap way to stop a hull submerging — more buoyancy, a stiffer
+     * spring, a floor under the position — also lifts it out of the water in a
+     * normal sea, and a ship riding on top of the surface is a worse defect than
+     * one that occasionally ducks under, because it is visible in every frame.
+     * So the rest waterline and the motion in a moderate sea are pinned here,
+     * with bounds tight enough that raising `buoyancyStrength` would break them.
+     */
+    test('a moderate sea leaves the hull on its designed waterline', async ({ page }) => {
+      await boot(page);
+      await page.evaluate(() =>
+        window.__ocean.resetDeterministic(10, 120, { throttle: 0.5, rudder: 0 }),
+      );
+
+      const report = await measureFreeboard(page, {
+        steps: 1200,
+        throttle: 0.5,
+        rudder: 0,
+        renderEvery: 8,
+      });
+
+      const summary =
+        `Hs ${report.significantWaveHeight.toFixed(2)} m; mean y ${report.meanY.toFixed(3)} m, ` +
+        `y in [${report.minY.toFixed(2)}, ${report.maxY.toFixed(2)}], mean freeboard ` +
+        `${report.meanFreeboard.toFixed(3)} m (drawn water line ` +
+        `${report.meanRenderedFreeboard.toFixed(3)} m), worst ` +
+        `${report.worstFreeboard.toFixed(3)} m (drawn ` +
+        `${report.worstRenderedFreeboard.toFixed(3)} m), roll +-` +
+        `${report.rollAmplitudeDeg.toFixed(3)} deg, pitch +-` +
+        `${report.pitchAmplitudeDeg.toFixed(3)} deg`;
+
+      console.log(`[freeboard/moderate] ${summary}`);
+
+      // The design waterline is y = 0 by construction — `Ship` shifts the model
+      // so that it is. A hull floating high shows up here first.
+      expect(report.meanY, `the hull is not sitting on its designed waterline — ${summary}`)
+        .toBeGreaterThan(-0.75);
+      expect(report.meanY, `the hull is riding high out of the water — ${summary}`)
+        .toBeLessThan(0.75);
+      // Still a live, moving hull rather than one nailed to the surface.
+      expect(report.rollAmplitudeDeg, `the hull stopped rolling — ${summary}`)
+        .toBeGreaterThan(0.5);
+      expect(report.rollAmplitudeDeg, `the hull is bobbing like a cork — ${summary}`)
+        .toBeLessThan(25);
+      expect(report.worstFreeboard, `the hull went under in a moderate sea — ${summary}`)
+        .toBeGreaterThan(0);
+      expect(
+        report.worstRenderedFreeboard,
+        `the hull went under the drawn water line in a moderate sea — ${summary}`,
+      ).toBeGreaterThan(0);
+    });
   });
 
   /**
