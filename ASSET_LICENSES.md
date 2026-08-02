@@ -19,6 +19,17 @@ As of this revision **every asset in `public/` is CC0 1.0 from Poly Haven**, so 
 attribution is legally required. We record the authors anyway, as a courtesy and
 because Poly Haven asks contributors be credited where practical.
 
+Sources that were surveyed and not used, so the next reader does not repeat the
+search:
+
+| Source | Licence | Why not |
+| --- | --- | --- |
+| [Quaternius](https://quaternius.com) | CC0 | Has the animated bird and fish packs this scene wants, but the downloads are issued by client-side script rather than a stable URL, so they cannot be fetched reproducibly. |
+| [Kenney](https://kenney.nl) | CC0 | Excellent, and stylistically incompatible: flat-shaded low-poly next to photogrammetry reads as two projects. |
+| [ambientCG](https://ambientcg.com) | CC0 | Materials and HDRIs rather than props; its "3D model" category is scatter meshes. Worth revisiting for ground materials. |
+| [Khronos glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets) | per model | `BarramundiFish` is CC0 and genuinely good, but it is a 12 MB single fish. A school wants instanced geometry, not one hero mesh. |
+| [Smithsonian Open Access](https://www.si.edu/openaccess) | CC0 | Real scanned artefacts, plausible for the treasure. Scans are heavy and would need the same decimation pass; not needed once Poly Haven's cove set covered it. |
+
 > Poly Haven's licence terms: <https://polyhaven.com/license> — *"All assets on Poly
 > Haven are licensed as CC0, which is the same as public domain. This means you can use,
 > modify and redistribute our assets for any purpose, including commercial use, without
@@ -100,6 +111,49 @@ One row per file shipped in `public/`.
 | Industrial Sunset (Pure Sky) (`industrial_sunset_puresky`, 2k HDR) | `public/hdris/industrial_sunset_puresky_2k.hdr` | https://polyhaven.com/a/industrial_sunset_puresky | Jarod Guest (sky edits); Sergej Majboroda (original) | CC0 1.0 | None (as downloaded) |
 | Kloofendal Misty Morning (Pure Sky) (`kloofendal_misty_morning_puresky`, 2k HDR) | `public/hdris/kloofendal_misty_morning_puresky_2k.hdr` | https://polyhaven.com/a/kloofendal_misty_morning_puresky | Greg Zaal | CC0 1.0 | None (as downloaded) |
 | Satara Night (No Lamps) (`satara_night_no_lamps`, 2k HDR) | `public/hdris/satara_night_no_lamps_2k.hdr` | https://polyhaven.com/a/satara_night_no_lamps | Greg Zaal | CC0 1.0 | None (as downloaded) |
+
+### Scene dressing (`public/models/dressing/`)
+
+These are **modified**, and the modification is the point. Poly Haven publishes
+film-quality geometry — `island_tree_01` arrives as 1.6 million triangles for a
+background tree — so `scripts/optimize-assets.mjs` decimates each one, welds it,
+resizes and re-encodes the textures to WebP, and compresses the result through
+Meshopt. 226 MB of source becomes 24 MB shipped.
+
+Only the `.glb` outputs are committed. The raw downloads are `.gitignore`d and
+reproducible:
+
+```sh
+node scripts/fetch-assets.mjs      # authoritative source, verified against the publisher
+node scripts/optimize-assets.mjs   # what actually ships
+```
+
+CC0 imposes no obligation to record any of this. It is recorded because a reader
+comparing a shipped mesh against the publisher's page should be able to see why
+they differ.
+
+| Asset | File path | Source URL | Author | Licence | Modifications |
+| --- | --- | --- | --- | --- | --- |
+| Coast Rocks 01 (`coast_rocks_01`) | `public/models/dressing/coast_rocks_01.glb` | https://polyhaven.com/a/coast_rocks_01 | Rob Tuytel (Photography, processing); Rico Cilliers (cleanup) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
+| Coast Rocks 03 (`coast_rocks_03`) | `public/models/dressing/coast_rocks_03.glb` | https://polyhaven.com/a/coast_rocks_03 | Rob Tuytel (Photography, processing); Rico Cilliers (cleanup) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
+| Coastal Cliff 02 (`coastal_cliff_02`) | `public/models/dressing/coastal_cliff_02.glb` | https://polyhaven.com/a/coastal_cliff_02 | Rob Tuytel (All) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
+| Sand Rocks Small 01 (`sand_rocks_small_01`) | `public/models/dressing/sand_rocks_small_01.glb` | https://polyhaven.com/a/sand_rocks_small_01 | Rob Tuytel (Photography, processing); Rico Cilliers (cleanup) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
+| Island Tree 01 (`island_tree_01`) | `public/models/dressing/island_tree_01.glb` | https://polyhaven.com/a/island_tree_01 | Rob Tuytel (scanning, processing); Rico Cilliers (cleanup, processing) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
+| Pachira Aquatica 01 (`pachira_aquatica_01`) | `public/models/dressing/pachira_aquatica_01.glb` | https://polyhaven.com/a/pachira_aquatica_01 | Rob Tuytel (scanning); Rico Cilliers (modeling) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
+| Fern 02 (`fern_02`) | `public/models/dressing/fern_02.glb` | https://polyhaven.com/a/fern_02 | Rob Tuytel (scanning); Rico Cilliers (modeling) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
+| Shrub Sorrel 01 (`shrub_sorrel_01`) | `public/models/dressing/shrub_sorrel_01.glb` | https://polyhaven.com/a/shrub_sorrel_01 | Rico Cilliers (All) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
+| Grass Bermuda 01 (`grass_bermuda_01`) | `public/models/dressing/grass_bermuda_01.glb` | https://polyhaven.com/a/grass_bermuda_01 | Rico Cilliers (All) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
+| Anthurium Botany 01 (`anthurium_botany_01`) | `public/models/dressing/anthurium_botany_01.glb` | https://polyhaven.com/a/anthurium_botany_01 | Rob Tuytel (scanning); Rico Cilliers (modeling) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
+| Calathea Orbifolia 01 (`calathea_orbifolia_01`) | `public/models/dressing/calathea_orbifolia_01.glb` | https://polyhaven.com/a/calathea_orbifolia_01 | Rob Tuytel (scanning); Rico Cilliers (modeling) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
+| Ship Pinnace (`ship_pinnace`) | `public/models/dressing/ship_pinnace.glb` | https://polyhaven.com/a/ship_pinnace | James Ray Cock (model, textures, cleanup); Rico Cilliers (sails model, textures); Nicolò Zubbini (original model); Yann Kervran (Rigging) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
+| Modular Wooden Pier (`modular_wooden_pier`) | `public/models/dressing/modular_wooden_pier.glb` | https://polyhaven.com/a/modular_wooden_pier | Rico Cilliers (All) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
+| Cannon 01 (`cannon_01`) | `public/models/dressing/cannon_01.glb` | https://polyhaven.com/a/cannon_01 | Yann Kervran (Rigging); James Ray Cock (Modeling & Texturing) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
+| Wooden Barrels 01 (`wooden_barrels_01`) | `public/models/dressing/wooden_barrels_01.glb` | https://polyhaven.com/a/wooden_barrels_01 | James Ray Cock (All) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
+| Wooden Lantern 01 (`wooden_lantern_01`) | `public/models/dressing/wooden_lantern_01.glb` | https://polyhaven.com/a/wooden_lantern_01 | James Ray Cock (All) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
+| Wooden Crate 02 (`wooden_crate_02`) | `public/models/dressing/wooden_crate_02.glb` | https://polyhaven.com/a/wooden_crate_02 | James Ray Cock (modeling); Jurita Burger (graphic design) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
+| Treasure Chest (`treasure_chest`) | `public/models/dressing/treasure_chest.glb` | https://polyhaven.com/a/treasure_chest | Rico Cilliers (All) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
+| Wooden Crate 01 (`wooden_crate_01`) | `public/models/dressing/wooden_crate_01.glb` | https://polyhaven.com/a/wooden_crate_01 | James Ray Cock (All) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
+| Lambis Shell (`lambis_shell`) | `public/models/dressing/lambis_shell.glb` | https://polyhaven.com/a/lambis_shell | Kuutti Siitonen (All) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
 
 ### Substitutions
 

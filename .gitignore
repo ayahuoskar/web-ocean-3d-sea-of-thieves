@@ -17,3 +17,35 @@ tests/__screenshots__/actual/
 # Captures of the third-party reference site. Kept locally to drive the visual
 # comparison loop, deliberately not redistributed in this repository.
 reference/shots/
+
+# Raw asset downloads for the scene dressing.
+#
+# `scripts/fetch-assets.mjs` pulls Poly Haven's film-quality source — 177 MB of
+# it — and `scripts/optimize-assets.mjs` decimates and Meshopt-encodes that into
+# `public/models/dressing/*.glb`, which is what ships and what is committed. Both
+# steps are reproducible, so the source has no business in the history: keeping
+# it would multiply the repository by twelve to store geometry no frame draws.
+#
+# The five models below this block predate the optimiser and are still committed
+# raw. They are small, and re-cutting their load paths would be churn for no
+# payload win.
+public/models/coast_rocks_01/
+public/models/coast_rocks_03/
+public/models/coastal_cliff_02/
+public/models/sand_rocks_small_01/
+public/models/island_tree_01/
+public/models/pachira_aquatica_01/
+public/models/fern_02/
+public/models/shrub_sorrel_01/
+public/models/grass_bermuda_01/
+public/models/anthurium_botany_01/
+public/models/calathea_orbifolia_01/
+public/models/ship_pinnace/
+public/models/modular_wooden_pier/
+public/models/cannon_01/
+public/models/wooden_barrels_01/
+public/models/wooden_lantern_01/
+public/models/wooden_crate_02/
+public/models/treasure_chest/
+public/models/wooden_crate_01/
+public/models/lambis_shell/

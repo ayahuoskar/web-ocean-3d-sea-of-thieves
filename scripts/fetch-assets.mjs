@@ -63,6 +63,60 @@ const MANIFEST = [
     note: 'Cliff face for island silhouette',
   },
 
+  // ---- Island and shore dressing -----------------------------------------
+  //
+  // These are the *source* downloads, not what ships. Poly Haven publishes film
+  // -quality geometry — `island_tree_01` is a 58 MB `.bin` for a background tree —
+  // so `scripts/optimize-assets.mjs` decimates and Meshopt-encodes them into
+  // `public/models/dressing/*.glb`, and only those are committed. 177 MB of
+  // source becomes 15 MB shipped.
+  //
+  // Almost all of these come from Poly Haven's `smugglers_cove` collection,
+  // which is the same set the hero ship is from. That matters for more than
+  // convenience: assets authored for one scene share a scale, a texel density
+  // and a colour response, so they sit together without per-asset correction.
+  // Mixing packs is how dressing ends up looking like dressing.
+  //
+  // 1k throughout. These are background geometry seen from tens of metres away;
+  // the ship is the only thing that earns 2k.
+  { kind: 'model', slug: 'coast_rocks_01', res: '1k', dir: 'models/coast_rocks_01', note: 'Shore rock cluster' },
+  { kind: 'model', slug: 'coast_rocks_03', res: '1k', dir: 'models/coast_rocks_03', note: 'Shore rock cluster' },
+  { kind: 'model', slug: 'coastal_cliff_02', res: '1k', dir: 'models/coastal_cliff_02', note: 'Island cliff face' },
+  { kind: 'model', slug: 'sand_rocks_small_01', res: '1k', dir: 'models/sand_rocks_small_01', note: 'Small shore rocks' },
+
+  { kind: 'model', slug: 'island_tree_01', res: '1k', dir: 'models/island_tree_01', note: 'Island tree' },
+  { kind: 'model', slug: 'pachira_aquatica_01', res: '1k', dir: 'models/pachira_aquatica_01', note: 'Tropical tree' },
+  { kind: 'model', slug: 'fern_02', res: '1k', dir: 'models/fern_02', note: 'Undergrowth' },
+  { kind: 'model', slug: 'shrub_sorrel_01', res: '1k', dir: 'models/shrub_sorrel_01', note: 'Undergrowth' },
+  { kind: 'model', slug: 'grass_bermuda_01', res: '1k', dir: 'models/grass_bermuda_01', note: 'Grass tuft' },
+
+  // ---- Tropical planting ---------------------------------------------------
+  //
+  // Poly Haven has no coconut palm, and there is no point pretending otherwise:
+  // the tropical read comes from broadleaf shapes and density rather than from
+  // the one silhouette everyone associates with it. `pachira_aquatica` above is
+  // the closest tree they publish; these two are genuine tropical understorey
+  // from the same cove collection.
+  { kind: 'model', slug: 'anthurium_botany_01', res: '1k', dir: 'models/anthurium_botany_01', note: 'Tropical broadleaf' },
+  { kind: 'model', slug: 'calathea_orbifolia_01', res: '1k', dir: 'models/calathea_orbifolia_01', note: 'Tropical broadleaf' },
+
+  // ---- Pirate cove ---------------------------------------------------------
+  //
+  // All from `smugglers_cove`, which is what the collection is: the hero ship's
+  // own set, so the pier, the cannon and the barrels share its scale, wood tone
+  // and wear. That coherence is the whole reason to take dressing from one pack.
+  { kind: 'model', slug: 'ship_pinnace', res: '1k', dir: 'models/ship_pinnace', note: "Ship's boat, beached" },
+  { kind: 'model', slug: 'modular_wooden_pier', res: '1k', dir: 'models/modular_wooden_pier', note: 'Jetty on the island' },
+  { kind: 'model', slug: 'cannon_01', res: '1k', dir: 'models/cannon_01', note: 'Shore battery' },
+  { kind: 'model', slug: 'wooden_barrels_01', res: '1k', dir: 'models/wooden_barrels_01', note: 'Barrel stack' },
+  { kind: 'model', slug: 'wooden_lantern_01', res: '1k', dir: 'models/wooden_lantern_01', note: 'Lantern on the pier' },
+  { kind: 'model', slug: 'wooden_crate_02', res: '1k', dir: 'models/wooden_crate_02', note: 'Cargo crate' },
+
+  // ---- Underwater find ----------------------------------------------------
+  { kind: 'model', slug: 'treasure_chest', res: '1k', dir: 'models/treasure_chest', note: 'Sunken treasure chest' },
+  { kind: 'model', slug: 'wooden_crate_01', res: '1k', dir: 'models/wooden_crate_01', note: 'Sunken crate' },
+  { kind: 'model', slug: 'lambis_shell', res: '1k', dir: 'models/lambis_shell', note: 'Shell on the seabed' },
+
   // ---- Environment maps (day / sunset / foggy / moonlit) ------------------
   { kind: 'hdri', slug: 'kloofendal_43d_clear_puresky', res: '2k', dir: 'hdris', note: 'Preset: day' },
   { kind: 'hdri', slug: 'industrial_sunset_puresky', res: '2k', dir: 'hdris', note: 'Preset: sunset' },
