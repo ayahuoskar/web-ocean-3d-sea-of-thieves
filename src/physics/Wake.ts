@@ -35,8 +35,22 @@ import { smoothstepDown } from '../core/tslMath';
  * what makes the pattern scale correctly with speed. Everything else is authored:
  * one parabolically warped cosine, one fixed-angle cosine, Gaussian envelopes and
  * a bow mound. It does not integrate a hull pressure distribution, reproduce the
- * stationary-phase cusp where the two systems meet, respond to Froude number,
- * handle finite depth, or propagate history at the group velocity.
+ * stationary-phase cusp where the two systems meet — it borrows the cusp's
+ * r^-1/3 amplitude decay for the divergent arms and nothing else of it — respond
+ * to Froude number, handle finite depth, or propagate history at the group
+ * velocity.
+ *
+ * **Two foam channels, one output.** The sea's foam and the hull's are not the
+ * same material and cannot share a time constant. Whitecap foam is gone a second
+ * or two after the crest that made it, while the churn behind a transom is still
+ * white a hundred metres astern; running both at the whitecap's 1.5 s meant the
+ * wake was erased within half a ship length of the hull that made it, and
+ * lengthening the shared constant to fix that turned every breaking crest into a
+ * streak. So the ping-pong buffer carries breaking-crest and rain foam in R,
+ * hull foam in B, each with its own decay, and the resolve pass composites them
+ * into the single foam value the water shader reads. The public texture's layout
+ * is unchanged — foam in R, elevation in G — and the split costs nothing: the
+ * target was already RGBA and the pass was already sampling all of it.
  *
  * **Foam accumulates; elevation does not.** Foam is history — it is deposited
  * and then decays, and adding this frame's deposit to last frame's remainder is
@@ -59,7 +73,7 @@ import { smoothstepDown } from '../core/tslMath';
 const MAX_EMITTERS = 4;
 
 /**
- * Exponential decay time constant, seconds.
+ * Exponential decay time constant for the *sea's* own foam, seconds.
  *
  * This is the single biggest lever on apparent whitecap coverage, and it is not
  * obvious why. Only about 5.5% of the surface is folding at any instant — the
@@ -76,16 +90,83 @@ const MAX_EMITTERS = 4;
 const DECAY_TAU = 1.5;
 
 /**
- * Foam deposited per second at reference speed.
+ * Decay time constant for hull foam, seconds.
  *
- * As with the breaking-crest rate, what matters is `DEPOSIT_RATE * DECAY_TAU`,
- * the coverage a continuously-emitting hull settles at. At 1.9 that product was
- * 3.2 before the intensity multiplier and the stern term were even applied, so
- * the whole wedge clamped to solid white and the wake read as a sheet of paper
- * being dragged behind the ship. 0.4 leaves the turbulent band astern near white
- * and lets the arms fall away from it.
+ * A wake is a *trail*, and a trail is the product of persistence and speed: what
+ * the eye reads as its length is `V * tau`, not anything the deposit does. At the
+ * whitecap's 1.5 s a hull at 8 m/s left 12 m of foam — under half its own length
+ * — so the churn ended before the transom had finished passing over it and the
+ * ship looked like it was being wiped clean behind. 5 s puts the trail at 40 m
+ * per e-fold, which stays legible for around a hundred metres, or three to four
+ * ship lengths. That is what a displacement hull actually leaves.
+ *
+ * Air in a wake genuinely does survive longer than air in a whitecap, and for a
+ * reason: a breaking crest entrains a shallow film that dissolves as fast as it
+ * rises, while a hull drives bubbles metres down and they come back up over
+ * minutes. Five seconds is still far short of that; it is the point where the
+ * trail reads as a trail.
  */
-const DEPOSIT_RATE = 0.4;
+const WAKE_FOAM_TAU = 5;
+
+/**
+ * Hull foam deposited per second at reference speed.
+ *
+ * `DEPOSIT_RATE * WAKE_FOAM_TAU` is 5.5, and for the breaking-crest term a
+ * number like that would be exactly the mistake `uBreakRate` records: an
+ * equilibrium far above white, so anything the term touches saturates within a
+ * frame or two. It is not that here, because nothing the hull deposits on is
+ * exposed for anything like a time constant. The band deposits with an e-fold of
+ * L = 1.2 beams abaft the transom and the hull tows it over the water at V, so a
+ * texel is under it for about L/V — 1.1 s at 8 m/s against a 5 s constant. What
+ * it ends up holding is the deposit it catches on the way past, thinned by the
+ * decay while it is still catching it: about two thirds of `rate * L / V`, which
+ * is 0.86 in the band's core and falls away from there.
+ *
+ * The two speed terms then cancel — `rate` rises with V through `intensity`
+ * while the exposure falls as 1/V — so the band comes out about as bright at
+ * four knots as at sixteen and only its *length* changes with speed. Which is
+ * what a wake does.
+ *
+ * The guard against the failure this file has hit twice is not the rate, it is
+ * the footprint. Both saturations came from depositing across the whole Kelvin
+ * wedge, and a wedge that reaches white is a sheet of paper under tow. What
+ * reaches white now is a band roughly one beam wide. The arms take `ARM_FOAM` of
+ * the rate and are swept sideways across the water at `V * KELVIN_SLOPE`, which
+ * is what keeps them feathered rather than filled; the only way to hold a texel
+ * in the deposit long enough to saturate the wedge is to tell `emit` that a hull
+ * which is not moving is doing eight metres a second.
+ */
+const DEPOSIT_RATE = 1.1;
+
+/**
+ * Relative deposit strength of the three things a hull does to the water.
+ *
+ * Ordered, and the order is the point: the turbulent band astern is the
+ * brightest, most aerated feature of a real wake, the bow break is next, and the
+ * arms are a feathered line an order of magnitude thinner than either. Flat
+ * weights make a uniform grey V, which is what a wake looks like when it has been
+ * drawn rather than shed.
+ */
+const STERN_FOAM = 1;
+const BOW_FOAM = 0.55;
+const ARM_FOAM = 0.3;
+
+/**
+ * Half the hull's length, in beams.
+ *
+ * `emit` is called with the hull's *centre* and its beam, so this is the only way
+ * the pattern can find the ends of the ship — and every single thing a hull does
+ * to the water happens at one end or the other. Measured from midships, the
+ * turbulent band sat three-quarters of a beam abaft centre, which on a hull four
+ * beams long is amidships: the brightest part of the wake was being deposited
+ * *underneath the ship*, where the only view of it is whatever escapes past the
+ * tumblehome. The bow mound was likewise half a hull short of the stem.
+ *
+ * 1.9 is the length/beam ratio of a displacement hull halved — 27 m over 7 m for
+ * the ship this renders. It does not have to be exact. It has to put the churn
+ * behind the transom instead of under the keel.
+ */
+const HALF_LENGTH_BEAMS = 1.9;
 
 /** Speed, in m/s, at which foam generation saturates. */
 const REFERENCE_SPEED = 7;
@@ -96,13 +177,20 @@ const KELVIN_SLOPE = 0.3536;
 /**
  * Decay time constant for the elevation channel, seconds.
  *
- * Longer than the foam's 1.5 s, because the two decay for different reasons.
- * Foam disappears when the entrained air dissolves. Wake waves disappear when
- * they have radiated away and spread, which takes noticeably longer — a ship's
- * transverse waves are still legible a couple of ship-lengths after the foam
- * over them has gone.
+ * Longer than either foam constant, because the three decay for different
+ * reasons. Foam disappears when the entrained air dissolves. Wake waves
+ * disappear when they have radiated away and spread, which takes longer still —
+ * a ship's transverse waves are legible for a while after the foam over them has
+ * gone, which is the ordering this constant has to preserve.
+ *
+ * It was 3.4 s, chosen against a foam constant of 1.5. `WAKE_FOAM_TAU` is now 5,
+ * so 3.4 would have inverted the ordering and left the water *foaming without
+ * waving* along an old track. Only the history outside the fresh stamp is
+ * affected — inside it the pattern is restamped every frame — so what this
+ * actually governs is how long the phase a turning ship laid down survives once
+ * the wedge has swung off it.
  */
-const ELEVATION_DECAY_TAU = 3.4;
+const ELEVATION_DECAY_TAU = 6.5;
 
 /**
  * Gravity, for the dispersion relation that sets the wake's wavelength.
@@ -133,11 +221,43 @@ const MIN_SPEED_SQUARED = 4;
  * Wave-making resistance rises steeply with speed, so the crest height does too;
  * a linear-in-speed wake looks inert. Quadratic with a cap is the cheap stand-in
  * for the real curve, which flattens once the hull is at its own hull speed.
+ *
+ * Quadratic is also the only law that holds the wake's *steepness* fixed, which
+ * is the thing that actually decides whether it is visible. Slope is `a * k`, and
+ * `k` goes as `1/V²`, so `a` going as `V²` cancels it exactly: the divergent
+ * system's steepness is `ELEVATION_PER_SPEED_SQUARED * DIVERGENT_WEIGHT *
+ * DIVERGENT_K * GRAVITY` at every speed, which is 0.41 here. That number is the
+ * real constraint on this constant, and it is why the arms cannot simply be
+ * scaled up: waves fold at a steepness of about 0.44, and past that the wake
+ * stops being a wake and becomes a crease in the mesh with a shading seam down
+ * it. 0.41 is as steep as the arms can be and still be water.
  */
-const ELEVATION_PER_SPEED_SQUARED = 0.0125;
+const ELEVATION_PER_SPEED_SQUARED = 0.0132;
 
-/** Cap on wake crest height, metres. */
-const MAX_ELEVATION = 0.62;
+/**
+ * Cap on wake crest height, metres.
+ *
+ * At 0.62 the cap bound at 7 m/s — below the hull's own terminal speed — so the
+ * quadratic law above was dead across the entire top third of the throttle and
+ * the wake stopped answering the engine exactly where a viewer is most likely to
+ * be looking for it. 0.95 binds at 8.5 m/s, just clear of terminal speed, so the
+ * cap does what it is for (a bound on the arithmetic) rather than flattening the
+ * curve it is bounding.
+ */
+const MAX_ELEVATION = 0.95;
+
+/**
+ * Relative amplitudes of the two wave systems.
+ *
+ * In a photograph of a hull at speed the arms are what you see, and the
+ * transverse crests are the subtler thing between them: the divergent waves are
+ * three times shorter for the same amplitude, so they carry three times the
+ * slope, and slope is all a water surface shows. Weighting them 0.75/0.85 made
+ * the two systems near enough equal in amplitude and therefore *unequal the wrong
+ * way* in appearance — a wake with a strong ripple down the middle and a faint V.
+ */
+const TRANSVERSE_WEIGHT = 0.5;
+const DIVERGENT_WEIGHT = 1.05;
 
 /**
  * Divergent-system wave angle, radians, measured from the track.
@@ -211,6 +331,8 @@ export class Wake {
   private readonly uDecay = uniform(1);
   /** Per-frame decay multiplier for the elevation channel. See `ELEVATION_DECAY_TAU`. */
   private readonly uElevationDecay = uniform(1);
+  /** Per-frame decay multiplier for the hull-foam channel. See `WAKE_FOAM_TAU`. */
+  private readonly uWakeFoamDecay = uniform(1);
   private readonly uCenter = uniform(new THREE.Vector2());
   /** Frame step, seconds, so deposits are a rate rather than a per-frame amount. */
   private readonly uStep = uniform(1 / 60);
@@ -445,6 +567,7 @@ export class Wake {
     );
     this.uDecay.value = Math.exp(-step / DECAY_TAU);
     this.uElevationDecay.value = Math.exp(-step / ELEVATION_DECAY_TAU);
+    this.uWakeFoamDecay.value = Math.exp(-step / WAKE_FOAM_TAU);
     this.uStep.value = step;
     setVec2(this.uCenter.value as THREE.Vector2, this.centerX_, this.centerZ_);
 
@@ -466,7 +589,12 @@ export class Wake {
       setVec2(slot.direction.value as THREE.Vector2, Math.cos(heading), Math.sin(heading));
 
       const intensity = Math.min(1.4, speed / REFERENCE_SPEED);
-      params.set(DEPOSIT_RATE * step * intensity, width, width * (5 + intensity * 7), speed);
+      // Arm length in beams, and longer than it was: the arms have to outlast the
+      // turbulent band or the wedge ends before the churn inside it does, which
+      // reads as a wake that has been cut off square. At 8 m/s this is about
+      // 16 beams — a little over four ship lengths, which is also roughly where
+      // `WAKE_FOAM_TAU` has taken the band down to nothing.
+      params.set(DEPOSIT_RATE * step * intensity, width, width * (6 + intensity * 9), speed);
     }
     this.queued = 0;
 
@@ -562,6 +690,9 @@ export class Wake {
       const history = texture(source, sourceUv).toVar();
       const historyStill = texture(source, coord.add(this.uScroll)).toVar();
       const previous = history.r.mul(this.uDecay).mul(inside).toVar();
+      // Hull foam rides the same drift — it floats, and it is the same material —
+      // but decays on its own, much longer, constant. Same tap, no extra fetch.
+      const previousWake = history.b.mul(this.uWakeFoamDecay).mul(inside).toVar();
       // Masked by *its own* footprint test, not the drifted one. Sharing `inside`
       // meant the drift decided where the elevation field's border was, which is
       // the coupling this split exists to remove.
@@ -574,7 +705,10 @@ export class Wake {
         .toVar();
 
       const world = coord.sub(0.5).mul(extent).add(this.uCenter).toVar();
+      /** Fresh foam from the sea itself — breaking crests and rain. */
       const deposit = float(0).toVar();
+      /** Fresh foam from the hulls, kept apart for its own time constant. */
+      const wakeDeposit = float(0).toVar();
       /** Fresh Kelvin elevation, metres, summed over emitters. */
       const stamped = float(0).toVar();
       /** How completely the fresh stamp owns this texel, 0..1. */
@@ -619,6 +753,10 @@ export class Wake {
         this.uRainAgitation.mul(stipple.mul(0.7).add(0.3)).mul(this.uRainRate).mul(this.uStep),
       );
 
+      // Structure for the turbulent band, evaluated once because it depends only
+      // on where this texel is in the world. See `wakeBoil`.
+      const boil = wakeBoil(world).mul(0.35).add(0.75).toVar();
+
       for (let i = 0; i < MAX_EMITTERS; i++) {
         const slot = this.emitters[i];
         const amount = slot.params.x;
@@ -631,42 +769,57 @@ export class Wake {
         const along = delta.dot(forward).negate().toVar();
         const lateral = delta.dot(vec2(forward.y.negate(), forward.x)).abs().toVar();
 
-        // The wedge: arms leave the hull at the Kelvin half-angle and the crest
-        // line softens as it spreads.
-        const arm = width.mul(0.45).add(along.mul(KELVIN_SLOPE)).toVar();
-        const armWidth = width.mul(0.3).add(along.mul(0.055)).max(0.4).toVar();
+        // Distances from the two ends of the hull, which is where everything a
+        // ship does to water actually happens. See `HALF_LENGTH_BEAMS`.
+        const fromStem = along.add(width.mul(HALF_LENGTH_BEAMS)).toVar();
+        const fromTransom = along.sub(width.mul(HALF_LENGTH_BEAMS)).toVar();
+
+        // The wedge, with its apex at the *stem*. The Kelvin half-angle is
+        // measured from the disturbance that makes the pattern, and for a
+        // displacement hull that is the bow: hanging the wedge off midships put
+        // its apex half a hull length too far aft, which both narrowed the visible
+        // V at the quarters and made the arms look like they were being emitted by
+        // the middle of the ship rather than cut by the stem.
+        const arm = width.mul(0.25).add(fromStem.mul(KELVIN_SLOPE)).toVar();
+        const armWidth = width.mul(0.22).add(fromStem.mul(0.045)).max(0.4).toVar();
         const armOffset = lateral.sub(arm).div(armWidth).toVar();
         const armFoam = armOffset.mul(armOffset).min(24).negate().exp().toVar();
 
-        // Fade along the arms, and cut everything ahead of the bow.
+        // Fade along the arms, and cut everything ahead of the stem.
         const lengthFade = float(1).sub(along.div(armLength)).clamp(0, 1).toVar();
-        const behind = along.smoothstep(width.mul(-0.45), width.mul(0.35)).toVar();
+        const behind = fromStem.smoothstep(width.mul(-0.3), width.mul(0.5)).toVar();
 
-        // Turbulent water directly astern — the bright churn at the transom.
-        const sternOffset = delta
-          .add(forward.mul(width.mul(0.75)))
-          .length()
-          .div(width.mul(0.85))
-          .toVar();
-        const sternFoam = sternOffset.mul(sternOffset).min(24).negate().exp().toVar();
-
-        deposit.addAssign(
-          armFoam.mul(lengthFade).mul(behind).mul(0.85).add(sternFoam).mul(amount),
-        );
-
-        // --- Kelvin elevation -------------------------------------------------
+        // --- dispersion ---------------------------------------------------------
         //
-        // The same wedge geometry, but carrying the actual wave systems rather
-        // than a foam mask. Both are stationary in the hull's frame, so both are
-        // functions of `along` and `lateral` alone — no time term anywhere. That
-        // is the whole reason a stamped pattern works: what a wake *is*, is a
+        // Both wave systems are stationary in the hull's frame, so both are
+        // functions of `fromStem` and `lateral` alone — no time term anywhere.
+        // That is the whole reason a stamped pattern works: what a wake *is*, is a
         // standing pattern that the ship drags along with it.
+        //
+        // Ahead of the foam, because the foam borrows the divergent phase: the two
+        // have to agree about where a crest is or the foam sits in the troughs.
         const speed = slot.params.w;
         const speedSq = speed.mul(speed).toVar();
 
         // k0 = g/V². Wavelength grows as the square of speed, which is the single
         // most recognisable thing about a wake.
         const k0 = float(GRAVITY).div(speedSq.max(MIN_SPEED_SQUARED)).toVar();
+
+        // Transverse system: crests across the track, bowing aft toward the arms.
+        // The parabolic term is the leading-order curvature of the real crest
+        // curves near the centreline — they are straight only in the limit.
+        const stemSafe = fromStem.max(width.mul(0.5)).toVar();
+        const transversePhase = k0
+          .mul(fromStem.sub(lateral.mul(lateral).mul(1.35).div(stemSafe)))
+          .toVar();
+
+        // Divergent system: a plane wave at DIVERGENT_ANGLE to the track with
+        // wavenumber k0/cos²(psi), mirrored across the centreline by using
+        // |lateral|. Its crests are the feathered arms.
+        const divergentPhase = k0
+          .mul(DIVERGENT_K)
+          .mul(fromStem.mul(DIVERGENT_COS).add(lateral.mul(DIVERGENT_SIN)))
+          .toVar();
 
         // Amplitude: quadratic in speed, capped, and faded in from rest so a
         // drifting hull is not surrounded by half a metre of standing wave.
@@ -676,43 +829,126 @@ export class Wake {
           .mul(speed.smoothstep(0.4, 2.2))
           .toVar();
 
-        // Transverse system: crests across the track, bowing aft toward the arms.
-        // The parabolic term is the leading-order curvature of the real crest
-        // curves near the centreline — they are straight only in the limit.
-        const alongSafe = along.max(0.6).toVar();
-        const transversePhase = k0
-          .mul(along.sub(lateral.mul(lateral).mul(1.35).div(alongSafe)))
-          .toVar();
+        // --- foam ---------------------------------------------------------------
 
-        // Divergent system: a plane wave at DIVERGENT_ANGLE to the track with
-        // wavenumber k0/cos²(psi), mirrored across the centreline by using
-        // |lateral|. Its crests are the feathered arms.
-        const divergentPhase = k0
-          .mul(DIVERGENT_K)
-          .mul(along.mul(DIVERGENT_COS).add(lateral.mul(DIVERGENT_SIN)))
-          .toVar();
-
-        // Envelopes. Both systems only exist inside the wedge, the transverse one
-        // concentrated near the centreline and the divergent one along the arms —
-        // which is exactly where the arm foam already goes, so it reuses that.
-        const wedge = smoothstepDown(
-          lateral,
-          along.mul(KELVIN_SLOPE).add(width.mul(0.6)),
-          along.mul(KELVIN_SLOPE).add(width.mul(0.6)).add(width.mul(1.6)).add(2),
+        // Foam collects on the divergent crests, not evenly along the caustic.
+        // This is what makes an arm read as a row of short feathers stepped back
+        // from one another instead of a painted V, and taking the pitch from the
+        // wave system that causes it means it lengthens with speed for free.
+        //
+        // Faded out below about 5 m/s: `k0/cos²(psi)` is pinned by
+        // MIN_SPEED_SQUARED down there, so the divergent wavelength bottoms out
+        // near a metre — two texels of this buffer — and modulating at that pitch
+        // produces aliasing, not feathering.
+        const feather = mix(
+          float(1),
+          divergentPhase.cos().mul(0.5).add(0.5),
+          speed.smoothstep(3, 5.5).mul(0.6),
         ).toVar();
 
-        // Amplitude falls as the energy spreads over a widening wake. r^-1/2 is
-        // the deep-water result for a line of energy spreading in one dimension.
-        const spread = float(1).div(along.max(width).div(width).sqrt()).toVar();
+        // The bow break: white water thrown aside where the stem splits the
+        // surface. Not a separate feature from the arms — the break *is* the head
+        // of the divergent system, which is why it rides the same line — so it is
+        // the same Gaussian weighted heavily over the first hull length and then
+        // left to decay into the arms behind it. Without it the wedge began as two
+        // faint threads out of nothing, which is the one thing a hull at speed
+        // never looks like.
+        const bowBreak = armFoam
+          .mul(smoothstepDown(fromStem, width.mul(0.5), width.mul(3.8)))
+          .mul(behind)
+          .mul(BOW_FOAM)
+          .toVar();
+
+        // The turbulent band astern.
+        //
+        // This was one Gaussian a beam across, centred three-quarters of a beam
+        // abaft the emitter — which is amidships — so the single most recognisable
+        // part of a ship's wake was a blob under the ship. It is now a band that
+        // starts at the transom and is dragged out astern by the accumulation.
+        //
+        // Note what actually draws the trail: the deposit falls away within about
+        // three beams of the transom, and everything beyond that is the *history*
+        // of texels the transom has already passed over, thinning at
+        // `WAKE_FOAM_TAU`. Depositing along the whole visible length instead would
+        // integrate to white over a hundred metres of water, which is the
+        // saturation this file has twice been burnt by.
+        const bandHalfWidth = width.mul(0.5).add(fromTransom.max(0).mul(0.055)).toVar();
+        const bandOffset = lateral.div(bandHalfWidth).toVar();
+        const bandSq = bandOffset.mul(bandOffset).min(8).toVar();
+        // exp(-x⁴) rather than exp(-x²): the churn at a transom has a flat white
+        // core with a soft edge to it, and a plain Gaussian is a ridge with a
+        // bright line down the middle, which reads as a rope under tow.
+        const bandProfile = bandSq.mul(bandSq).min(24).negate().exp().toVar();
+        // Widening as it goes, but fading faster than it widens, so the bright
+        // core narrows astern while the faint edges spread — which is how a real
+        // band tapers rather than ending.
+        const bandFade = fromTransom.max(0).div(width.mul(1.2)).min(12).negate().exp().toVar();
+        const bandStart = fromTransom.smoothstep(width.mul(-0.75), width.mul(-0.05)).toVar();
+        const sternFoam = bandProfile.mul(bandFade).mul(bandStart).mul(boil).toVar();
+
+        wakeDeposit.addAssign(
+          armFoam
+            .mul(feather)
+            .mul(lengthFade)
+            .mul(behind)
+            .mul(ARM_FOAM)
+            .add(bowBreak)
+            .add(sternFoam.mul(STERN_FOAM))
+            .mul(amount),
+        );
+
+        // --- Kelvin elevation -------------------------------------------------
+        //
+        // The same wedge geometry, but carrying the actual wave systems rather
+        // than a foam mask.
+        const wedge = smoothstepDown(
+          lateral,
+          fromStem.mul(KELVIN_SLOPE).add(width.mul(0.5)),
+          fromStem.mul(KELVIN_SLOPE).add(width.mul(2.1)).add(2),
+        ).toVar();
+
+        // The two systems do not decay at the same rate, and this is the reason
+        // the arms are the part of a wake you can still see from a mile off.
+        // Stationary phase gives the transverse waves the ordinary r^-1/2 of
+        // energy spreading along a line, but the divergent waves pile up on the
+        // cusp locus where the two families meet, and the cusp decays as r^-1/3.
+        // Sharing one r^-1/2 between them threw away the difference and left the
+        // arms fading at the same rate as the crests they are supposed to outlive.
+        const radius = fromStem.max(width).div(width).toVar();
+        const transverseSpread = float(1).div(radius.sqrt()).toVar();
+        const divergentSpread = float(1).div(radius.pow(1 / 3)).toVar();
+
         const tail = float(1).sub(along.div(armLength.mul(1.35))).clamp(0, 1).toVar();
         const centreline = smoothstepDown(
           lateral,
           width.mul(0.8),
-          along.mul(KELVIN_SLOPE).add(width.mul(2.2)),
+          // Held clear of the inner edge. Far enough ahead of the stem this outer
+          // edge crosses below it, and a reversed pair is explicitly undefined in
+          // both shading languages — see `smoothstepDown`. The region is
+          // multiplied out by `behind` anyway, but "undefined" includes NaN, and
+          // NaN times zero is still NaN.
+          fromStem.mul(KELVIN_SLOPE).add(width.mul(2.2)).max(width.mul(1.2)),
         ).toVar();
 
-        const transverse = transversePhase.cos().mul(centreline).mul(0.75).toVar();
-        const divergent = divergentPhase.cos().mul(armFoam.mul(0.7).add(0.3)).toVar();
+        // Wider than the line the foam draws, and deliberately so: the divergent
+        // crests fill the band just inside the caustic, they are not confined to
+        // it. Reusing the foam's own Gaussian drew two wires where there should be
+        // a feathered arm several crests deep.
+        const armBand = armOffset.mul(0.5).toVar();
+        const armEnvelope = armBand.mul(armBand).min(24).negate().exp().toVar();
+
+        const transverse = transversePhase
+          .cos()
+          .mul(centreline)
+          .mul(transverseSpread)
+          .mul(TRANSVERSE_WEIGHT)
+          .toVar();
+        const divergent = divergentPhase
+          .cos()
+          .mul(armEnvelope.mul(0.85).add(0.15))
+          .mul(divergentSpread)
+          .mul(DIVERGENT_WEIGHT)
+          .toVar();
 
         // Bow wave: the hull pushes a mound up ahead of itself and drags a trough
         // in behind the shoulder. Without it the pattern starts from nothing at
@@ -724,28 +960,31 @@ export class Wake {
         // *lower* amidships than the undisturbed surface around it. An earlier
         // version of this comment described the trough while the code added only
         // the mound, so the hull rode on a bulge with nothing under it.
+        //
+        // Both are now placed off the stem instead of off midships, which is where
+        // a bow wave is: the mound was previously sitting a beam ahead of the
+        // ship's centre, half a hull short of the stem that raises it, and the
+        // trough was under the mainmast rather than at the shoulder.
         const bow = delta
-          .sub(forward.mul(width.mul(0.9)))
+          .sub(forward.mul(width.mul(HALF_LENGTH_BEAMS)))
           .length()
-          .div(width.mul(1.1))
+          .div(width)
           .toVar();
-        const crest = bow.mul(bow).min(20).negate().exp().mul(1.15).toVar();
+        const crest = bow.mul(bow).min(20).negate().exp().mul(1.25).toVar();
 
-        // Centred a little over a beam abaft the bow mound, and wider — the
-        // shoulder trough is a longer, shallower feature than the crest ahead of
-        // it, which is what gives the two together the S-shape a bow wave has in
-        // profile.
+        // Centred about a beam abaft the mound, and wider — the shoulder trough is
+        // a longer, shallower feature than the crest ahead of it, which is what
+        // gives the two together the S-shape a bow wave has in profile.
         const shoulder = delta
-          .add(forward.mul(width.mul(0.55)))
+          .sub(forward.mul(width.mul(0.7)))
           .length()
           .div(width.mul(1.5))
           .toVar();
-        const bowWave = crest.sub(shoulder.mul(shoulder).min(20).negate().exp().mul(0.5)).toVar();
+        const bowWave = crest.sub(shoulder.mul(shoulder).min(20).negate().exp().mul(0.55)).toVar();
 
         const local = transverse
-          .add(divergent.mul(0.85))
+          .add(divergent)
           .mul(wedge)
-          .mul(spread)
           .mul(tail)
           .mul(behind)
           .add(bowWave)
@@ -765,7 +1004,12 @@ export class Wake {
       // Blend, do not sum: see the class comment.
       const elevation = mix(previousElevation, stamped, stampWeight.clamp(0, 1)).toVar();
 
-      return vec4(previous.add(deposit).clamp(0, 1), elevation, 0, 1);
+      return vec4(
+        previous.add(deposit).clamp(0, 1),
+        elevation,
+        previousWake.add(wakeDeposit).clamp(0, 1),
+        1,
+      );
     })();
 
     return material;
@@ -785,13 +1029,55 @@ const rainStipple = /*@__PURE__*/ Fn(([p]: [any]) => {
   return h.sin().mul(43758.5453).fract().x;
 });
 
+/**
+ * Slow world-space structure for the turbulent band astern, 0..1.
+ *
+ * The band cannot be a smooth mask. Water behind a transom is a field of boils
+ * several metres across that surface, spread and collapse, and a flat white
+ * ribbon is the tell that a wake was drawn rather than shed. The water shader
+ * already breaks the foam's *edge* up at bubble scale, so what is missing at this
+ * end is the metre scale between the two.
+ *
+ * Three sines rather than a hash, unlike `rainStipple` above, for two reasons.
+ * Rain is a spray of discrete specks and wants hard edges; a boil is a smooth
+ * mound and does not. And this buffer is resampled by a fractional texel offset
+ * every frame as its centre follows the camera, which a hash does not survive —
+ * it would scintillate along the whole length of the wake. The directions and
+ * wavelengths are mutually incommensurate so the sum does not read as a grid.
+ *
+ * Anchored in the world and independent of time, so a texel is modulated the same
+ * way on every frame the hull deposits on it and the structure accumulates
+ * instead of averaging itself flat.
+ */
+const wakeBoil = /*@__PURE__*/ Fn(([p]: [any]) => {
+  const a = p.dot(vec2(0.62, 0.27)).sin().toVar();
+  const b = p.dot(vec2(-0.31, 0.74)).sin().toVar();
+  const c = p.dot(vec2(1.13, -0.87)).sin().toVar();
+  return a.add(b).add(c).mul(1 / 6).add(0.5);
+});
+
+/**
+ * Resolves into the target whose texture reference never changes, and composites
+ * the two foam channels on the way through.
+ *
+ * A screen, `1 - (1-a)(1-b)`, rather than a sum or a max. R and B are coverage
+ * fractions of the same material laid down by two independent processes, and the
+ * chance a texel is covered by either is exactly one minus the chance it is
+ * covered by neither. Summing them puts wake over whitecap past white and clips
+ * the difference away — the wake's own structure disappears wherever it crosses a
+ * breaking crest — and `max` throws away the fact that two thin coverages
+ * together are denser than one. The screen cannot exceed 1 by construction, so
+ * the composite adds no saturation risk of its own.
+ */
 function createCopyMaterial(source: THREE.Texture): THREE.NodeMaterial {
   const material = new THREE.NodeMaterial();
   material.depthTest = false;
   material.depthWrite = false;
   material.fragmentNode = Fn(() => {
     const s = texture(source, uv()).toVar();
-    return vec4(s.r, s.g, 0, 1);
+    const sea = s.r.clamp(0, 1).toVar();
+    const hull = s.b.clamp(0, 1).toVar();
+    return vec4(sea.oneMinus().mul(hull.oneMinus()).oneMinus(), s.g, 0, 1);
   })();
   return material;
 }
