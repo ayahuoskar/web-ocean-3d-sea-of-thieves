@@ -47,7 +47,7 @@ interface OceanHooks {
   };
   isReady(): boolean;
   shadersReady(): boolean;
-  setState(partial: Record<string, unknown>): void;
+  setState(partial: Record<string, unknown>): void | Promise<void>;
   setCamera(px: number, py: number, pz: number, tx: number, ty: number, tz: number): void;
   resetDeterministic(
     time?: number,
@@ -105,8 +105,13 @@ export async function bootOcean(page: Page): Promise<void> {
  *    settles by stepping, so the frame does not depend on what ran before it.
  */
 export async function applyShot(page: Page, shot: Shot): Promise<void> {
-  await page.evaluate((state) => {
-    window.__ocean.setState({
+  // Awaited: a tier change now drains the GPU queue before it destroys anything,
+  // so `setState` is genuinely asynchronous when `quality` moves. Without the
+  // await, a shot can be captured while the previous tier is still being torn
+  // down — which showed up as the UI-exclusion check seeing a 255-level
+  // difference between two captures that should have been identical.
+  await page.evaluate(async (state) => {
+    await window.__ocean.setState({
       quality: state.quality,
       cameraMode: state.cameraMode,
       windSpeed: state.windSpeed,

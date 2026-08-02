@@ -551,9 +551,21 @@ export class Wake {
       const edge = sourceUv.min(sourceUv.oneMinus()).toVar();
       const inside = edge.x.min(edge.y).smoothstep(0, 0.004).toVar();
 
+      // Foam is read from the *drifted* lookup; elevation is not.
+      //
+      // Foam is material floating on the surface, so advecting it is the whole
+      // point. Elevation is a phase field — the crest pattern a hull leaves —
+      // and phase is not carried by the surface drift; a wake's waves propagate
+      // at their own group velocity and stay where the hull put them for far
+      // longer than a 3%-of-wind current would leave them. Sharing one lookup
+      // between the two channels quietly dragged the wake downwind.
       const history = texture(source, sourceUv).toVar();
+      const historyStill = texture(source, coord.add(this.uScroll)).toVar();
       const previous = history.r.mul(this.uDecay).mul(inside).toVar();
-      const previousElevation = history.g.mul(this.uElevationDecay).mul(inside).toVar();
+      const previousElevation = historyStill.g
+        .mul(this.uElevationDecay)
+        .mul(inside)
+        .toVar();
 
       const world = coord.sub(0.5).mul(extent).add(this.uCenter).toVar();
       const deposit = float(0).toVar();

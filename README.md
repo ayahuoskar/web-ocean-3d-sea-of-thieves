@@ -97,8 +97,15 @@ Drop the camera below the surface in any mode to trigger the underwater state.
 **Ocean**
 - Depth-aware refraction: the scene behind the surface, distorted by the wave normal, with
   the water column measured from the depth buffer and Beer–Lambert absorption over it
-- Planar reflection of ship, props and clouds, faded out at the frame edge and at grazing
-  angles where the plane approximation stops describing anything
+- Full microfacet BRDF — GGX distribution, height-correlated Smith visibility and Fresnel on
+  the half-vector — with an **anisotropic** lobe whose along/across roughness ratio comes from
+  Cox & Munk's measured slope variances, so the sun track stretches toward the viewer
+- Geometric specular antialiasing, which is what keeps a lobe this narrow from spiking on the
+  one wave face that happens to line the half-vector up
+- **Snell's window and total internal reflection** on the underside: the whole sky compressed
+  into a 48.6-degree disc, the underwater scene mirrored around it
+- Planar reflection of ship, props and clouds, sampled at a roughness- and distance-driven mip
+  level rather than as a mirror, faded out at the frame edge and at grazing angles
 - Persistent foam: breaking crests and the ship's wake deposit into one world-anchored buffer
   that decays over seconds, rather than a mask recomputed every frame
 - JONSWAP directional spectrum with live wind-speed and peak-wavelength control
@@ -117,11 +124,16 @@ Drop the camera below the surface in any mode to trigger the underwater state.
   systems and a bow wave, with `k = g/V²` so the crests lengthen as the square of speed
 - Rain wets what it lands on — wood and canvas darken and gloss in a squall, and stay damp for
   half a minute after it passes
+- Cloud shadows drift across the water, sampled from the same density field the clouds are
+  drawn from
 - Buoys and barrels floating independently
 - Procedural seafloor with animated caustics; island silhouette
 - Preetham-model sky with raymarched volumetric clouds, stars, moon, rain and snow
 
 **Underwater**
+- **A per-pixel waterline.** The medium is integrated over the segment of *each eye ray* that
+  lies below the surface, with the surface taken from the wave field where the ray meets it —
+  so air and water appear in the same frame and the line follows the crests
 - Per-channel extinction, drifting particulates and bubble columns
 - God rays marched in *world* space against the caustics field, so the shafts and the pattern
   they cast on the seafloor are one evaluation of one field rather than two effects tuned to
@@ -234,9 +246,9 @@ Bugs found by measuring rather than looking, none of them visible to typecheck:
 
 ## Performance
 
-Frame work measures **0.33 / 3.10 / 6.51 ms** GPU p50 at Low / High / Max on WebGPU at
-1600 × 900 DPR 1, against a 16.7 ms budget. WebGL2 Low measures **1.71 ms** against 33.3 ms.
-All seven benchmarked configurations pass.
+Frame work measures **1.00 / 3.13 / 6.49 ms** GPU p50 at Low / High / Max on WebGPU at
+1600 × 900 DPR 1, against a 16.7 ms budget. WebGL2 Low measures **2.58 ms** against 33.3 ms.
+All seven benchmarked configurations pass, with no console errors during the sample.
 
 **Read that with care.** Automated Chromium throttles `requestAnimationFrame` independently
 of load — this project measured 1.1 "FPS" while spending 0.8 ms per frame, and the same
@@ -252,38 +264,48 @@ Full methodology, cost model and the honest list of what remains unmeasured:
 
 ## Known limitations
 
-- **The waterline is not a true split.** `submersion` cross-fades the whole frame rather than
-  masking it per pixel, so a camera sitting exactly at the surface does not show water below
-  and air above in the same image. The canonical `waterline` shot is a grazing view, not a
-  meniscus.
-- **No Snell window or total internal reflection.** Looking up from below shows the surface
-  underside shaded like the topside, not the compressed disc of sky and mirrored water that
-  real water produces.
-- **Sun glitter is isotropic.** The BRDF is a complete GGX — D, Smith visibility and Fresnel
-  on the half-vector — but with a single scalar roughness. Real glitter stretches toward the
-  viewer because the slope distribution is anisotropic along the wind, which needs an
-  anisotropic NDF driven by directional slope variance.
-- **Reflections are sharp, single-ray and non-temporal.** Planar and screen-space reflection
-  are both sampled as mirrors regardless of roughness. There is no prefiltered probe, no
-  stochastic sampling with a temporal resolve, and no slope-variance antialiasing — so a rough
-  sea reflects as if it were polished, and MSAA cannot touch shader-frequency sparkle.
+- **No temporal antialiasing or reconstruction.** Every stochastic effect here — the fog march,
+  the cloud march, the shaft march, the specular lobe — resolves spatially within one frame.
+  This is the largest single thing between the current image and a shipping one: it is what
+  would stabilise the glitter and let every march trade samples for frames.
+- **Screen-space reflection is full-resolution, single-ray and non-temporal.** It cannot
+  reconstruct off-screen content or a rough lobe. The *planar* layer is now sampled at a
+  roughness-driven mip level, so the composite is no longer a mirror, but there is still no
+  prefiltered probe and no stochastic sampling with a temporal resolve.
+- **Specular antialiasing is the geometric variant, not slope-space NDF filtering.** It adds
+  the scalar magnitude of the shading normal's screen-space derivatives to `alpha²`, which
+  discards the anisotropic covariance — so it cannot know that a pixel's normal varies more
+  along the wind than across it, which for this surface is the interesting part. Residual
+  striping in the near field is the honest consequence.
 - **The grazing reflection fade is art-directed, not a Smith term.** It bottoms out at 0.45
   where a real masking function goes to zero, and it multiplies the Fresnel blend rather than
-  acting as the BRDF's geometry factor. See `GRAZING_SLOPE_SIGMA`.
+  acting as the BRDF's geometry factor. (The *specular* Smith visibility is a real
+  height-correlated anisotropic term; this is a separate, cruder fade on the environment
+  reflection.) See `GRAZING_SLOPE_SIGMA`.
 - **Refraction is a normal-driven UV offset, not a refracted ray.** Snell's law is not solved
   and the offset ray is not intersected with scene geometry; the depth read that follows it is
-  real, and drives real absorption, but the displacement itself is an approximation.
+  real, and drives real absorption, but the displacement itself is an approximation. The same
+  is true of the total internal reflection on the underside — it is a screen-space offset, so
+  it reflects only what is on screen and falls back to the water's body colour elsewhere.
 - **The wake is Kelvin-*inspired*.** The dispersion relations are right, which is what makes it
   scale correctly with speed, but it is an authored sum of two cosines and some envelopes — no
   hull pressure distribution, no stationary-phase cusp, no Froude-number response, no finite
   depth, and no propagation of history at the group velocity.
 - **Monahan's law drives foam generation, not measured coverage.** The deposit rate follows
   `W = 3.84e-6 U^3.41`, but nothing measures the resulting rendered coverage and compares it
-  against the law.
-- **No cloud shadows on the water**, and no sun-path occlusion for the underwater shafts — a
-  hull can block the sun and still have caustic shafts beneath it.
-- **No temporal antialiasing or reconstruction.** Every stochastic effect here — the fog march,
-  the cloud march, the shaft march — resolves spatially within one frame.
+  against the law. The foam still reads as broad ribboning rather than sparse multiscale
+  bubbles and streaks.
+- **Cloud shadow is a one-sample approximation.** It traces to the middle of the slab along the
+  sun path and attenuates by density times path length — the same field the clouds are drawn
+  from, so the shade lands under the cloud that casts it, but it is not an integral through the
+  layer. Clouds themselves are still a procedural slab: no weather map, no multiple-scattering
+  approximation, no temporal reprojection.
+- **Underwater sun occlusion covers the hull only.** An analytic ellipsoid in the hull's frame,
+  plus the cloud deck. A diver under a barrel gets full shafts.
+- **The quality tier does not change the shadow map or reflection resolution after startup.**
+  Both are written once, from whatever tier the session boots on. Changing either at runtime
+  destroys a GPU resource that an in-flight command buffer still references, which WebGPU
+  reports as *"Destroyed texture used in a submit"*. See `Atmosphere.setShadowMapSize`.
 - **Rain wetting is uniform over an object.** The hull darkens and glosses in a squall and
   dries out over the following half-minute, but a real hull wets from *above* — the deck soaks
   while the underside of a beam stays dry, and water runs down and pools. Expressing that needs

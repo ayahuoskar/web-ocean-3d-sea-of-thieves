@@ -78,11 +78,18 @@ export async function setCamera(
 }
 
 export async function setState(page: Page, partial: Record<string, unknown>): Promise<void> {
-  await page.evaluate((p) => {
+  // Awaited, and that matters for `quality`. A tier change waits for the GPU
+  // queue to drain before it destroys anything — destroying a texture three has
+  // already referenced in a submitted command buffer is a use-after-free, and
+  // WebGPU reports it as one. Without the await, a test would assert on the tier
+  // it had just left.
+  await page.evaluate(async (p) => {
     const ocean = (
-      window as unknown as { __ocean: { setState: (x: Record<string, unknown>) => void } }
+      window as unknown as {
+        __ocean: { setState: (x: Record<string, unknown>) => void | Promise<void> };
+      }
     ).__ocean;
-    ocean.setState(p);
+    await ocean.setState(p);
   }, partial);
   await page.waitForTimeout(600);
 }

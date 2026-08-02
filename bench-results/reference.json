@@ -1,8 +1,8 @@
 {
   "schema": "web-ocean-3d/bench@1",
-  "startedAt": "2026-08-02T07:37:24.842Z",
-  "finishedAt": "2026-08-02T07:41:42.088Z",
-  "durationMs": 257246,
+  "startedAt": "2026-08-02T09:56:24.586Z",
+  "finishedAt": "2026-08-02T10:00:37.694Z",
+  "durationMs": 253108,
   "command": "npm run bench",
   "argv": [],
   "host": {
@@ -140,24 +140,24 @@
         "deliveredFps": 454.545,
         "referenceFrameMs": 1.8,
         "intervalMs": {
-          "samples": 1284,
+          "samples": 1249,
           "min": 0.8,
           "p50": 2.2,
           "p90": 2.9,
           "p95": 3.2,
-          "p99": 6.6,
-          "max": 17.4,
-          "mean": 2.337
+          "p99": 8.2,
+          "max": 17.3,
+          "mean": 2.404
         },
         "appLoopFrameMs": {
-          "samples": 1284,
+          "samples": 1249,
           "min": 0.3,
           "p50": 0.6,
-          "p90": 0.7,
-          "p95": 0.8,
-          "p99": 1.2,
-          "max": 5,
-          "mean": 0.6
+          "p90": 0.8,
+          "p95": 0.9,
+          "p99": 1.4,
+          "max": 14.5,
+          "mean": 0.654
         }
       },
       "sampling": {
@@ -178,27 +178,27 @@
       },
       "cpuFrameMs": {
         "samples": 600,
-        "min": 1.2,
+        "min": 1.1,
         "p50": 1.8,
-        "p90": 3.3,
+        "p90": 3.4,
         "p95": 3.6,
-        "p99": 4.2,
-        "max": 5.3,
-        "mean": 2.132
+        "p99": 4.1,
+        "max": 4.9,
+        "mean": 2.087
       },
       "gpuFrameMs": {
         "samples": 600,
-        "min": 0.473,
-        "p50": 1.047,
-        "p90": 1.507,
-        "p95": 1.528,
-        "p99": 2.322,
-        "max": 2.997,
-        "mean": 1.124
+        "min": 0.472,
+        "p50": 1.005,
+        "p90": 1.094,
+        "p95": 1.163,
+        "p99": 1.711,
+        "max": 2.568,
+        "mean": 0.93
       },
       "fps": {
         "deliveredP50": 454.545,
-        "impliedByGpuP50": 955.11,
+        "impliedByGpuP50": 995.025,
         "impliedByCpuP50": 555.556
       },
       "render": {
@@ -207,25 +207,25 @@
         "frameCalls": 40
       },
       "memory": {
-        "attributes": 59,
-        "attributesSize": 5317016,
+        "attributes": 60,
+        "attributesSize": 6870692,
         "geometries": 21,
-        "indexAttributes": 10,
-        "indexAttributesSize": 3395412,
+        "indexAttributes": 11,
+        "indexAttributesSize": 6497364,
         "indirectStorageAttributes": 0,
         "indirectStorageAttributesSize": 0,
-        "programs": 53,
-        "programsSize": 648017,
+        "programs": 54,
+        "programsSize": 663232,
         "readbackBuffers": 0,
         "readbackBuffersSize": 0,
         "renderTargets": 18,
         "storageAttributes": 0,
         "storageAttributesSize": 0,
-        "textures": 70,
-        "texturesSize": 406870642,
-        "uniformBuffers": 173,
-        "uniformBuffersSize": 65104,
-        "total": 416296191
+        "textures": 73,
+        "texturesSize": 418390646,
+        "uniformBuffers": 204,
+        "uniformBuffersSize": 79888,
+        "total": 432501822
       },
       "sceneContent": {
         "hasShip": true,
@@ -327,27 +327,27 @@
       },
       "pacing": {
         "classification": "unthrottled",
-        "deliveredFps": 178.571,
+        "deliveredFps": 172.414,
         "referenceFrameMs": 2.4,
         "intervalMs": {
-          "samples": 531,
-          "min": 2.5,
-          "p50": 5.6,
-          "p90": 7.5,
-          "p95": 8.1,
-          "p99": 9.2,
-          "max": 10.6,
-          "mean": 5.659
+          "samples": 494,
+          "min": 2,
+          "p50": 5.8,
+          "p90": 8,
+          "p95": 9,
+          "p99": 17.8,
+          "max": 23.2,
+          "mean": 6.075
         },
         "appLoopFrameMs": {
-          "samples": 531,
+          "samples": 494,
           "min": 0.4,
-          "p50": 0.8,
-          "p90": 1.8,
-          "p95": 2.2,
-          "p99": 2.7,
-          "max": 3,
-          "mean": 0.992
+          "p50": 0.9,
+          "p90": 1.9,
+          "p95": 2.3,
+          "p99": 2.9,
+          "max": 14.6,
+          "mean": 1.076
         }
       },
       "sampling": {
@@ -368,27 +368,27 @@
       },
       "cpuFrameMs": {
         "samples": 600,
-        "min": 1.5,
+        "min": 1.6,
         "p50": 2.4,
-        "p90": 4.6,
+        "p90": 4.5,
         "p95": 5.2,
-        "p99": 5.9,
-        "max": 6.3,
-        "mean": 2.76
+        "p99": 6.3,
+        "max": 7.2,
+        "mean": 2.762
       },
       "gpuFrameMs": {
         "samples": 600,
-        "min": 1.598,
-        "p50": 1.665,
-        "p90": 2.178,
-        "p95": 2.211,
-        "p99": 3.202,
-        "max": 4.164,
-        "mean": 1.759
+        "min": 1.615,
+        "p50": 1.664,
+        "p90": 1.729,
+        "p95": 2.163,
+        "p99": 2.347,
+        "max": 3.105,
+        "mean": 1.713
       },
       "fps": {
-        "deliveredP50": 178.571,
-        "impliedByGpuP50": 600.601,
+        "deliveredP50": 172.414,
+        "impliedByGpuP50": 600.962,
         "impliedByCpuP50": 416.667
       },
       "render": {
@@ -397,25 +397,25 @@
         "frameCalls": 72
       },
       "memory": {
-        "attributes": 59,
-        "attributesSize": 5686808,
+        "attributes": 60,
+        "attributesSize": 7240484,
         "geometries": 21,
-        "indexAttributes": 10,
-        "indexAttributesSize": 4133844,
+        "indexAttributes": 11,
+        "indexAttributesSize": 7235796,
         "indirectStorageAttributes": 0,
         "indirectStorageAttributesSize": 0,
-        "programs": 57,
-        "programsSize": 657210,
+        "programs": 58,
+        "programsSize": 672425,
         "readbackBuffers": 0,
         "readbackBuffersSize": 0,
         "renderTargets": 24,
         "storageAttributes": 0,
         "storageAttributesSize": 0,
-        "textures": 77,
-        "texturesSize": 416089226,
-        "uniformBuffers": 205,
-        "uniformBuffersSize": 67664,
-        "total": 426634752
+        "textures": 80,
+        "texturesSize": 427609230,
+        "uniformBuffers": 236,
+        "uniformBuffersSize": 82448,
+        "total": 442840383
       },
       "sceneContent": {
         "hasShip": true,
@@ -517,27 +517,27 @@
       },
       "pacing": {
         "classification": "unthrottled",
-        "deliveredFps": 100,
-        "referenceFrameMs": 3.146,
+        "deliveredFps": 99.01,
+        "referenceFrameMs": 3.134,
         "intervalMs": {
-          "samples": 298,
-          "min": 7.8,
-          "p50": 10,
-          "p90": 11,
-          "p95": 12,
-          "p99": 15,
-          "max": 15.9,
-          "mean": 10.091
+          "samples": 289,
+          "min": 7.2,
+          "p50": 10.1,
+          "p90": 11.5,
+          "p95": 13.6,
+          "p99": 15.9,
+          "max": 16.5,
+          "mean": 10.39
         },
         "appLoopFrameMs": {
-          "samples": 298,
+          "samples": 289,
           "min": 0.5,
           "p50": 0.8,
           "p90": 1,
-          "p95": 1,
-          "p99": 1.5,
+          "p95": 1.1,
+          "p99": 1.4,
           "max": 1.7,
-          "mean": 0.789
+          "mean": 0.828
         }
       },
       "sampling": {
@@ -558,27 +558,27 @@
       },
       "cpuFrameMs": {
         "samples": 600,
-        "min": 1.9,
+        "min": 2.1,
         "p50": 3.1,
-        "p90": 6.9,
-        "p95": 7.8,
-        "p99": 8.8,
-        "max": 9.3,
-        "mean": 3.785
+        "p90": 6.8,
+        "p95": 7.9,
+        "p99": 9,
+        "max": 9.5,
+        "mean": 3.793
       },
       "gpuFrameMs": {
         "samples": 600,
-        "min": 2.854,
-        "p50": 3.146,
-        "p90": 3.298,
-        "p95": 3.401,
-        "p99": 3.456,
-        "max": 3.591,
-        "mean": 3.171
+        "min": 2.852,
+        "p50": 3.134,
+        "p90": 3.339,
+        "p95": 3.407,
+        "p99": 3.464,
+        "max": 3.609,
+        "mean": 3.162
       },
       "fps": {
-        "deliveredP50": 100,
-        "impliedByGpuP50": 317.864,
+        "deliveredP50": 99.01,
+        "impliedByGpuP50": 319.081,
         "impliedByCpuP50": 322.581
       },
       "render": {
@@ -587,31 +587,31 @@
         "frameCalls": 116
       },
       "memory": {
-        "attributes": 59,
-        "attributesSize": 6573464,
+        "attributes": 60,
+        "attributesSize": 8127140,
         "geometries": 21,
-        "indexAttributes": 10,
-        "indexAttributesSize": 5905236,
+        "indexAttributes": 11,
+        "indexAttributesSize": 9007188,
         "indirectStorageAttributes": 0,
         "indirectStorageAttributesSize": 0,
-        "programs": 61,
-        "programsSize": 666410,
+        "programs": 62,
+        "programsSize": 681632,
         "readbackBuffers": 0,
         "readbackBuffersSize": 0,
         "renderTargets": 30,
         "storageAttributes": 0,
         "storageAttributesSize": 0,
-        "textures": 78,
-        "texturesSize": 456374116,
-        "uniformBuffers": 249,
-        "uniformBuffersSize": 71184,
-        "total": 469590410
+        "textures": 81,
+        "texturesSize": 467894120,
+        "uniformBuffers": 280,
+        "uniformBuffersSize": 85968,
+        "total": 485796048
       },
       "sceneContent": {
         "hasShip": true,
         "binariesServedFromDisk": [
-          "/models/dutch_ship_medium/dutch_ship_medium.bin",
           "/models/ocean_buoy/ocean_buoy.bin",
+          "/models/dutch_ship_medium/dutch_ship_medium.bin",
           "/models/barrel_03/barrel_03.bin",
           "/models/rock_07/rock_07.bin",
           "/models/namaqualand_cliff_01/namaqualand_cliff_01.bin"
@@ -707,27 +707,27 @@
       },
       "pacing": {
         "classification": "unthrottled",
-        "deliveredFps": 80.645,
-        "referenceFrameMs": 4.227,
+        "deliveredFps": 78.74,
+        "referenceFrameMs": 4.222,
         "intervalMs": {
-          "samples": 240,
-          "min": 9.6,
-          "p50": 12.4,
-          "p90": 13.5,
-          "p95": 13.9,
-          "p99": 19.2,
+          "samples": 235,
+          "min": 10.3,
+          "p50": 12.7,
+          "p90": 13.9,
+          "p95": 15,
+          "p99": 17.6,
           "max": 20,
-          "mean": 12.509
+          "mean": 12.8
         },
         "appLoopFrameMs": {
-          "samples": 240,
+          "samples": 235,
           "min": 0.5,
           "p50": 0.8,
-          "p90": 1,
-          "p95": 1.1,
-          "p99": 1.3,
-          "max": 1.5,
-          "mean": 0.815
+          "p90": 1.1,
+          "p95": 1.2,
+          "p99": 1.6,
+          "max": 1.7,
+          "mean": 0.839
         }
       },
       "sampling": {
@@ -748,27 +748,27 @@
       },
       "cpuFrameMs": {
         "samples": 600,
-        "min": 1.8,
+        "min": 1.9,
         "p50": 3.1,
-        "p90": 6.5,
-        "p95": 7.7,
-        "p99": 8.7,
+        "p90": 7,
+        "p95": 7.9,
+        "p99": 9,
         "max": 9.6,
-        "mean": 3.621
+        "mean": 3.908
       },
       "gpuFrameMs": {
         "samples": 600,
-        "min": 4.04,
-        "p50": 4.227,
-        "p90": 4.503,
+        "min": 4.061,
+        "p50": 4.222,
+        "p90": 4.478,
         "p95": 4.561,
-        "p99": 4.656,
-        "max": 4.707,
-        "mean": 4.27
+        "p99": 4.684,
+        "max": 4.754,
+        "mean": 4.26
       },
       "fps": {
-        "deliveredP50": 80.645,
-        "impliedByGpuP50": 236.574,
+        "deliveredP50": 78.74,
+        "impliedByGpuP50": 236.855,
         "impliedByCpuP50": 322.581
       },
       "render": {
@@ -777,25 +777,25 @@
         "frameCalls": 116
       },
       "memory": {
-        "attributes": 59,
-        "attributesSize": 7680920,
+        "attributes": 60,
+        "attributesSize": 9234596,
         "geometries": 21,
-        "indexAttributes": 10,
-        "indexAttributesSize": 8118612,
+        "indexAttributes": 11,
+        "indexAttributesSize": 11220564,
         "indirectStorageAttributes": 0,
         "indirectStorageAttributesSize": 0,
-        "programs": 61,
-        "programsSize": 666410,
+        "programs": 62,
+        "programsSize": 681632,
         "readbackBuffers": 0,
         "readbackBuffersSize": 0,
         "renderTargets": 30,
         "storageAttributes": 0,
         "storageAttributesSize": 0,
-        "textures": 78,
-        "texturesSize": 458696894,
-        "uniformBuffers": 249,
-        "uniformBuffersSize": 71184,
-        "total": 475234020
+        "textures": 81,
+        "texturesSize": 470216898,
+        "uniformBuffers": 280,
+        "uniformBuffersSize": 85968,
+        "total": 491439658
       },
       "sceneContent": {
         "hasShip": true,
@@ -897,27 +897,27 @@
       },
       "pacing": {
         "classification": "display-limited",
-        "deliveredFps": 58.14,
-        "referenceFrameMs": 6.502,
+        "deliveredFps": 57.143,
+        "referenceFrameMs": 6.493,
         "intervalMs": {
-          "samples": 172,
-          "min": 12.7,
-          "p50": 17.2,
-          "p90": 20.3,
-          "p95": 20.9,
-          "p99": 22.9,
-          "max": 24.2,
-          "mean": 17.507
+          "samples": 170,
+          "min": 13.9,
+          "p50": 17.5,
+          "p90": 20.1,
+          "p95": 21.3,
+          "p99": 22.3,
+          "max": 25,
+          "mean": 17.681
         },
         "appLoopFrameMs": {
-          "samples": 172,
-          "min": 0.5,
+          "samples": 170,
+          "min": 0.6,
           "p50": 1,
-          "p90": 2.7,
-          "p95": 3,
+          "p90": 2.8,
+          "p95": 2.9,
           "p99": 3.2,
-          "max": 3.8,
-          "mean": 1.39
+          "max": 3.5,
+          "mean": 1.356
         }
       },
       "sampling": {
@@ -939,27 +939,27 @@
       "cpuFrameMs": {
         "samples": 600,
         "min": 2.1,
-        "p50": 3.3,
-        "p90": 7.1,
-        "p95": 8,
-        "p99": 9.4,
-        "max": 10.1,
-        "mean": 3.988
+        "p50": 3.4,
+        "p90": 7.7,
+        "p95": 9,
+        "p99": 10.2,
+        "max": 11.8,
+        "mean": 4.265
       },
       "gpuFrameMs": {
         "samples": 600,
-        "min": 6.167,
-        "p50": 6.502,
-        "p90": 6.826,
-        "p95": 6.918,
-        "p99": 7.048,
-        "max": 7.344,
-        "mean": 6.539
+        "min": 6.075,
+        "p50": 6.493,
+        "p90": 6.814,
+        "p95": 6.89,
+        "p99": 7.058,
+        "max": 7.329,
+        "mean": 6.532
       },
       "fps": {
-        "deliveredP50": 58.14,
-        "impliedByGpuP50": 153.799,
-        "impliedByCpuP50": 303.03
+        "deliveredP50": 57.143,
+        "impliedByGpuP50": 154.012,
+        "impliedByCpuP50": 294.118
       },
       "render": {
         "drawCalls": 167,
@@ -967,25 +967,25 @@
         "frameCalls": 128
       },
       "memory": {
-        "attributes": 59,
-        "attributesSize": 9747608,
+        "attributes": 60,
+        "attributesSize": 11301284,
         "geometries": 21,
-        "indexAttributes": 10,
-        "indexAttributesSize": 12249684,
+        "indexAttributes": 11,
+        "indexAttributesSize": 15351636,
         "indirectStorageAttributes": 0,
         "indirectStorageAttributesSize": 0,
-        "programs": 61,
-        "programsSize": 666417,
+        "programs": 62,
+        "programsSize": 681632,
         "readbackBuffers": 0,
         "readbackBuffersSize": 0,
         "renderTargets": 30,
         "storageAttributes": 0,
         "storageAttributesSize": 0,
-        "textures": 84,
-        "texturesSize": 627636116,
-        "uniformBuffers": 261,
-        "uniformBuffersSize": 72144,
-        "total": 650371969
+        "textures": 87,
+        "texturesSize": 639156120,
+        "uniformBuffers": 292,
+        "uniformBuffersSize": 86928,
+        "total": 666577600
       },
       "sceneContent": {
         "hasShip": true,
@@ -993,8 +993,8 @@
           "/models/dutch_ship_medium/dutch_ship_medium.bin",
           "/models/ocean_buoy/ocean_buoy.bin",
           "/models/barrel_03/barrel_03.bin",
-          "/models/rock_07/rock_07.bin",
-          "/models/namaqualand_cliff_01/namaqualand_cliff_01.bin"
+          "/models/namaqualand_cliff_01/namaqualand_cliff_01.bin",
+          "/models/rock_07/rock_07.bin"
         ]
       },
       "budget": {
@@ -1088,26 +1088,26 @@
       "pacing": {
         "classification": "unthrottled",
         "deliveredFps": 909.091,
-        "referenceFrameMs": 2.423,
+        "referenceFrameMs": 2.584,
         "intervalMs": {
-          "samples": 2391,
-          "min": 0.6,
+          "samples": 2378,
+          "min": 0.7,
           "p50": 1.1,
           "p90": 1.7,
           "p95": 1.8,
           "p99": 2,
-          "max": 9.1,
-          "mean": 1.255
+          "max": 2.4,
+          "mean": 1.262
         },
         "appLoopFrameMs": {
-          "samples": 2391,
+          "samples": 2378,
           "min": 0.3,
           "p50": 0.5,
           "p90": 0.6,
           "p95": 0.7,
           "p99": 0.8,
-          "max": 2.7,
-          "mean": 0.5
+          "max": 1.2,
+          "mean": 0.51
         }
       },
       "sampling": {
@@ -1128,28 +1128,28 @@
       },
       "cpuFrameMs": {
         "samples": 600,
-        "min": 0.7,
-        "p50": 1.1,
+        "min": 0.8,
+        "p50": 1.2,
         "p90": 1.5,
         "p95": 1.6,
         "p99": 1.9,
-        "max": 2.6,
-        "mean": 1.179
+        "max": 2.2,
+        "mean": 1.202
       },
       "gpuFrameMs": {
         "samples": 600,
-        "min": 1.806,
-        "p50": 2.423,
-        "p90": 3.863,
-        "p95": 4.585,
-        "p99": 6.443,
-        "max": 10.914,
-        "mean": 2.706
+        "min": 2.026,
+        "p50": 2.584,
+        "p90": 4.02,
+        "p95": 5.005,
+        "p99": 7.11,
+        "max": 10.931,
+        "mean": 2.897
       },
       "fps": {
         "deliveredP50": 909.091,
-        "impliedByGpuP50": 412.712,
-        "impliedByCpuP50": 909.091
+        "impliedByGpuP50": 386.997,
+        "impliedByCpuP50": 833.333
       },
       "render": {
         "drawCalls": 65,
@@ -1157,31 +1157,31 @@
         "frameCalls": 39
       },
       "memory": {
-        "attributes": 59,
-        "attributesSize": 5317016,
+        "attributes": 60,
+        "attributesSize": 6870692,
         "geometries": 21,
-        "indexAttributes": 10,
-        "indexAttributesSize": 2484138,
+        "indexAttributes": 11,
+        "indexAttributesSize": 5586090,
         "indirectStorageAttributes": 0,
         "indirectStorageAttributesSize": 0,
         "programs": 52,
-        "programsSize": 584376,
+        "programsSize": 594812,
         "readbackBuffers": 0,
         "readbackBuffersSize": 0,
         "renderTargets": 17,
         "storageAttributes": 0,
         "storageAttributesSize": 0,
-        "textures": 62,
-        "texturesSize": 386830874,
-        "uniformBuffers": 147,
-        "uniformBuffersSize": 51456,
-        "total": 395267860
+        "textures": 65,
+        "texturesSize": 398350878,
+        "uniformBuffers": 150,
+        "uniformBuffersSize": 52864,
+        "total": 411455336
       },
       "sceneContent": {
         "hasShip": true,
         "binariesServedFromDisk": [
-          "/models/dutch_ship_medium/dutch_ship_medium.bin",
           "/models/ocean_buoy/ocean_buoy.bin",
+          "/models/dutch_ship_medium/dutch_ship_medium.bin",
           "/models/barrel_03/barrel_03.bin",
           "/models/rock_07/rock_07.bin",
           "/models/namaqualand_cliff_01/namaqualand_cliff_01.bin"
@@ -1278,26 +1278,26 @@
       "pacing": {
         "classification": "unthrottled",
         "deliveredFps": 555.556,
-        "referenceFrameMs": 5.595,
+        "referenceFrameMs": 5.812,
         "intervalMs": {
-          "samples": 740,
-          "min": 1.1,
+          "samples": 604,
+          "min": 1,
           "p50": 1.8,
-          "p90": 4.1,
-          "p95": 6.7,
-          "p99": 56.4,
-          "max": 187.3,
-          "mean": 4.056
+          "p90": 2,
+          "p95": 2.4,
+          "p99": 97.4,
+          "max": 397.7,
+          "mean": 5.149
         },
         "appLoopFrameMs": {
-          "samples": 740,
+          "samples": 604,
           "min": 0.2,
           "p50": 0.5,
           "p90": 0.6,
-          "p95": 0.9,
-          "p99": 3.7,
-          "max": 4.7,
-          "mean": 0.593
+          "p95": 0.7,
+          "p99": 0.9,
+          "max": 81.5,
+          "mean": 0.734
         }
       },
       "sampling": {
@@ -1323,22 +1323,22 @@
         "p90": 2.3,
         "p95": 2.5,
         "p99": 2.9,
-        "max": 3.6,
-        "mean": 1.927
+        "max": 3.1,
+        "mean": 1.959
       },
       "gpuFrameMs": {
         "samples": 600,
-        "min": 3.669,
-        "p50": 5.595,
-        "p90": 7.062,
-        "p95": 7.942,
-        "p99": 9.009,
-        "max": 10.342,
-        "mean": 5.76
+        "min": 4.866,
+        "p50": 5.812,
+        "p90": 6.911,
+        "p95": 7.393,
+        "p99": 9.297,
+        "max": 10.773,
+        "mean": 5.992
       },
       "fps": {
         "deliveredP50": 555.556,
-        "impliedByGpuP50": 178.731,
+        "impliedByGpuP50": 172.058,
         "impliedByCpuP50": 526.316
       },
       "render": {
@@ -1347,25 +1347,25 @@
         "frameCalls": 115
       },
       "memory": {
-        "attributes": 59,
-        "attributesSize": 6573464,
+        "attributes": 60,
+        "attributesSize": 8127140,
         "geometries": 21,
-        "indexAttributes": 10,
-        "indexAttributesSize": 5290026,
+        "indexAttributes": 11,
+        "indexAttributesSize": 8391978,
         "indirectStorageAttributes": 0,
         "indirectStorageAttributesSize": 0,
         "programs": 60,
-        "programsSize": 606106,
+        "programsSize": 616542,
         "readbackBuffers": 0,
         "readbackBuffersSize": 0,
         "renderTargets": 29,
         "storageAttributes": 0,
         "storageAttributesSize": 0,
-        "textures": 70,
-        "texturesSize": 432375068,
-        "uniformBuffers": 223,
-        "uniformBuffersSize": 57536,
-        "total": 444902200
+        "textures": 73,
+        "texturesSize": 443895072,
+        "uniformBuffers": 226,
+        "uniformBuffersSize": 58944,
+        "total": 461089676
       },
       "sceneContent": {
         "hasShip": true,

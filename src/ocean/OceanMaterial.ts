@@ -172,8 +172,13 @@ const GRAZING_SLOPE_SIGMA = 0.16;
  */
 const WATER_IOR = 1.333;
 
-/** cos(48.6 degrees) — the edge of Snell's window. */
-const COS_CRITICAL_ANGLE = Math.sqrt(1 - 1 / (WATER_IOR * WATER_IOR));
+/**
+ * cos(48.6 degrees) — the edge of Snell's window.
+ *
+ * Kept for reference. The window's sky lookup no longer uses it: the air-side
+ * angle comes from Snell directly, which is not linear in the incidence cosine.
+ */
+export const COS_CRITICAL_ANGLE = Math.sqrt(1 - 1 / (WATER_IOR * WATER_IOR));
 
 /**
  * Screen-space variance scale for specular antialiasing.
@@ -187,16 +192,19 @@ const SPECULAR_AA_SCREEN_SPACE_VARIANCE = 0.5;
 /**
  * Ceiling on how much the filter may widen `alpha^2`.
  *
- * The paper suggests 0.18, and that is wildly wrong here. It assumes a material
- * whose base roughness is in the usual 0.1-0.5 range; water's is 0.075, so
- * `alpha^2` is 3.2e-5 and a ceiling of 0.18 is five thousand times the base — it
- * does not filter the lobe, it replaces it, and the whole up-sun half of the
- * frame turns into one white sheet.
+ * The usual published figure is 0.18, and it is wildly wrong for the *geometric*
+ * variant on this material. Water's base `alpha^2` is 3.2e-5, so 0.18 is five
+ * thousand times it — that does not filter the lobe, it replaces it, and the
+ * whole up-sun half of the frame turns into one white sheet.
  *
- * 0.004 caps the filtered roughness near 0.08, about ten times the base. That is
- * enough to integrate away the single-pixel spikes on a wave face and nowhere
- * near enough to lose the glitter's structure. The lesson generalises: a
- * published constant carries the material it was tuned on.
+ * 0.004 caps the filtered roughness near 0.08, about ten times the base: enough
+ * to integrate away the single-pixel spikes on a wave face, nowhere near enough
+ * to lose the glitter's structure.
+ *
+ * This is a ceiling on a heuristic, and residual striping in the near field is
+ * the honest consequence of filtering with a scalar what is genuinely an
+ * anisotropic, temporally-varying distribution. The full fix is slope-space NDF
+ * filtering plus a temporal resolve, and this renderer has neither.
  */
 const SPECULAR_AA_VARIANCE_CEIL = 0.004;
 
@@ -909,8 +917,17 @@ export class OceanMaterial {
       const nDotL = n.dot(sunDir).clamp(0, 1).toVar();
       const vDotH = viewDir.dot(halfVector).clamp(0, 1).toVar();
 
-      // Specular antialiasing (Kaplanyan et al., "Filtering Distributions of
-      // Normals for Shading Antialiasing").
+      // Geometric specular antialiasing.
+      //
+      // **Not** Kaplanyan et al.'s NDF filtering, which an earlier version of
+      // this comment claimed. That method filters the distribution in half-vector
+      // slope space and carries the full anisotropic covariance; this takes
+      // derivatives of the final shading normal and adds their scalar magnitude
+      // to `alpha^2`, which is the cheaper geometric variant that shipped in
+      // Frostbite and Unity's HDRP. It is a real technique with a real
+      // derivation, it is just a different one, and it throws away the covariance
+      // — so it cannot know that a pixel's normal varies more along the wind than
+      // across it, which for this surface is precisely the interesting part.
       //
       // Sun glitter on water is the hardest case there is for a narrow specular
       // lobe. The surface carries metre-scale slope detail, a pixel a hundred
@@ -956,8 +973,26 @@ export class OceanMaterial {
       // Burley's form: with the half-vector resolved onto the tangent frame, the
       // denominator is `(Ht/at)^2 + (Hb/ab)^2 + Hn^2`, and the isotropic GGX falls
       // out when at == ab.
-      const tangent = vec3(this.uWindAxis.x, 0, this.uWindAxis.y).toVar();
-      const bitangent = vec3(tangent.z.negate(), 0, tangent.x).toVar();
+      // The tangent frame has to be orthonormal *to the shading normal*, not to
+      // world up.
+      //
+      // Taking the wind axis and its horizontal perpendicular directly gives a
+      // basis that is orthonormal only where the surface happens to be flat. On
+      // any tilted wave — which is the entire subject here — `H.T`, `H.B` and
+      // `H.N` are then coordinates in a non-orthogonal basis, the sum of squares
+      // in the denominator is not the squared length of anything, and the NDF
+      // stops being normalised. It over-reports on wave faces, which is where a
+      // sun track lives.
+      //
+      // Gram-Schmidt: project the wind onto the tangent plane and re-normalise.
+      // The fallback matters at the poles of that projection — a wave face
+      // perpendicular to the wind — where the projection length goes to zero.
+      const windWorld = vec3(this.uWindAxis.x, 0, this.uWindAxis.y).toVar();
+      const projected = windWorld.sub(n.mul(n.dot(windWorld))).toVar();
+      const tangent = normalize(
+        mix(vec3(1, 0, 0).sub(n.mul(n.x)), projected, projected.length().smoothstep(0.01, 0.12)),
+      ).toVar();
+      const bitangent = normalize(n.cross(tangent)).toVar();
       const aspect = this.uSlopeAnisotropy.sqrt().toVar();
       const alphaT = alpha.mul(aspect).toVar();
       const alphaB = alpha.div(aspect).toVar();
@@ -975,10 +1010,31 @@ export class OceanMaterial {
         )
         .toVar();
 
-      // V — Smith height-correlated visibility, which is G / (4 (N.L)(N.V)).
-      const lambdaV = nDotL.mul(nDotV.mul(nDotV).mul(float(1).sub(a2)).add(a2).sqrt()).toVar();
-      const lambdaL = nDotV.mul(nDotL.mul(nDotL).mul(float(1).sub(a2)).add(a2).sqrt()).toVar();
-      const visibility = float(0.5).div(lambdaV.add(lambdaL).max(1e-6)).toVar();
+      // V — height-correlated Smith visibility, **anisotropic to match D**.
+      //
+      // Pairing an anisotropic distribution with an isotropic masking term is not
+      // a partial implementation, it is an unmatched BRDF: the two describe
+      // different microsurfaces, and the mismatch shows up as energy at exactly
+      // the grazing angles a stretched glitter track occupies. Heitz's
+      // anisotropic form resolves each direction onto the same tangent frame the
+      // distribution uses.
+      const lengthV = vec3(
+        alphaT.mul(viewDir.dot(tangent)),
+        alphaB.mul(viewDir.dot(bitangent)),
+        nDotV,
+      )
+        .length()
+        .toVar();
+      const lengthL = vec3(
+        alphaT.mul(sunDir.dot(tangent)),
+        alphaB.mul(sunDir.dot(bitangent)),
+        nDotL,
+      )
+        .length()
+        .toVar();
+      const visibility = float(0.5)
+        .div(nDotL.mul(lengthV).add(nDotV.mul(lengthL)).max(1e-6))
+        .toVar();
 
       // F — Schlick on the half-vector, F0 for an air/water interface.
       const oneMinusVH = float(1).sub(vDotH).toVar();
@@ -1192,26 +1248,50 @@ export class OceanMaterial {
           .toVar();
         const insideWindow = smoothstepDownClamped(sinT2, 0.88, 1.0).toVar();
 
-        // Where in the sky this ray came from. At the centre of the window the
-        // eye is looking at the zenith; at its edge, at the horizon — the whole
-        // vertical sweep of the sky lives in those 48.6 degrees, which is why a
-        // real Snell window has a bright rim of horizon light around it.
-        const skyT = cosI
-          .sub(COS_CRITICAL_ANGLE)
-          .div(1 - COS_CRITICAL_ANGLE)
-          .clamp(0, 1)
-          .toVar();
-        const windowColor = mix(this.uHorizonColor, this.uSkyColor, skyT)
+        // Where in the sky this ray came from — through Snell, not through a
+        // linear remap of the incidence cosine.
+        //
+        // `sin(t) = ior * sin(i)` gives the *air-side* angle, and the sky's
+        // elevation is what that angle subtends from vertical. The two are not
+        // proportional: the outer third of the window's radius holds more than
+        // half the sky, which is exactly why a real Snell window is a bright disc
+        // with the whole horizon crammed into a rim around it. A linear remap
+        // spreads the sky evenly and loses that.
+        const cosT = float(1).sub(sinT2.min(1)).max(0).sqrt().toVar();
+        const windowColor = mix(this.uHorizonColor, this.uSkyColor, cosT)
           .mul(this.uLightLevel.mul(0.85).add(0.15))
           .mul(1.9)
           .toVar();
 
-        // Outside the window: the surface is a mirror, and what it mirrors is
-        // the water underneath. `litBody` is exactly that — the transmitted and
-        // scattered colour of the column below — so the reflection is the scene
-        // the viewer is already in, which is what makes a real underwater ceiling
-        // read as liquid rather than as a lid.
-        const mirrored = litBody.mul(0.88).add(scatter.mul(0.35)).toVar();
+        // Outside the window: a mirror, and it now behaves like one.
+        //
+        // The first version put an authored colour here — `litBody` scaled — and
+        // called it total internal reflection. It is not: a mirror shows *the
+        // scene*, and the whole reason a diver notices the ceiling outside the
+        // window is that the reef, the hull and the seabed appear upside down in
+        // it. So the reflected direction is built and traced in screen space
+        // against the same backdrop the refraction already reads.
+        //
+        // Screen-space, so it inherits the usual limitation: it can only reflect
+        // what is on screen, and off-screen rays fall back to the water's own
+        // body colour. That fallback is the honest one — it is what an infinite
+        // column of water looks like — and it is what the previous version was
+        // showing everywhere.
+        const reflectedDir = viewDir.negate().reflect(n).toVar();
+        const tirOffset = reflectedDir.xz
+          .mul(this.uRefractionStrength.mul(1.6))
+          .div(viewDistance.mul(0.05).add(1))
+          .toVar();
+        const tirUv: any = (viewportSafeUV(screenUV.add(tirOffset)) as any).toVar();
+        const tirEdge = tirUv.min(tirUv.oneMinus()).toVar();
+        const tirInFrame = tirEdge.x.min(tirEdge.y).smoothstep(0, 0.06).clamp(0, 1).toVar();
+        const tirScene = vec3(viewportSharedTexture(tirUv)).toVar();
+
+        const mirrored = mix(
+          litBody.mul(0.88).add(scatter.mul(0.35)),
+          tirScene,
+          tirInFrame.mul(0.8),
+        ).toVar();
 
         // Foam floats *on* the surface and is visible from beneath as a dark
         // patch against the window, because it scatters the sky away before it

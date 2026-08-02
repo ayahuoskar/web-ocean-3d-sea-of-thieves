@@ -182,6 +182,62 @@ Rain is no longer an uncoupled overlay. It disturbs the surface, aerates it into
 foam, beads on the lens and wets the hull, and each of those has a test that
 fails if the coupling is removed.
 
+## 11. Fourth pass — the same reviewer, twice
+
+The third pass ended with "no, not AAA" and six ranked architectural gaps. Four
+were built; a second review of *those* found five implementation errors and four
+overstated claims in the new work, which is the useful part of the exercise.
+
+Built:
+
+| Gap | What landed |
+|---|---|
+| Global waterline | Per-pixel: the medium is integrated over the segment of each eye ray below the surface, with the surface taken from the wave field where the ray meets it |
+| No surface underside | Snell's window at 48.6 degrees with the air-side angle from Snell rather than a linear remap, and screen-space total internal reflection outside it |
+| Isotropic glitter | Anisotropic GGX on a Gram-Schmidt tangent frame, with a matching anisotropic Smith visibility, ratio from Cox & Munk |
+| Mirror reflections | Planar target mipmapped, sampled at a roughness- and distance-driven level |
+| No cloud shadows | One sample of the cloud march's own density field, along the sun path |
+| No shaft occlusion | Cloud deck plus an analytic hull ellipsoid in the hull's frame |
+| Foam does not transport | Advected by wind plus Stokes drift; the elevation channel deliberately is not |
+
+Caught in the new work by the second review:
+
+- The per-pixel result was still multiplied by the global `submersion` scalar, so
+  a ray crossing ten metres of water got half the treatment at the waterline.
+- The shaft march started at `t = 0` rather than where the ray enters the water,
+  spending its samples in air.
+- `-eyeH / rayY` divided by zero at exactly horizontal rays — a NaN at the horizon
+  line of every frame.
+- The anisotropic tangent frame was the wind axis and its horizontal
+  perpendicular, which is orthonormal only where the surface is flat. On a tilted
+  wave the NDF was not normalised.
+- The Smith visibility was left isotropic against an anisotropic distribution,
+  which is not a partial implementation but an unmatched BRDF.
+- Foam drift was advecting the wake's *elevation* channel too, dragging the
+  Kelvin pattern downwind.
+- The cloud shadow attenuated over the slab's vertical thickness rather than the
+  sun path's length through it, so a low sun cast the same shadow as noon.
+- The hull occluder was axis-aligned and did not follow the bow.
+- The specular antialiasing was attributed to Kaplanyan et al. It is the cheaper
+  geometric variant, which discards the anisotropic covariance the paper's method
+  keeps.
+
+Still open, and recorded in `README.md`: no temporal antialiasing or
+reconstruction, SSR still single-ray and non-temporal, refraction still a UV
+offset rather than a solved ray, clouds still a procedural slab, foam still
+reading as ribboning rather than multiscale bubbles.
+
+Also from this pass: a validation error that had been hiding behind four
+successive "fixes". Toggling `renderer.shadowMap.enabled`, calling
+`shadow.dispose()`, toggling `castShadow`, and resizing the mipmapped reflector
+each *triggered* it, and each fix removed one trigger and revealed the next. The
+cause was none of them: a tier change destroys GPU resources that a submitted
+command buffer still references, which WebGPU states plainly as *"Destroyed
+texture used in a submit"*. Tier changes now pause the loop, wait on
+`queue.onSubmittedWorkDone`, apply, compile the new pipelines, and drain again
+before resuming. The benchmark's console-error gate — added in the previous pass
+and, at the time, catching nothing — is what finally surfaced it.
+
 ## 10. Third pass — an adversarial quality review
 
 The second pass was still a review of *this* codebase against *its own* claims. A

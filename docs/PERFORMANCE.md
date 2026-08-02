@@ -94,7 +94,7 @@ Throttling is detected by comparing the delivered rAF interval against the
 *measured* frame cost, not against the app's own `loop.stats.frameMs`. The app
 times its render call, and on WebGPU that call returns once the work is
 submitted — in the reference run it reads well under a millisecond for a High
-frame that costs 3.09 ms on the GPU. Compare a 10.0 ms delivered interval against 0.5 ms and a
+frame that costs 3.13 ms on the GPU. Compare a 10.0 ms delivered interval against 0.5 ms and a
 perfectly healthy 141 FPS run is classified as throttled.
 
 ### Chrome flags, and what they change
@@ -170,35 +170,40 @@ GPU frame time, milliseconds, from timestamp queries:
 
 | Configuration | p50 | p90 | p95 | p99 | min | max | implied FPS | Verdict |
 |---|---|---|---|---|---|---|---|---|
-| WebGPU · Low | 0.33 | 0.33 | 0.34 | 0.35 | 0.32 | 0.72 | 3058 | PASS |
-| WebGPU · Medium | 1.66 | 1.88 | 1.90 | 2.15 | 1.60 | 2.19 | 602 | PASS |
-| **WebGPU · High** | **3.09** | 3.32 | 3.35 | 3.43 | 2.80 | 3.59 | **323** | **PASS** |
-| WebGPU · Ultra | 4.22 | 4.52 | 4.58 | 4.70 | 4.02 | 4.89 | 237 | PASS |
-| WebGPU · Max | 6.50 | 6.84 | 6.95 | 7.14 | 6.19 | 7.66 | 154 | PASS |
-| **WebGL2 · Low** | **1.29** | 2.39 | 2.69 | 3.99 | 0.78 | 5.09 | **773** | **PASS** |
-| WebGL2 · High | 4.10 | 4.60 | 4.84 | 5.28 | 3.61 | 6.40 | 244 | PASS |
+| WebGPU · Low | 1.00 | 1.09 | 1.16 | 1.71 | 0.47 | 2.57 | 995 | PASS |
+| WebGPU · Medium | 1.66 | 1.73 | 2.16 | 2.35 | 1.61 | 3.10 | 601 | PASS |
+| **WebGPU · High** | **3.13** | 3.34 | 3.41 | 3.46 | 2.85 | 3.61 | **319** | **PASS** |
+| WebGPU · Ultra | 4.22 | 4.48 | 4.56 | 4.68 | 4.06 | 4.75 | 237 | PASS |
+| WebGPU · Max | 6.49 | 6.81 | 6.89 | 7.06 | 6.08 | 7.33 | 154 | PASS |
+| **WebGL2 · Low** | **2.58** | 4.02 | 5.00 | 7.11 | 2.03 | 10.93 | **387** | **PASS** |
+| WebGL2 · High | 5.81 | 6.91 | 7.39 | 9.30 | 4.87 | 10.77 | 172 | PASS |
 
 Scene cost and CPU frame time for the same runs:
 
 | Configuration | CPU p50 | CPU p99 | Draw calls | Triangles | Textures | Render targets | Programs |
 |---|---|---|---|---|---|---|---|
-| WebGPU · Low | 1.0 | 2.1 | 63 | 3 237 809 | 74 | 17 | 55 |
-| WebGPU · Medium | 1.7 | 3.3 | 111 | 3 503 793 | 77 | 24 | 57 |
-| WebGPU · High | 2.3 | 5.3 | 155 | 3 799 069 | 78 | 30 | 61 |
-| WebGPU · Ultra | 2.2 | 4.9 | 155 | 4 167 965 | 78 | 30 | 61 |
-| WebGPU · Max | 2.4 | 5.3 | 167 | 4 856 489 | 84 | 30 | 61 |
-| WebGL2 · Low | 0.6 | 1.1 | 51 | 1 668 267 | 63 | 16 | 52 |
-| WebGL2 · High | 1.4 | 2.1 | 142 | 2 227 687 | 70 | 29 | 60 |
+| WebGPU · Low | 1.8 | 4.1 | 77 | 3 377 009 | 73 | 18 | 54 |
+| WebGPU · Medium | 2.4 | 6.3 | 111 | 3 503 793 | 80 | 24 | 58 |
+| WebGPU · High | 3.1 | 9.0 | 155 | 3 799 069 | 81 | 30 | 62 |
+| WebGPU · Ultra | 3.1 | 9.0 | 155 | 4 167 965 | 81 | 30 | 62 |
+| WebGPU · Max | 3.4 | 10.2 | 167 | 4 856 489 | 87 | 30 | 62 |
+| WebGL2 · Low | 1.2 | 1.9 | 65 | 1 807 467 | 65 | 17 | 52 |
+| WebGL2 · High | 1.9 | 2.9 | 142 | 2 227 687 | 73 | 29 | 60 |
 
 Reading these:
 
-- **Both gates pass with a wide margin on this GPU.** WebGPU High costs 3.09 ms
-  against a 16.7 ms budget — 5.4× headroom; WebGL2 Low costs 1.29 ms against
+- **Both gates pass with a wide margin on this GPU.** WebGPU High costs 3.13 ms
+  against a 16.7 ms budget — 5.3x headroom; WebGL2 Low costs 2.58 ms against
   33.3 ms. That is an RTX 5090 result and it should be read as one; see
   Limitations.
-- **GPU time tracks the tier cleanly**, 0.33 → 1.66 → 3.09 → 4.22 → 6.50 ms, a
-  20× span. Whatever else is true of these numbers, they are responding to the
-  thing the quality tiers change.
+- **GPU time tracks the tier cleanly**, 1.00 -> 1.66 -> 3.13 -> 4.22 -> 6.49 ms.
+  Whatever else is true of these numbers, they are responding to the thing the
+  quality tiers change. Low no longer sits near zero because it now casts a
+  shadow like every other tier — see `QualitySettings.shadowMapSize` for why that
+  is not negotiable.
+- **No console errors during any sample.** That is a gate, not an observation: the
+  harness reports UNVERIFIED if a configuration logs one, which is how the
+  `Destroyed texture used in a submit` validation error was caught.
 - **The gate is on p50 alone, and that is weaker than a shipping frame-time
   target.** A median says nothing about hitches, and a game that misses vsync
   every twentieth frame is a game that stutters. The p95 and p99 columns are
@@ -231,7 +236,7 @@ A GPU timer that does not move with load is not measuring anything. WebGPU High
 re-run at DPR 2 (3200 × 1800, four times the pixels) costs **6.76 ms** against
 2.89 ms — 2.3×, which is what a mix of resolution-independent FFT passes and
 fragment-bound surface shading should do. Both figures are from the run that
-established the ratio; the tier's absolute cost has moved since (3.09 ms), and
+established the ratio; the tier's absolute cost has moved since (3.13 ms), and
 the ratio is the claim here, not the absolute. Reproduce with:
 
 ```bash

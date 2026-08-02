@@ -37,6 +37,9 @@ const _pinTarget = new THREE.Vector3();
 const _keyDirection = new THREE.Vector3();
 /** Scratch for the camera forward axis, read every frame. */
 const _keyDirection2 = new THREE.Vector3();
+/** Scratch for the hull occluder pushed to the underwater pass each frame. */
+const _hullCenter = new THREE.Vector3();
+const _hullRadius = new THREE.Vector3(1, 1, 1);
 
 const boot = {
   root: document.getElementById('boot'),
@@ -138,6 +141,10 @@ class App {
   private deterministic = false;
   /** Test-only rain rate override; null means the weather system decides. */
   private rainOverride: number | null = null;
+  /** Tier change waiting for a safe moment. See `drainQualityRequests`. */
+  private pendingQuality: QualityTier | null = null;
+  /** The in-flight drain, so concurrent requests coalesce into one. */
+  private qualityApply: Promise<void> | null = null;
 
   constructor(canvas: HTMLCanvasElement, uiRoot: HTMLElement) {
     this.canvas = canvas;
@@ -283,6 +290,9 @@ class App {
         // And this is what makes the waterline per-pixel: the pass can ask where
         // the surface actually is along each eye ray instead of assuming a plane.
         this.waveHeightNode,
+        // Cloud shade reaches under the surface too — the light the caustics
+        // field refracts is the light that got past the deck.
+        this.clouds.shadowNode(),
       ),
       sceneDepth,
     );
@@ -321,7 +331,7 @@ class App {
       console.info(`[ocean] adaptive quality: dropping to "${tier}"`);
       this.state.quality = tier;
       this.panel.setState({ quality: tier });
-      this.applyQuality(tier);
+      this.requestQuality(tier);
     });
 
     window.addEventListener('resize', this.onResize);
@@ -567,11 +577,10 @@ class App {
     }
   }
 
-  private onStateChange(key: keyof UiState): void {
+  private onStateChange(key: keyof UiState): Promise<void> | void {
     switch (key) {
       case 'quality':
-        this.applyQuality(this.state.quality);
-        break;
+        return this.requestQuality(this.state.quality);
       case 'preset':
         this.applyPreset();
         break;
@@ -724,7 +733,9 @@ class App {
     this.lensRain.setQuality(this.backend === 'webgl' ? 1 : quality.lensRainQuality);
     this.water.setWakeDisplacement(quality.wakeDisplacement);
 
-    this.applyPreset();
+    // Without the environment capture: the tier does not move the sun, and the
+    // capture is a whole extra scene render into a cube target. See `applyPreset`.
+    this.applyPreset(false);
   }
 
   /**
@@ -770,7 +781,14 @@ class App {
     };
   }
 
-  private applyPreset(): void {
+  /**
+   * @param captureEnvironment Re-render the environment cube. Skipped by a tier
+   *   change, which does not alter the sky: that capture is a *whole extra scene
+   *   render*, and issuing one in the middle of a teardown is what produced
+   *   "Destroyed texture [ShadowDepthTexture] used in a submit" — the cube render
+   *   referenced the shadow map in a command buffer that outlived it.
+   */
+  private applyPreset(captureEnvironment = true): void {
     const preset = getPreset(this.state.preset);
 
     // The preset owns the sun until the viewer takes it, and then the clock
@@ -885,7 +903,97 @@ class App {
     );
 
     this.renderer.toneMappingExposure = preset.toneMappingExposure;
-    this.atmosphere.updateEnvironment(this.renderer, this.scene);
+    if (captureEnvironment) this.atmosphere.updateEnvironment(this.renderer, this.scene);
+  }
+
+  /**
+   * Coalesces tier changes to at most one per frame.
+   *
+   * A tier change disposes and recreates the FFT targets, the ocean geometry, the
+   * particle field and the reflection target, and three rebuilds the affected
+   * node graphs *asynchronously*. Two changes landing in the same tick therefore
+   * start a second teardown while the first rebuild is still pending, and what
+   * came out of that was a shadow node left holding a null render target — which
+   * the planar reflector, rendering the whole scene from its own `updateBefore`,
+   * then read `depthTexture` from.
+   *
+   * It reproduced only when transitions were back to back: with 400 ms between
+   * them it never fired, which is what identified it as a race rather than an
+   * ordering bug. Three earlier fixes each removed one *trigger* — the renderer
+   * flag, `shadow.dispose()`, `castShadow` — and the next appeared, because none
+   * of them addressed the overlap.
+   *
+   * Deferring to the frame boundary also happens to be what a UI wants: dragging
+   * a quality selector across five tiers should rebuild the world once, not five
+   * times.
+   */
+  private requestQuality(tier: QualityTier): Promise<void> {
+    this.pendingQuality = tier;
+    if (this.qualityApply === null) this.qualityApply = this.drainQualityRequests();
+    return this.qualityApply;
+  }
+
+  /**
+   * Applies pending tier changes with no frame in flight.
+   *
+   * A tier change destroys GPU resources — the FFT targets, the ocean geometry,
+   * the particle field — and destroying anything three has already referenced in
+   * a submitted command buffer is a use-after-free. WebGPU says so out loud:
+   * *"Destroyed texture [ShadowDepthTexture] used in a submit"*. It surfaced on
+   * the shadow map because the teardown cascades into three rebuilding the
+   * light's node graph, but the shadow map is the symptom, not the cause — which
+   * is why three earlier fixes aimed at shadow state each removed one trigger and
+   * the next appeared.
+   *
+   * So: stop the loop, wait for the queue to finish everything already submitted,
+   * apply, restart. `onSubmittedWorkDone` is the fence that makes it safe, and
+   * pausing is what stops a rAF callback from submitting a new frame in the gap.
+   *
+   * Requests coalesce: only the most recent tier is applied, which is also what a
+   * viewer dragging a quality selector across five tiers wants.
+   */
+  private async drainQualityRequests(): Promise<void> {
+    const wasPaused = this.loop.isPaused;
+    this.loop.setPaused(true);
+    try {
+      while (this.pendingQuality !== null && !this.disposed) {
+        const tier = this.pendingQuality;
+        this.pendingQuality = null;
+        const queue = (
+          this.renderer as unknown as {
+            backend?: { device?: { queue?: { onSubmittedWorkDone?: () => Promise<void> } } };
+          }
+        ).backend?.device?.queue;
+        await queue?.onSubmittedWorkDone?.();
+        if (this.disposed) return;
+        this.applyQuality(tier);
+
+        // Build the new tier's pipelines *while the loop is still paused*.
+        //
+        // A tier change replaces the ocean geometry, so three compiles its
+        // pipeline asynchronously — and an async pipeline creation that is still
+        // in flight when the next frame's resources turn over is the last form
+        // this bug took: "Async render pipeline creation failed ... Destroyed
+        // texture [ShadowDepthTexture] used in a submit". Compiling here means
+        // there is nothing outstanding when the loop restarts, and it removes the
+        // hitch a first-frame compile would otherwise cause anyway.
+        try {
+          await this.renderer.compileAsync(this.scene, this.camera);
+        } catch {
+          // A compile can fail while the device is reconfiguring. The next frame
+          // rebuilds what it needs; dropping this is better than aborting the
+          // tier change half-applied.
+        }
+
+        // And drain again: the change itself submits work — the FFT rebuild and
+        // the compile — and resuming the loop on top of that puts a new frame in
+        // the queue beside resources that are still being replaced.
+        await queue?.onSubmittedWorkDone?.();
+      }
+    } finally {
+      this.qualityApply = null;
+      if (!wasPaused && !this.disposed) this.loop.setPaused(false);
+    }
   }
 
   private update = (dt: number, elapsed: number): void => {
@@ -981,6 +1089,22 @@ class App {
       godRayStrength: preset.underwater.godRayStrength,
       godRaySteps: QUALITY_TIERS[this.state.quality].godRaySteps,
     });
+    // The hull, as the one occluder the shafts need. A diver under a ship
+    // should be in its shadow; the caustics field cannot know that, because it
+    // describes the surface and not what floats on it.
+    if (this.ship) {
+      const hull = this.ship.object;
+      this.underwater.setHullOccluder(
+        _hullCenter.copy(hull.position).setY(hull.position.y + 1),
+        // Beam, draught, length — in the hull's own frame, so the long axis
+        // follows the bow rather than pointing at world Z whatever the heading.
+        _hullRadius.set(this.ship.hullBeam * 1.6, 4, this.ship.hullBeam * 3.4),
+        this.ship.heading,
+        true,
+      );
+    } else {
+      this.underwater.setHullOccluder(_hullCenter, _hullRadius, 0, false);
+    }
     this.underwater.update(dt);
 
     // Rain on the lens. Placed here rather than with the other rain wiring
@@ -1173,12 +1297,23 @@ class App {
         sceneContentLoaded: () => this.sceneContentLoaded,
         hasShip: () => this.ship !== null,
         getState: () => ({ ...this.state }),
+        /**
+         * Returns a promise, and callers that change `quality` must await it.
+         *
+         * A tier change now waits for the GPU queue to drain before destroying
+         * anything, so it genuinely is asynchronous. A test that asserted on
+         * `renderer.info` straight after would otherwise be reading the tier it
+         * had just left.
+         */
         setState: (partial: Partial<UiState>) => {
+          let settled: Promise<void> | null = null;
           for (const [key, value] of Object.entries(partial)) {
             (this.state as unknown as Record<string, unknown>)[key] = value;
-            this.onStateChange(key as keyof UiState);
+            const result = this.onStateChange(key as keyof UiState);
+            if (result) settled = result;
           }
           this.panel.setState(partial);
+          return settled ?? Promise.resolve();
         },
         /**
          * Places the camera exactly, for reproducible screenshots.

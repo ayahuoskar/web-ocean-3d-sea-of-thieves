@@ -106,6 +106,16 @@ export type CausticsField = (worldPosition: unknown, lod?: unknown) => unknown;
  */
 export type WaveHeightField = (worldXZ: unknown) => unknown;
 
+/**
+ * Fraction of sunlight reaching a submerged world point, 0..1.
+ *
+ * The caustics field describes light arriving at the *surface* and refracting
+ * down; it knows nothing about what is floating on that surface. So a hull
+ * directly overhead blocked the sun and still had shafts underneath it, which is
+ * the one thing a viewer swimming under a ship is guaranteed to look for.
+ */
+export type SunOcclusionField = (worldPosition: unknown) => unknown;
+
 /** Hard ceiling on the tap count, for sanity rather than for compilation. */
 const MAX_GODRAY_STEPS = 64;
 
@@ -199,6 +209,32 @@ export class UnderwaterPass {
   private readonly uSeaLevel = uniform(0);
   private readonly uCaustics = uniform(DEFAULT_UNDERWATER_PARAMS.causticsStrength);
   /**
+   * An ellipsoid standing in for the hull, so it can shadow the shafts.
+   *
+   * Analytic rather than a shadow map, and the choice is deliberate. Three's
+   * shadow node lives inside the light's material graph; reaching it from a post
+   * pass means either duplicating its matrices or depending on internals that
+   * have already crashed a tier change twice in this project. A ray-ellipsoid
+   * test is four lines, exact for the one occluder that matters, and cannot go
+   * stale.
+   *
+   * What it does not do is shadow anything else — buoys, barrels, the island. A
+   * diver under a barrel gets full shafts. That is a real limitation and a very
+   * cheap one to accept: the hull is the object anyone will ever swim under.
+   */
+  private readonly uHullCenter = uniform(new THREE.Vector3(0, 0, 0));
+  private readonly uHullRadius = uniform(new THREE.Vector3(1, 1, 1));
+  /** Hull heading as a unit XZ vector, so the long axis follows the bow. */
+  private readonly uHullForward = uniform(new THREE.Vector2(1, 0));
+  private readonly uHullPresent = uniform(0);
+  /**
+   * Unit vector toward the sun.
+   *
+   * The pass did not previously need one — the caustics field carries the sun's
+   * refracted direction internally — but the hull occluder traces toward it.
+   */
+  private readonly uSunUp = uniform(new THREE.Vector3(0.35, 0.62, 0.7).normalize());
+  /**
    * World size of one texel of the caustics field, metres.
    *
    * Pushed in rather than assumed, because it is the caustics module that owns
@@ -252,11 +288,13 @@ export class UnderwaterPass {
     sceneDepth: unknown,
     causticsNode: CausticsField,
     waveHeightNode: WaveHeightField | null = null,
+    sunOcclusionNode: SunOcclusionField | null = null,
   ): unknown {
     const colorNode: any = scenePassColor;
     const depthNode: any = sceneDepth;
     const caustics = causticsNode as (worldPosition: any, lod?: any) => any;
     const waveHeight = waveHeightNode as ((worldXZ: any) => any) | null;
+    const sunOcclusion = sunOcclusionNode as ((worldPosition: any) => any) | null;
 
     if (colorNode === null || colorNode === undefined) {
       throw new Error('UnderwaterPass.build: scenePassColor is required.');
@@ -336,13 +374,24 @@ export class UnderwaterPass {
         // waterline follows the crests rather than sitting on a flat plane at the
         // camera's height. Without the refinement, a camera in a trough draws its
         // waterline through the wave in front of it.
-        const rayY = worldRay.y.toVar('uwRayY');
+        // Guarded away from zero *with the sign kept*. A ray exactly on the
+        // horizon has `dy = 0` and `-h/dy` is an unguarded division — introduced
+        // by this pass and a NaN waiting at the horizon line of every frame. The
+        // floor is 1e-4, which puts the crossing 10 km away for a 1 m eye height:
+        // far beyond anything the march or the extinction can reach, so the guard
+        // is never visible.
+        const rayYRaw = worldRay.y.toVar('uwRayYRaw');
+        const rayY = rayYRaw
+          .abs()
+          .max(1e-4)
+          .mul(rayYRaw.lessThan(0).select(float(-1), float(1)))
+          .toVar('uwRayY');
         const eyeH = float(0).toVar('uwEyeH');
         eyeH.assign(this.uEyeHeight);
 
         if (waveHeight !== null) {
           // First guess: the plane at the eye's own local surface height.
-          const guessT = eyeH.negate().div(rayY.abs().max(1e-3).mul(rayY.sign())).toVar('uwGuessT');
+          const guessT = eyeH.negate().div(rayY).toVar('uwGuessT');
           const guessP = this.uCameraPos.add(worldRay.mul(guessT.clamp(0, 400))).toVar('uwGuessP');
           // Refined: the eye's height above the surface *there*.
           eyeH.assign(this.uCameraPos.y.sub(waveHeight(guessP.xz)));
@@ -370,10 +419,18 @@ export class UnderwaterPass {
         // How much this *pixel* is a view through water, for the grade and the
         // shafts. A ray that crosses centimetres of water is not an underwater
         // image; one that crosses metres is.
+        // Deliberately *not* multiplied by `uSubmersion`.
+        //
+        // That scalar is the gate on the branch, and it has to be, because a
+        // branch has to be coherent to be cheap. Using it as the blend weight as
+        // well was the per-pixel waterline undoing itself: with the eye exactly at
+        // the surface, `submersion` is 0.5, so a ray crossing ten metres of water
+        // received half the treatment it had just finished computing the full
+        // amount of. The path length is the whole answer; the eye's own depth is
+        // already in it, through `eyeH`.
         const pixelSubmersion = float(1)
           .sub(waterPath.mul(-1.4).exp())
           .clamp(0, 1)
-          .mul(this.uSubmersion)
           .toVar('uwPixelSub');
 
         // --- 2. transmission --------------------------------------------------
@@ -424,7 +481,13 @@ export class UnderwaterPass {
           // `dist` is already along this pixel's ray — see the transmission term
           // above, which now makes the same correction rather than leaving the
           // two describing different path lengths.
-          // Shafts exist only in the submerged part of the ray.
+          // Shafts exist only in the submerged part of the ray, and that segment
+        // does not necessarily start at the eye. From an eye above the surface
+        // looking down, it starts where the ray enters the water — the march used
+        // to begin at t = 0 regardless, so it spent its samples in the air above
+        // the surface and stopped before reaching the water it was supposed to be
+        // integrating.
+        const marchStart = submergedStart.toVar('uwMarchStart');
         const march = min(waterPath, this.uShaftRange).toVar('uwMarch');
           const stepLength = march.mul(this.uInvSteps).toVar('uwStep');
 
@@ -466,7 +529,7 @@ export class UnderwaterPass {
           const acc = float(0).toVar('uwAcc');
 
           Loop(this.uSteps, () => {
-            const p = this.uCameraPos.add(worldDir.mul(t)).toVar('uwP');
+            const p = this.uCameraPos.add(worldDir.mul(marchStart.add(t))).toVar('uwP');
 
             // Above the waterline there is no medium to scatter in. Softened
             // rather than a hard cut so a sample crossing the surface does not
@@ -477,7 +540,55 @@ export class UnderwaterPass {
             // surface down to the sample, so this is the light *arriving* here.
             // What it does not know is how much survives the trip back to the
             // eye, which is the second term.
-            const arriving = caustics(p, shaftLod).mul(submerged);
+            const arriving = caustics(p, shaftLod).mul(submerged).toVar('uwArriving');
+
+            // What is between this sample and the sun.
+            //
+            // The caustics field answers "how bright is the surface patch that lit
+            // this point", and stops there. Anything floating on that patch — a
+            // hull, most obviously — is invisible to it, so a diver under a ship
+            // saw full shafts through the one place there should be none.
+            //
+            // This is the cloud deck's density field, *not* the sun's shadow map:
+            // reaching three's shadow node from a post pass means depending on
+            // internals that have already broken a tier change more than once. The
+            // hull is handled separately, analytically, below.
+            if (sunOcclusion !== null) {
+              arriving.mulAssign(sunOcclusion(p));
+            }
+
+            // The hull, as an ellipsoid **in the hull's own frame**.
+            //
+            // Axis-aligned would be wrong the moment the ship turns: a hull is
+            // three times longer than it is wide, so an ellipsoid that keeps its
+            // long axis on world Z casts a shadow across the beam once the bow
+            // comes round. Rotate into the heading frame first — the radius is
+            // then (beam, draught, length) as it should be.
+            const fwd = this.uHullForward;
+            const rel = p.sub(this.uHullCenter).toVar('uwHullRel');
+            const local = vec3(
+              rel.x.mul(fwd.y).sub(rel.z.mul(fwd.x)),
+              rel.y,
+              rel.x.mul(fwd.x).add(rel.z.mul(fwd.y)),
+            ).toVar('uwHullLocal');
+            const sunLocal = vec3(
+              this.uSunUp.x.mul(fwd.y).sub(this.uSunUp.z.mul(fwd.x)),
+              this.uSunUp.y,
+              this.uSunUp.x.mul(fwd.x).add(this.uSunUp.z.mul(fwd.y)),
+            ).toVar('uwHullSun');
+
+            const toHull = local.negate().div(this.uHullRadius).toVar('uwHullO');
+            const sunUnit = sunLocal.div(this.uHullRadius).toVar('uwHullD');
+            const along = toHull.dot(sunUnit).div(sunUnit.dot(sunUnit)).toVar('uwHullT');
+            const closest = toHull.sub(sunUnit.mul(along.max(0))).length().toVar('uwHullR');
+            // 1 outside, 0 through the middle, with a soft rim so the shadow's
+            // edge is penumbral rather than a hard ellipse.
+            const hullShade = closest.smoothstep(0.75, 1.25).clamp(0, 1).toVar('uwHullShade');
+            arriving.mulAssign(mix(float(1), hullShade, this.uHullPresent));
+            // Attenuation back to the eye is over the *whole* path from the eye,
+            // including the dry part — which contributes nothing, since `t` is
+            // measured from the start of the submerged segment and the air adds no
+            // extinction. `marchStart` is therefore deliberately absent here.
             const toEye = exp(this.uSigma.mul(t.negate()));
 
             acc.addAssign(arriving.mul(toEye.g).mul(stepLength));
@@ -522,7 +633,10 @@ export class UnderwaterPass {
     const p = this.params;
     if (params.waterColor !== undefined) p.waterColor.copy(params.waterColor);
     if (params.extinction !== undefined) p.extinction.copy(params.extinction);
-    if (params.sunDirection !== undefined) p.sunDirection.copy(params.sunDirection);
+    if (params.sunDirection !== undefined) {
+      p.sunDirection.copy(params.sunDirection);
+      (this.uSunUp.value as THREE.Vector3).copy(p.sunDirection).normalize();
+    }
     if (params.sunColor !== undefined) p.sunColor.copy(params.sunColor);
     if (params.submersion !== undefined) p.submersion = params.submersion;
     if (params.eyeHeight !== undefined) p.eyeHeight = params.eyeHeight;
@@ -542,6 +656,25 @@ export class UnderwaterPass {
    * The scene camera. Required for depth linearisation and for projecting the
    * sun; see the backend note at the top of this file.
    */
+  /**
+   * The hull's occluding volume, in world space.
+   *
+   * `radius` is the ellipsoid's semi-axes. Pass `present` false when there is no
+   * ship, which switches the test off for one compare.
+   */
+  setHullOccluder(
+    center: THREE.Vector3,
+    radius: THREE.Vector3,
+    headingRadians: number,
+    present: boolean,
+  ): void {
+    (this.uHullCenter.value as THREE.Vector3).copy(center);
+    (this.uHullRadius.value as THREE.Vector3).copy(radius);
+    const forward = this.uHullForward.value as THREE.Vector2;
+    forward.set(Math.cos(headingRadians), Math.sin(headingRadians));
+    this.uHullPresent.value = present ? 1 : 0;
+  }
+
   /** World metres per texel of the caustics field. See `uCausticsTexel`. */
   setCausticsTexelSize(metres: number): void {
     this.uCausticsTexel.value = Math.max(1e-3, metres);

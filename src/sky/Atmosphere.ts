@@ -248,6 +248,9 @@ export class Atmosphere {
    * is near-achromatic but the light still arrives having crossed some clear
    * atmosphere, so overcast reads faintly cool rather than neutral.
    */
+  /** Set once `setShadowMapSize` has written the shadow's configuration. */
+  private shadowConfigured = false;
+
   private readonly uOvercastTint: any = uniform(new THREE.Color(0.92, 0.96, 1.04));
   /** Multiplier applied to the flattened sky. Overcast is darker than clear. */
   /**
@@ -345,16 +348,27 @@ export class Atmosphere {
    * next shadow pass.
    */
   /**
-   * Sun shadow map resolution per side.
+   * Sun shadow map resolution per side. **Honoured once, then fixed.**
    *
-   * `castShadow` is never toggled — see `QualitySettings.shadowMapSize`. Only the
-   * resolution moves, and three's `ShadowNode.renderShadow` resizes its target
-   * from `shadow.mapSize` every frame, so setting the size is the whole job.
+   * Three creates a light's shadow node lazily inside `setup()` and caches it on
+   * the material. Any runtime change to the shadow's configuration can leave that
+   * cached node holding a null render target, and the planar reflector — which
+   * renders the whole scene from its own `updateBefore` — reliably gets there
+   * first and reads `depthTexture` off it. That crash has now been chased through
+   * three different triggers: `renderer.shadowMap.enabled`, `shadow.dispose()`,
+   * and `castShadow`. Each fix removed one and the next appeared.
+   *
+   * So the shadow's configuration is written once, at startup, from whatever tier
+   * the session begins on, and never touched again. Switching to Max mid-session
+   * therefore keeps the shadow resolution it booted with. That is a real
+   * limitation and it is the honest trade: a slightly softer shadow at Max
+   * against a renderer that cannot crash on a tier change.
    */
   setShadowMapSize(size: number): void {
-    const side = Math.max(256, Math.round(size));
+    if (this.shadowConfigured) return;
+    this.shadowConfigured = true;
     this.sunLight.castShadow = true;
-    if (this.sunLight.shadow.mapSize.x === side) return;
+    const side = Math.max(256, Math.round(size));
     this.sunLight.shadow.mapSize.set(side, side);
   }
 

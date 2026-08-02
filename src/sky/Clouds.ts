@@ -342,11 +342,21 @@ export class Clouds {
       // detail octave would only alias across the sea surface.
       const d = this.densityAt(hit, float(1)).toVar('cloudShadowD');
 
-      // Beer-Lambert through the slab, with the strength as the knob. Never to
-      // zero: a shaded sea is darker, not black, because the sky around the cloud
-      // still lights it.
+      // Beer-Lambert along the *sun path* through the slab, not down its
+      // vertical thickness. With the sun low the ray crosses far more cloud than
+      // the slab is deep — `thickness / sun.y` — which is why shadows lengthen
+      // and deepen toward evening. Using the vertical thickness made a shadow at
+      // 20 degrees elevation as light as one at noon.
+      //
+      // Capped at four slab thicknesses, matching the floor on `sun.y` above:
+      // past that the plane-parallel approximation stops describing anything, and
+      // the honest behaviour is to stop deepening rather than to run away.
+      const pathLength = this.uThickness.div(this.uSunDir.y.max(0.25)).toVar();
+
+      // Never to zero: a shaded sea is darker, not black, because the sky around
+      // the cloud still lights it.
       return d
-        .mul(this.uThickness)
+        .mul(pathLength)
         .mul(this.uShadowStrength)
         .negate()
         .exp()
