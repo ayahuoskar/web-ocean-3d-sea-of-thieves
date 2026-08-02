@@ -2,7 +2,8 @@ import * as THREE from 'three/webgpu';
 import { pass, positionWorld, rtt } from 'three/tsl';
 import { createRenderer, clampPixelRatio, type Backend } from './core/Renderer';
 import { Caustics, UnderwaterParticles, UnderwaterPass } from './underwater';
-import { AssetLoader, Props, Seafloor, Ship, SurfaceWetness } from './scene';
+import { AssetLoader, Birds, FishSchool, Props, Seafloor, Ship, SurfaceWetness } from './scene';
+import { AudioSystem, DEFAULT_AUDIO_SCENE_PARAMS } from './audio';
 import {
   BuoyancySystem,
   BuoyantBody,
@@ -40,6 +41,8 @@ const _keyDirection2 = new THREE.Vector3();
 /** Scratch for the hull occluder pushed to the underwater pass each frame. */
 const _hullCenter = new THREE.Vector3();
 const _hullRadius = new THREE.Vector3(1, 1, 1);
+/** Scratch for the birds' ambient colour, recomputed every frame. */
+const _birdShade = new THREE.Color();
 
 const boot = {
   root: document.getElementById('boot'),
@@ -90,6 +93,21 @@ class App {
   private atmosphere!: Atmosphere;
   private clouds!: Clouds;
   private weather!: Weather;
+  /** Gulls over the play area. Owns no simulation state — see `Birds`. */
+  private birds!: Birds;
+  /** Reef school. Parented to the scene root: its vertex stage emits world space. */
+  private fish!: FishSchool;
+  /**
+   * Procedural audio.
+   *
+   * Constructed suspended and silent. Browsers refuse to start an `AudioContext`
+   * without a user gesture, so `resume()` is bound to the first click or key —
+   * which also means an automated run, which never gestures, is silent by
+   * construction and needs no test-only mute.
+   */
+  private audio!: AudioSystem;
+  /** Hoisted: `update` reads these every frame and must not allocate. */
+  private readonly audioParams = { ...DEFAULT_AUDIO_SCENE_PARAMS };
 
   private post!: THREE.RenderPipeline;
   private underwater!: UnderwaterPass;
@@ -237,6 +255,17 @@ class App {
 
     this.weather = new Weather();
     this.scene.add(this.weather.object);
+
+    // Birds go in with the sky rather than with the props: they are lit by the
+    // atmosphere and nothing else, and they never touch the water.
+    this.birds = new Birds(quality.birds);
+    this.scene.add(this.birds.object);
+
+    this.fish = new FishSchool(quality.fish);
+    this.scene.add(this.fish.object);
+
+    this.audio = new AudioSystem({ volume: this.state.volume, quality: this.state.quality });
+    this.audio.resumeOnGesture();
 
     boot.set(0.8, 'Building underwater pass…');
     this.underwater = new UnderwaterPass();
@@ -615,6 +644,9 @@ class App {
         this.shipControls?.setEnabled(this.state.cameraMode === 'boat');
         this.touchControls?.setVisible(this.state.cameraMode === 'boat');
         break;
+      case 'volume':
+        this.audio.setVolume(this.state.volume);
+        break;
       case 'buoyancyProbes':
         this.ship?.setDebugProbesVisible(this.state.buoyancyProbes);
         break;
@@ -717,6 +749,11 @@ class App {
     // Particle budget is a live setting, not a construction-time one; `setCount`
     // rebuilds the instanced geometry against the new tier.
     this.particles.setCount(quality.underwaterParticles);
+    // Moves `instanceCount` only; the flock is not rebuilt and each gull keeps
+    // its own circuit across the change.
+    this.birds.setCount(quality.birds);
+    this.fish.setCount(quality.fish);
+    this.audio.setQuality(tier);
 
     // WebGL2 gets the analytic path regardless of tier. The backdrop and depth
     // reads are the least portable part of the surface, and a fallback that
@@ -1002,6 +1039,18 @@ class App {
 
     this.atmosphere.update(dt);
     this.clouds.setSunDirection(this.atmosphere.sunDirection);
+
+    this.birds.setSunDirection(this.atmosphere.sunDirection);
+    // The second colour is the light an *unlit* bird receives, not the sky's own
+    // radiance: handing over `zenithColor` raw puts a white belly at the sky's
+    // luminance and the whole flock vanishes into it.
+    this.birds.setLightColors(this.atmosphere.sunColor, _birdShade.copy(this.atmosphere.zenithColor).multiplyScalar(0.4));
+    this.birds.update(dt, this.camera.position);
+
+    this.fish.setSunDirection(this.atmosphere.sunDirection);
+    this.fish.update(dt);
+
+
     this.clouds.update(dt);
     this.weather.update(dt, this.camera.position);
 
@@ -1107,6 +1156,19 @@ class App {
       this.underwater.setHullOccluder(_hullCenter, _hullRadius, 0, false);
     }
     this.underwater.update(dt);
+
+    // Audio reads the same scene state the renderer does, so the bed tracks the
+    // sea rather than approximating it: wind drives the surf band, the wake's
+    // own rain rate drives the rain layer, and `submersion` cross-fades the
+    // whole graph under water on the same continuous value the visuals use.
+    const audio = this.audioParams;
+    audio.windSpeed = this.state.windSpeed;
+    audio.waveHeight = this.state.peakWavelength * 0.045;
+    audio.peakWavelength = this.state.peakWavelength;
+    audio.rain = raining;
+    audio.submersion = submersion;
+    audio.hullSpeed = this.shipControls?.getState(this.shipStateOut).speed ?? 0;
+    this.audio.update(dt, audio);
 
     // Rain on the lens. Placed here rather than with the other rain wiring
     // because it needs `submersion`, which is only known once the camera has
@@ -1391,6 +1453,9 @@ class App {
           this.caustics.resetClock(start);
           this.atmosphere.resetClock(start);
           this.clouds.resetWind();
+          this.birds.resetClock(start);
+          this.fish.resetClock(start);
+          this.audio.resetClock(start);
           this.wake?.reset(this.renderer);
 
           // Floating bodies carry position and momentum across a whole session;
@@ -1466,6 +1531,9 @@ class App {
     this.water?.dispose();
     this.atmosphere?.dispose();
     this.clouds?.dispose();
+    this.birds?.dispose();
+    this.fish?.dispose();
+    this.audio?.dispose();
     this.weather?.dispose();
     this.underwater?.dispose();
     this.fog?.dispose();

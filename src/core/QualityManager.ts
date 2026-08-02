@@ -41,6 +41,17 @@ export interface QualitySettings {
   godRaySteps: number;
   underwaterParticles: number;
   /**
+   * Gulls in the flock, and fish in the school.
+   *
+   * Both are single instanced draws with every transform derived on the GPU, so
+   * the count moves `instanceCount` and nothing else — no rebuild, no
+   * allocation, and an individual keeps its own circuit across a tier change.
+   * At 0 the renderer skips the draw entirely, which is why Low can have none
+   * without a branch anywhere.
+   */
+  birds: number;
+  fish: number;
+  /**
    * How much of the water's transmitted colour is the real refracted scene, as
    * opposed to the analytic depth-graded body colour.
    *
@@ -108,6 +119,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     cloudSteps: 0,
     godRaySteps: 0,
     underwaterParticles: 400,
+    birds: 0,
+    fish: 0,
     // No backdrop or depth-buffer read at all. This is the WebGL2 floor, where
     // the analytic body colour has to carry the water on its own.
     refraction: 0,
@@ -126,6 +139,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     cloudSteps: 12,
     godRaySteps: 12,
     underwaterParticles: 1200,
+    birds: 14,
+    fish: 40,
     // Partial: the scene shows through, but the analytic body still carries most
     // of the colour, which hides the coarser depth resolution at this tier.
     refraction: 0.6,
@@ -144,6 +159,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     cloudSteps: 24,
     godRaySteps: 24,
     underwaterParticles: 2400,
+    birds: 26,
+    fish: 90,
     refraction: 1,
     reflection: 0.85,
     reflectionScale: 0.5,
@@ -160,6 +177,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     cloudSteps: 40,
     godRaySteps: 40,
     underwaterParticles: 4000,
+    birds: 40,
+    fish: 140,
     refraction: 1,
     reflection: 1,
     reflectionScale: 0.6,
@@ -176,6 +195,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     cloudSteps: 64,
     godRaySteps: 56,
     underwaterParticles: 6000,
+    birds: 64,
+    fish: 220,
     refraction: 1,
     reflection: 1,
     reflectionScale: 0.75,

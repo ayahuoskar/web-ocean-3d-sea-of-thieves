@@ -25,6 +25,7 @@ type SliderKey =
   | 'cloudCoverage'
   | 'timeOfDay'
   | 'fogDensity'
+  | 'volume'
   | 'pixelRatio';
 type ToggleKey = 'buoyancyProbes' | 'wakeProbes' | 'forceWebGL';
 
@@ -65,7 +66,7 @@ const ENVIRONMENT_SLIDERS = [
   'timeOfDay',
 ] as const satisfies readonly SliderKey[];
 
-const DISPLAY_SLIDERS = ['pixelRatio'] as const satisfies readonly SliderKey[];
+const DISPLAY_SLIDERS = ['volume', 'pixelRatio'] as const satisfies readonly SliderKey[];
 
 const SLIDERS: readonly SliderSpec[] = [
   {
@@ -112,6 +113,14 @@ const SLIDERS: readonly SliderSpec[] = [
       const minutes = Math.round((v - Math.floor(v)) * 60);
       return `${String(hours).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
     },
+  },
+  {
+    key: 'volume',
+    label: 'Volume',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    format: (v) => (v === 0 ? 'Muted' : `${Math.round(v * 100)}%`),
   },
   {
     key: 'pixelRatio',

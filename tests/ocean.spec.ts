@@ -705,6 +705,94 @@ test.describe('interaction', () => {
   });
 
   /**
+   * The flock has to be *in* the frame, not merely in the scene graph.
+   *
+   * Birds are the easiest kind of feature to ship broken: an instanced draw with
+   * every transform derived on the GPU will construct, add to the scene, report a
+   * healthy instance count and render nothing at all if a single uniform is
+   * unset. Counting objects would pass on that; comparing the rendered frame with
+   * the flock hidden against the same frame with it shown cannot.
+   *
+   * The camera is aimed *up*, away from the water, so the only thing that can
+   * differ between the two captures is the sky and what is flying in it.
+   */
+  test('the bird flock renders, and the tier scales it', async ({ page }) => {
+    await page.goto('/');
+    await waitForOcean(page);
+
+    test.skip(
+      !(await hasGpuAdapter(page)),
+      'no GPU adapter: the software path cannot render these frames in time',
+    );
+
+    // A preset with a dark sky, so a pale gull against it is a large per-pixel
+    // difference rather than white-on-white. Up-sun on a clear day the flock is
+    // genuinely hard to see, which is a real limitation of the shot and not of
+    // the flock.
+    await setState(page, { preset: 'moonlit', quality: 'ultra' });
+    // Looking up and out across the flock's altitude band: the circuits sit
+    // 9-62 m up and 35-142 m out from the anchor.
+    await setCamera(page, [0, 26, 0], [40, 64, 40]);
+    await page.evaluate(() => window.__ocean.resetDeterministic(30, 60));
+
+    const withFlock = await capture(page);
+    await page.evaluate(() => {
+      const birds = window.__ocean.scene.getObjectByName('birds');
+      if (birds) birds.visible = false;
+    });
+    const without = await capture(page);
+    await page.evaluate(() => {
+      const birds = window.__ocean.scene.getObjectByName('birds');
+      if (birds) birds.visible = true;
+    });
+
+    let changed = 0;
+    for (let i = 0; i < withFlock.data.length; i += 4) {
+      if (Math.abs(withFlock.data[i] - without.data[i]) > 6) changed++;
+    }
+
+    // The bar is 80, and it is low on purpose.
+    //
+    // Measured, this frame moves ~135 pixels out of 1.44 million: forty gulls at
+    // 60-140 m are three or four pixels each. That is what a flock at that
+    // distance *is*, and inflating the birds until the number looks impressive
+    // would be tuning the scene to the test. What the assertion has to separate
+    // is "drawn small" from "not drawn", and a disconnected flock gives exactly
+    // zero — the gap between 0 and 135 is the whole signal.
+    expect(
+      changed,
+      `hiding the flock changed ${changed} pixels; near zero means the birds are ` +
+        'in the scene graph and not in the image',
+    ).toBeGreaterThan(80);
+
+    // And the tier is a real cost lever, not a label: Low flies none.
+    //
+    // Compared against Low *with the flock hidden*, not against the Ultra capture
+    // above. A tier change moves the cascade count, the fog, the mesh density and
+    // the shadow map, so an across-tier diff is a million pixels of everything
+    // else — the first version of this assertion measured exactly that and read
+    // it as birds.
+    await setState(page, { quality: 'low' });
+    await page.evaluate(() => window.__ocean.resetDeterministic(30, 60));
+    const lowWith = await capture(page);
+    await page.evaluate(() => {
+      const birds = window.__ocean.scene.getObjectByName('birds');
+      if (birds) birds.visible = false;
+    });
+    const lowWithout = await capture(page);
+
+    let lowChanged = 0;
+    for (let i = 0; i < lowWith.data.length; i += 4) {
+      if (Math.abs(lowWith.data[i] - lowWithout.data[i]) > 6) lowChanged++;
+    }
+    expect(
+      lowChanged,
+      `Low still drew ${lowChanged} pixels of birds; the tier sets the count to zero, ` +
+        'so hiding them there must change nothing at all',
+    ).toBeLessThan(20);
+  });
+
+  /**
    * Rain wets what it lands on.
    *
    * The hull was listed as a known limitation for exactly as long as rain has
@@ -1093,7 +1181,15 @@ test.describe('responsiveness', () => {
       g.controlKeys.sort(),
       'a declared slider is missing from the panel',
     ).toEqual(
-      ['cloudCoverage', 'fogDensity', 'peakWavelength', 'pixelRatio', 'timeOfDay', 'windSpeed'],
+      [
+        'cloudCoverage',
+        'fogDensity',
+        'peakWavelength',
+        'pixelRatio',
+        'timeOfDay',
+        'volume',
+        'windSpeed',
+      ],
     );
     expect(
       g.bodyScrolls,

@@ -39,6 +39,14 @@ export interface UiState {
   timeOfDay: number | null;
   /** Volumetric fog density, 0..1. 0 is a bit-exact pass-through. */
   fogDensity: number;
+  /**
+   * Master audio level, 0..1. 0 is silence.
+   *
+   * The audio graph stays suspended until a user gesture whatever this says —
+   * browsers require one — so a non-zero default is a statement of intent
+   * rather than a promise of noise.
+   */
+  volume: number;
   buoyancyProbes: boolean;
   wakeProbes: boolean;
   forceWebGL: boolean;
@@ -63,6 +71,7 @@ export const DEFAULT_UI_STATE: UiState = {
   cloudCoverage: 0.32,
   timeOfDay: null,
   fogDensity: 0.35,
+  volume: 0.55,
   buoyancyProbes: false,
   wakeProbes: false,
   forceWebGL: false,
