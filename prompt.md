@@ -28,6 +28,6 @@ Do not stop at a convincing first pass. Finish only when:
 * All interactions and automated tests pass with no console errors.
 * Performance is stable at approximately 60 FPS on the target desktop and at least 30 FPS using fallback quality.
 * There are no obvious loading hitches, memory leaks, or broken transitions.
-* The production build, setup instructions, architecture, licences, performance results, and remaining deviations are documented.
+* The production build, setup instructions, architecture, licences, and performance results are documented. Any remaining deviation from the reference is a deliberate, defended choice — not unfinished work filed as a limitation.
 
 Resolve routine implementation decisions independently. Act autonomously throughout. For every ambiguity or implementation decision, research the available options, choose the strongest practical approach, document the rationale briefly, and proceed without requesting approval. Escalate only when progress is technically impossible due to missing access, credentials, or an external dependency.
