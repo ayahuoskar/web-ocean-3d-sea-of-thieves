@@ -176,13 +176,26 @@ test.describe('wave simulation', () => {
     );
     await setCamera(page, [0, 12, 40], [0, 0, 0]);
 
-    const first = await page.screenshot();
-    // Generous: the browser may only be delivering ~1 frame per second, so a
-    // short wait can capture the same frame twice and read as a frozen sim.
-    await page.waitForTimeout(3000);
-    const second = await page.screenshot();
+    // Stepped, not waited on.
+    //
+    // This used to take two compositor screenshots three seconds apart and
+    // require them to differ. That is a bet on the browser delivering a frame in
+    // the gap, and with an island in the scene it began losing — reporting a
+    // frozen simulation when what had actually happened was that the same frame
+    // was captured twice. Advancing the clock explicitly asks the question the
+    // test means to ask: does the surface change when time passes?
+    const first = await capture(page);
+    await page.evaluate(() => window.__ocean.step(1 / 60, 30));
+    const second = await capture(page);
 
-    expect(Buffer.compare(first, second), 'frames are identical — simulation is frozen').not.toBe(0);
+    let changed = 0;
+    for (let i = 0; i < first.width * first.height; i++) {
+      if (Math.abs(first.data[i * 4] - second.data[i * 4]) > 2) changed++;
+    }
+    expect(
+      changed / (first.width * first.height),
+      'the frame is identical after half a second of simulated time — the sea is frozen',
+    ).toBeGreaterThan(0.02);
   });
 });
 
@@ -1667,10 +1680,20 @@ test.describe('interaction', () => {
     await page.goto('/');
     await waitForOcean(page);
 
+    // Stepped between setting and reading, and that is not a formality.
+    // `updateSpectrum` rewrites h0 and marks it dirty; the field the readback
+    // measures is whatever the *last rendered frame* produced from it. Reading
+    // straight after `setState` therefore measures the previous sea state, and
+    // whether it happens to be right depends on whether a frame landed in the
+    // gap. It always used to; once the island put sixteen million triangles in
+    // the scene it stopped, and the test failed with `calm` and `rough`
+    // bit-identical — which is the signature of a race, not of a frozen sim.
     await setState(page, { windSpeed: 3, peakWavelength: 20 });
+    await page.evaluate(() => window.__ocean.step(1 / 60, 2));
     const calm = await peakWaveHeight(page);
 
     await setState(page, { windSpeed: 24, peakWavelength: 120 });
+    await page.evaluate(() => window.__ocean.step(1 / 60, 2));
     const rough = await peakWaveHeight(page);
 
     expect(rough, `calm=${calm} rough=${rough}`).toBeGreaterThan(calm * 1.5);
