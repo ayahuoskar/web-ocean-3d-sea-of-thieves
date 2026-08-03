@@ -49,3 +49,10 @@ public/models/wooden_crate_02/
 public/models/treasure_chest/
 public/models/wooden_crate_01/
 public/models/lambis_shell/
+
+# The jacaranda source is the worst offender of the lot: 199 MB of raw geometry
+# in one `.bin`, which is past GitHub's 100 MB per-file ceiling and so cannot be
+# pushed at all. `public/models/dressing/jacaranda_tree.glb` — the 3 MB decimated
+# cut that the scene actually loads — stays committed, and `fetch-assets.mjs`
+# re-downloads this source whenever the optimiser needs to run again.
+public/models/jacaranda_tree/
