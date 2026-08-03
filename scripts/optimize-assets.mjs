@@ -3,7 +3,7 @@
  * optimize-assets.mjs — decimates and compresses the scene-dressing models.
  *
  * Poly Haven publishes film-quality geometry. That is the right choice for their
- * audience and the wrong one for ours: `island_tree_01` arrives as a 58 MB `.bin`
+ * audience and the wrong one for ours: `jacaranda_tree` arrives as a 199 MB `.bin`
  * of raw vertex data, and it is a background tree seen from forty metres. The six
  * dressing models between them are 180 MB, against 57 MB for the entire rest of
  * the project — committing that would triple the repository to render silhouettes.
@@ -22,8 +22,9 @@
  *   node scripts/optimize-assets.mjs   # what actually ships
  *
  * Usage:
- *   node scripts/optimize-assets.mjs           # build anything missing
- *   node scripts/optimize-assets.mjs --force   # rebuild everything
+ *   node scripts/optimize-assets.mjs                       # build anything missing
+ *   node scripts/optimize-assets.mjs --force               # rebuild everything
+ *   node scripts/optimize-assets.mjs --force island_tree_  # rebuild matching slugs
  */
 
 import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
@@ -31,14 +32,52 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NodeIO } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
-import { dedup, prune, simplify, textureCompress, weld } from '@gltf-transform/functions';
+import {
+  cloneDocument,
+  dedup,
+  meshopt,
+  prune,
+  simplifyPrimitive,
+  textureCompress,
+  weld,
+} from '@gltf-transform/functions';
 import { MeshoptEncoder, MeshoptSimplifier } from 'meshoptimizer';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const MODELS = join(ROOT, 'public', 'models');
-const OUT = join(MODELS, 'dressing');
+/**
+ * Where the raw downloads live, and deliberately not under `public/`.
+ *
+ * Vite copies the whole of `public/` into `dist/` verbatim, so while the sources
+ * sat there this script's entire purpose was being undone one directory up: the
+ * build shipped 818 MB, of which 784 MB was raw scan geometry that no frame
+ * draws and no URL points at. Only the six directories the runtime actually
+ * fetches — the ship, the buoy, the barrel, the two silhouette rocks, and
+ * `dressing/` — are left in `public/`.
+ */
+const MODELS = join(ROOT, 'assets', 'source', 'models');
+const OUT = join(ROOT, 'public', 'models', 'dressing');
 
 const FORCE = process.argv.includes('--force');
+/**
+ * Bare arguments narrow the build to the slugs containing them, which is what
+ * makes tuning a budget a ten-second loop instead of a four-minute one.
+ */
+const ONLY = process.argv.slice(2).filter((a) => !a.startsWith('--'));
+
+/**
+ * What counts as a scan's ground plate. See `stripGroundPlate`.
+ *
+ * Measured, not guessed: across the three trees the plate components run 0.07 to
+ * 0.12 m thick over footprints of 0.25 to 1.57 m — a thickness-to-footprint
+ * ratio between 0.05 and 0.28 — and every one of them bottoms out within a
+ * centimetre of the model's base. The nearest *legitimate* geometry is a low
+ * limb on a windswept scan at 0.53 x 0.12 x 0.60, which is a ratio of 0.23 and
+ * sits 2.4 cm up. The margin is thin, which is why the rule needs all three
+ * tests and why it is applied only where `ASSETS` names a `plate`.
+ */
+const PLATE_FLATNESS = 0.22;
+const PLATE_GROUNDED = 0.03;
+const PLATE_MIN_FOOTPRINT = 0.05;
 
 /**
  * Per-asset simplification ratio and texture budget.
@@ -53,40 +92,93 @@ const FORCE = process.argv.includes('--force');
  *
  * `texture` caps the longest edge. These are 1k downloads; at the distances they
  * are placed, 512 is generous and halves the payload again.
+ *
+ * Three optional keys handle the things a single ratio cannot:
+ *
+ *  - `parts` overrides the budget for the primitives whose material name
+ *    matches, because a tree is two problems in one file — see below.
+ *  - `plate` names the primitive that carries the scan's ground contact, so
+ *    `stripGroundPlate` can cut it off.
+ *  - `opaque` promotes materials that were exported `BLEND` without an alpha
+ *    channel back to `OPAQUE`.
  */
 const ASSETS = [
-  // Trees are the worst case for a simplifier and the reason these ratios are
-  // not uniform: the canopy is thousands of separate leaf cards with no shared
-  // edges between them, so most of the triangle count cannot be collapsed at
-  // all and the error bound stops the pass long before the ratio is reached.
-  // Asking for 5% and getting 12% is the simplifier refusing to shred the
-  // silhouette, which is the behaviour we want.
-  // The error bound, not the ratio, is what actually moves a tree. At 0.02 the
-  // simplifier refuses almost every collapse — the canopy is thousands of
-  // separate leaf cards with no shared edges — and `jacaranda_tree` came out at
-  // 16 MB for one background tree, two thirds of the entire shipped payload.
-  // 0.06 lets whole leaf clusters merge. It is a visible trade at arm's length
-  // and invisible at the forty metres these are actually seen from.
-  { slug: 'island_tree_01', ratio: 0.022, error: 0.06, texture: 512 },
+  // Trees are the worst case for a simplifier, and the reason is measurable
+  // rather than aesthetic. `error` is a fraction of the *mesh radius*, so on a
+  // 2.4 m canopy an error of 0.06 licenses 14 cm of deviation — and a leaf on
+  // these models is about 4 cm across. Every leaf therefore fits inside the
+  // error bound, the simplifier collapses whole leaves rather than simplifying
+  // them, and the first tree through this script came out with 2% of its canopy
+  // and the silhouette of a tree in February. The fix is not a higher ratio: it
+  // is an error bound smaller than a leaf. At 0.004 (about 1 cm) the collapses
+  // that delete leaves are refused and the ones that flatten a leaf's interior
+  // are allowed, so the canopy survives whatever ratio it is given.
+  //
+  // The ratio then buys canopy against frame time, and 0.04 is where that trade
+  // was settled: 116 trees stand on the island, so every thousand triangles of
+  // leaf is 116,000 triangles of scene. At 0.022/0.06 the canopy was 23k and
+  // the tree was bare; at 0.06/0.004 it was 64k and the island alone was seven
+  // million triangles; 0.04 is a full canopy for a little over four.
+  //
+  // The trunk has the opposite problem — one closed surface, no small features
+  // worth protecting — so it keeps the aggressive budget it always had. Hence
+  // `parts`: one file, two materials, two completely different jobs.
+  //
+  // `plate` is the other thing Poly Haven ships that a scene does not want.
+  // These are photogrammetry scans, and the scan includes the patch of ground
+  // the tree was standing on: a flat sheet welded under the trunk, which reads
+  // as a white dinner plate at the foot of every tree on the island.
   { slug: 'pachira_aquatica_01', ratio: 0.15, error: 0.012, texture: 512 },
-  { slug: 'island_tree_02', ratio: 0.03, error: 0.06, texture: 512 },
-  { slug: 'island_tree_03', ratio: 0.017, error: 0.06, texture: 512 },
-  { slug: 'jacaranda_tree', ratio: 0.008, error: 0.08, texture: 512 },
+  {
+    slug: 'island_tree_02',
+    ratio: 0.03,
+    error: 0.06,
+    texture: 512,
+    parts: [{ match: /_leaves$/, ratio: 0.04, error: 0.004 }],
+    plate: /^island_tree_02$/,
+    opaque: /_leaves$/,
+  },
+  // The jacaranda is the same problem at four times the size, and the size is
+  // what changes the arithmetic. `error` is a fraction of the mesh radius, so on
+  // an 11.8 m canopy the 1 cm tolerance the small trees need is 0.0008 — and at
+  // that tolerance the simplifier refuses almost everything and the model comes
+  // out at half a million triangles and 8.5 MB, for one background tree. What
+  // this canopy actually needs is a *ratio* bound rather than an error bound:
+  // it is the largest crown on the island and the only tree whose leaf clusters
+  // are big enough to survive being merged into each other. It is also the one
+  // tree here with no scanned ground plate under it.
+  {
+    slug: 'jacaranda_tree',
+    ratio: 0.008,
+    error: 0.08,
+    texture: 512,
+    parts: [{ match: /_leaves$/, ratio: 0.012, error: 0.006 }],
+    opaque: /_leaves$/,
+  },
   { slug: 'fern_02', ratio: 0.35, error: 0.01, texture: 512 },
   { slug: 'shrub_sorrel_01', ratio: 0.35, error: 0.01, texture: 512 },
-  { slug: 'grass_bermuda_01', ratio: 0.4, error: 0.01, texture: 512 },
+  // Ground cover is the highest instance count in the project — six hundred
+  // tufts on the island — so these are budgeted like the coral carpet is, by
+  // what the count multiplies out to rather than by how the tuft looks alone.
+  // Both also ship `alphaMode: BLEND` over a JPEG diffuse, which is the same
+  // spurious declaration the tree leaves carry: nothing to blend, and the whole
+  // kind pushed out of the opaque pass for it.
+  { slug: 'grass_medium_01', ratio: 0.12, error: 0.004, texture: 512, opaque: /^grass_medium/ },
+  { slug: 'grass_medium_02', ratio: 0.2, error: 0.004, texture: 512, opaque: /^grass_medium/ },
 
   // Coastline edges carry the shoreline's silhouette, so they keep a little more
   // than the rock masses do — a decimated edge reads as a bitten one.
   { slug: 'coast_line_01', ratio: 0.08, error: 0.01, texture: 1024 },
   { slug: 'coast_line_02', ratio: 0.08, error: 0.01, texture: 1024 },
   { slug: 'coast_land_rocks_03', ratio: 0.06, error: 0.012, texture: 1024 },
-  { slug: 'coastal_cliff_04', ratio: 0.06, error: 0.012, texture: 1024 },
-
+  // Loaded raw, straight out of `public/models`, until the LOD pass — it predates
+  // this script. It is also the single largest instanced cost in the scene:
+  // `rock_07` is placed 154 times between the island skirt and the reef, and at
+  // full detail with no LOD chain at any distance it was the one hole left in
+  // "LODs for every high-poly model".
+  { slug: 'rock_07', ratio: 0.35, error: 0.012, texture: 1024 },
   { slug: 'coast_rocks_01', ratio: 0.06, error: 0.012, texture: 1024 },
   { slug: 'coast_rocks_03', ratio: 0.06, error: 0.012, texture: 1024 },
-  { slug: 'coastal_cliff_02', ratio: 0.06, error: 0.012, texture: 1024 },
-  { slug: 'sand_rocks_small_01', ratio: 0.1, error: 0.012, texture: 512 },
 
   { slug: 'anthurium_botany_01', ratio: 0.3, error: 0.01, texture: 512 },
   { slug: 'calathea_orbifolia_01', ratio: 0.3, error: 0.01, texture: 512 },
@@ -112,7 +204,139 @@ const ASSETS = [
   { slug: 'treasure_chest', ratio: 0.3, error: 0.006, texture: 1024 },
   { slug: 'wooden_crate_01', ratio: 0.3, error: 0.008, texture: 512 },
   { slug: 'lambis_shell', ratio: 0.25, error: 0.008, texture: 512 },
+
+  // ---- The reef (Sketchfab; see the SKETCHFAB manifest in fetch-assets.mjs) --
+  //
+  // The Smithsonian's three corals are 100k-face photogrammetry of a single
+  // colony each, which is the same kind of asset as Poly Haven's rocks and takes
+  // the same kind of decimation. They are also *small* — `stylaster_coral` is
+  // 17 cm tall — because they are museum specimens; `Props` scales them to reef
+  // heads. A tighter error than the rocks get, because a coral's whole
+  // silhouette is its branching and that is exactly what a loose error eats.
+  //
+  // The budgets are set by instance count, not by how the model looks in
+  // isolation. A coral head is placed sixty to ninety times and the reef already
+  // carries ninety 15k rocks, so a 30k coral would double the scene's triangle
+  // count to add detail nobody can resolve: these are seen from five metres and
+  // up through water that has thrown away most of the contrast by ten. Three to
+  // four thousand each is what survives that, and the error bounds are small in
+  // absolute terms — a millimetre or two on a 17 cm specimen — so what is lost
+  // is surface detail rather than the branching, which is the whole silhouette.
+  { slug: 'stylaster_coral', ratio: 0.035, error: 0.01, texture: 512 },
+  { slug: 'seriatopora_coral', ratio: 0.035, error: 0.01, texture: 512 },
+  { slug: 'goniastrea_coral', ratio: 0.035, error: 0.012, texture: 512 },
+  // The carpet, and therefore the one asset here whose budget is set by how many
+  // of it there are. `Props` plants four hundred clumps of three forms each, so
+  // a thousand triangles per form is fifteen hundred thousand triangles of
+  // coral — and these are 1.5 m heads seen through water that has taken most of
+  // the contrast out by ten metres. Decimated to roughly a quarter of that: the
+  // shapes are convex blobs and tubes, which is the case simplification handles
+  // best, and the silhouette survives where an equivalent cut to the branching
+  // corals below would not.
+  { slug: 'soft_coral_set', ratio: 0.12, error: 0.01, texture: 512 },
+  // 2.5k faces for a fish 20 cm long. Nothing to decimate: `ratio: 1` keeps it
+  // whole and the entry exists for `static` and the texture budget. See
+  // `static` for why the rig goes.
+  { slug: 'emperor_angelfish', ratio: 1, error: 0.001, texture: 512, static: true },
+
+  // ---- The island's palms (Sketchfab) --------------------------------------
+  //
+  // Both replace `Remains.ts`'s procedural palm. `palm_coconut` is already
+  // game-ready at 6.6k and needs no decimation at LOD0; `palm_tall` is 27k for a
+  // 4.5 m tree, which is four times what it needs at the density it is planted.
+  // Botanical trees, replacing the two Poly Haven scans that read as dead
+  // scrub. Same two-budget treatment the scans get — the leaves need an error
+  // bound smaller than a leaf or the simplifier deletes them wholesale — and
+  // the flowers are held to the leaves' budget for the same reason.
+  //
+  // `cutOut` rather than `opaque`, which is the whole difference between these
+  // and the scans above: a scanned leaf is geometry over a JPEG and an authored
+  // one is a card over a PNG cut-out. See `cutOutFoliage`.
+  {
+    slug: 'tree_poinciana',
+    ratio: 0.05,
+    error: 0.02,
+    texture: 1024,
+    parts: [{ match: /leaf|flower/i, ratio: 0.12, error: 0.003 }],
+    cutOut: /leaf|flower/i,
+    lods: [0.3, 0.09],
+  },
+  {
+    slug: 'tree_orchid',
+    ratio: 0.06,
+    error: 0.02,
+    texture: 1024,
+    parts: [{ match: /leaf/i, ratio: 0.14, error: 0.003 }],
+    cutOut: /leaf/i,
+    lods: [0.3, 0.09],
+  },
+
+  // Closed rock, replacing the coastal facades on the island — see the note in
+  // the SKETCHFAB manifest. Decimated like the Poly Haven rocks are: one closed
+  // surface with no small features to protect takes it freely.
+  { slug: 'rock_slab_a', ratio: 0.16, error: 0.012, texture: 1024, ground: true, lods: [0.3, 0.09] },
+  { slug: 'rock_slab_b', ratio: 0.16, error: 0.012, texture: 1024, ground: true, lods: [0.3, 0.09] },
+  // `ground` matters most here: the scan rig left this one's origin 1.8 km above
+  // the rock, so without the correction every instance is placed underground.
+  { slug: 'rock_boulder', ratio: 0.12, error: 0.012, texture: 1024, ground: true, lods: [0.3, 0.09] },
+
+  { slug: 'palm_coconut', ratio: 1, error: 0.001, texture: 1024, lods: [0.4, 0.14] },
+  { slug: 'palm_tall', ratio: 0.35, error: 0.004, texture: 1024, lods: [0.4, 0.14] },
 ];
+
+/**
+ * Assets that get a LOD chain, and the ratios of each level against LOD0.
+ *
+ * Applied on top of `ASSETS` so the LOD0 budgets above stay readable as one
+ * table. Only the kinds worth the extra files are listed: a 1.4k-triangle jug
+ * has nothing to give back, and every entry here costs two more downloads and
+ * two more draw calls' worth of pipeline.
+ *
+ * The ratios are deliberately aggressive. LOD1 is what the island wears from the
+ * play area — 1.4 km away, where a 40 m cliff is fifty pixels tall — and LOD2 is
+ * for the far half of the island seen from the same place. What matters at those
+ * sizes is the silhouette and the average colour, and both survive a cut to a
+ * tenth far better than the same cut survives at arm's length.
+ */
+const LOD_RATIOS = {
+  island_tree_02: [0.3, 0.09],
+  jacaranda_tree: [0.3, 0.09],
+  pachira_aquatica_01: [0.35, 0.12],
+  anthurium_botany_01: [0.35, 0.12],
+  calathea_orbifolia_01: [0.35, 0.12],
+  fern_02: [0.4, 0.15],
+  shrub_sorrel_01: [0.4, 0.15],
+  grass_medium_01: [0.4, 0.15],
+  grass_medium_02: [0.4, 0.15],
+
+  coast_line_01: [0.25, 0.07],
+  coast_line_02: [0.25, 0.07],
+  coast_land_rocks_03: [0.25, 0.07],
+  coast_rocks_01: [0.25, 0.07],
+  coast_rocks_03: [0.25, 0.07],
+  rock_07: [0.3, 0.09],
+
+
+  ship_pinnace: [0.3, 0.1],
+  modular_wooden_pier: [0.3, 0.1],
+  modular_fort_01: [0.35, 0.12],
+  treasure_chest: [0.3, 0.1],
+  cannon_01: [0.35, 0.12],
+  wooden_barrels_01: [0.35, 0.12],
+
+  // The reef is the one place the camera gets *close* to a high instance count,
+  // so its LOD1 is gentler and there is no LOD2: a coral head is either in the
+  // patch you are swimming through or invisible in the haze, with very little in
+  // between.
+  stylaster_coral: [0.4],
+  seriatopora_coral: [0.3],
+  goniastrea_coral: [0.3],
+  soft_coral_set: [0.45],
+};
+
+for (const asset of ASSETS) {
+  if (asset.lods === undefined && LOD_RATIOS[asset.slug]) asset.lods = LOD_RATIOS[asset.slug];
+}
 
 const bytes = (n) =>
   n < 1024 * 1024 ? `${(n / 1024).toFixed(0)} KB` : `${(n / (1024 * 1024)).toFixed(1)} MB`;
@@ -133,7 +357,16 @@ async function main() {
   let failed = 0;
 
   for (const asset of ASSETS) {
-    const source = join(MODELS, asset.slug, `${asset.slug}_1k.gltf`);
+    if (ONLY.length && !ONLY.some((needle) => asset.slug.includes(needle))) continue;
+
+    // Poly Haven ships a `.gltf` plus a texture folder; Sketchfab hands back a
+    // single self-contained `.glb`. Both are just "the authoritative download"
+    // as far as this script is concerned.
+    const candidates = [
+      join(MODELS, asset.slug, `${asset.slug}_1k.gltf`),
+      join(MODELS, asset.slug, `${asset.slug}.glb`),
+    ];
+    const source = candidates.find((path) => existsSync(path)) ?? candidates[0];
     const dest = join(OUT, `${asset.slug}.glb`);
 
     if (!existsSync(source)) {
@@ -151,21 +384,98 @@ async function main() {
       const document = await io.read(source);
       const before = countTriangles(document);
 
+      // Welding first is what makes decimation work at all: an unwelded mesh
+      // has no shared edges, so every triangle is an island and the simplifier
+      // has nothing to collapse. It is also what makes `stripGroundPlate`
+      // possible, since a connected component is not a meaningful idea until
+      // the coincident vertices have been joined.
+      // Before the weld, so the welder is not asked to reconcile joint weights
+      // that are about to be deleted.
+      if (asset.static) makeStatic(document);
+
+      await document.transform(weld());
+
+      const plateTris = stripGroundPlate(document, asset);
+      simplifyParts(document, asset);
+      const opaqued = promoteToOpaque(document, asset);
+      const masked = cutOutFoliage(document, asset);
+      // Last of the geometry passes, because it measures the model: run it
+      // before `stripGroundPlate` and it would centre on a slab that is about to
+      // be cut, and before `simplifyParts` it would measure vertices that are
+      // about to move.
+      const shift = groundModel(document, asset);
+
       await document.transform(
-        // Welding first is what makes decimation work at all: an unwelded mesh
-        // has no shared edges, so every triangle is an island and the simplifier
-        // has nothing to collapse.
-        weld(),
-        simplify({ simplifier: MeshoptSimplifier, ratio: asset.ratio, error: asset.error }),
         dedup(),
         textureCompress({ targetFormat: 'webp', resize: [asset.texture, asset.texture] }),
         // After decimation, whole primitives and their materials can end up
-        // unreferenced. Pruning last means the earlier passes decide what is
-        // dead rather than this one guessing.
+        // unreferenced. Pruning before the encoder means the earlier passes
+        // decide what is dead rather than this one guessing.
         prune(),
       );
 
       const after = countTriangles(document);
+      const notes = [];
+      if (plateTris > 0) notes.push(`-${plateTris} plate tris`);
+      if (opaqued > 0) notes.push(`${opaqued} BLEND->OPAQUE`);
+      if (masked > 0) notes.push(`${masked} BLEND->MASK`);
+      if (shift) notes.push(`grounded by [${shift.map((v) => v.toFixed(2)).join(' ')}]`);
+
+      // The LOD chain branches from the finished LOD0 document, *before* it is
+      // Meshopt-encoded. Two reasons, and both were learned the hard way.
+      //
+      // Branching here rather than re-reading the source is what makes `ratio`
+      // mean what it says: a level is a fraction of the triangles that ship at
+      // LOD0, not a fraction of a 1.6-million-triangle download that a second
+      // independent decimation pass would then compound against. Re-deriving
+      // each level from the source gave `island_tree_02` a LOD1 at 9% when the
+      // table asked for 30%.
+      //
+      // Before the encoder, because encoding quantises positions to normalised
+      // int16 and simplifying quantised geometry bakes that error into every
+      // level below it.
+      for (let level = 1; level <= (asset.lods?.length ?? 0); level++) {
+        const lodDest = join(OUT, `${asset.slug}_lod${level}.glb`);
+        const lod = cloneDocument(document);
+
+        // Sloppy, not edge collapse, and this is the whole reason the LOD chain
+        // is worth having. The collapse pass that built LOD0 has already taken
+        // everything the topology will give: rerunning it here reduced every
+        // rock by four to one and every *tree* by almost nothing, because a
+        // canopy is thousands of separate leaf islands with no interior edges to
+        // collapse. `simplifySloppyPrimitive` drops the topology constraint and
+        // reduces by spatial clustering instead, which is exactly the trade a
+        // level seen from 1.4 km should be making — see its own note.
+        const ratio = asset.lods[level - 1];
+        for (const mesh of lod.getRoot().listMeshes()) {
+          for (const primitive of mesh.listPrimitives()) {
+            simplifySloppyPrimitive(primitive, ratio, 0.06);
+          }
+        }
+
+        await lod.transform(
+          // Half the texture budget per level. A tree at 1.4 km is fifty pixels
+          // tall; a 512 map on it is a mip chain nobody reads past level four.
+          textureCompress({
+            targetFormat: 'webp',
+            resize: [Math.max(64, asset.texture >> level), Math.max(64, asset.texture >> level)],
+          }),
+          prune(),
+          meshopt({ encoder: MeshoptEncoder, level: 'high' }),
+        );
+        await io.write(lodDest, lod);
+        const lodSize = statSync(lodDest).size;
+        outTotal += lodSize;
+        notes.push(`lod${level} ${countTriangles(lod).toLocaleString('en-US')}t/${bytes(lodSize)}`);
+      }
+
+      // What the header of this file always claimed happened, and did not: the
+      // encoder was registered with the I/O and the transform was never run, so
+      // every model shipped as raw float32 vertex data. `AssetLoader` has
+      // advertised the Meshopt decoder from the start, so this costs nothing at
+      // runtime and is most of why the shipped set shrank while the canopies
+      // got denser.
+      await document.transform(meshopt({ encoder: MeshoptEncoder, level: 'high' }));
       await io.write(dest, document);
 
       const sourceSize = directorySize(join(MODELS, asset.slug));
@@ -177,7 +487,8 @@ async function main() {
       console.log(
         `  build    ${asset.slug}.glb  ` +
           `${bytes(sourceSize)} -> ${bytes(destSize)}  ` +
-          `${before.toLocaleString('en-US')} -> ${after.toLocaleString('en-US')} tris`,
+          `${before.toLocaleString('en-US')} -> ${after.toLocaleString('en-US')} tris` +
+          (notes.length ? `  (${notes.join(', ')})` : ''),
       );
     } catch (error) {
       console.error(`  ERROR    ${asset.slug}: ${error instanceof Error ? error.message : error}`);
@@ -193,6 +504,364 @@ async function main() {
     console.error(`  FAILED   : ${failed}`);
     process.exitCode = 1;
   }
+}
+
+/**
+ * Strips the rig from a model that is going to be driven some other way.
+ *
+ * `emperor_angelfish` arrives skinned, with a 91-channel swim clip. Neither
+ * survives contact with this project, and not because they are bad: three.js
+ * has no skinned instancing, so a rigged fish is one draw call *per fish*, and
+ * the school this mesh joins is two hundred of them in one. `src/scene/Fish.ts`
+ * already animates a body by passing a travelling wave down it in the vertex
+ * stage — the same closed form the procedural fish use — and that costs nothing
+ * per instance. So the mesh is taken and the rig is dropped, deliberately.
+ *
+ * The bind pose is what remains, which for this model is the neutral swimming
+ * pose the mesh was authored in.
+ */
+function makeStatic(document) {
+  const root = document.getRoot();
+  for (const animation of root.listAnimations()) animation.dispose();
+  for (const skin of root.listSkins()) skin.dispose();
+  for (const node of root.listNodes()) node.setSkin(null);
+  for (const mesh of root.listMeshes()) {
+    for (const primitive of mesh.listPrimitives()) {
+      for (const semantic of ['JOINTS_0', 'WEIGHTS_0', 'JOINTS_1', 'WEIGHTS_1']) {
+        const attribute = primitive.getAttribute(semantic);
+        if (attribute) primitive.setAttribute(semantic, null);
+      }
+    }
+  }
+}
+
+/**
+ * The budget that applies to one primitive: the asset's, unless a `parts` rule
+ * claims its material by name.
+ */
+function budgetFor(asset, primitive) {
+  const name = primitive.getMaterial()?.getName() ?? '';
+  const override = (asset.parts ?? []).find((part) => part.match.test(name));
+  return override ?? asset;
+}
+
+/**
+ * Decimates every primitive against its own budget.
+ *
+ * `simplify()` is a document-wide transform and takes one ratio, which is the
+ * right shape for a rock and the wrong one for a tree: the same call has to
+ * flatten a trunk hard and barely touch a canopy. Driving `simplifyPrimitive`
+ * directly is the whole difference — see the note on `error` in `ASSETS`.
+ */
+function simplifyParts(document, asset) {
+  for (const mesh of document.getRoot().listMeshes()) {
+    for (const primitive of mesh.listPrimitives()) {
+      const budget = budgetFor(asset, primitive);
+      simplifyPrimitive(primitive, {
+        simplifier: MeshoptSimplifier,
+        ratio: budget.ratio,
+        error: budget.error,
+      });
+    }
+  }
+}
+
+/**
+ * Decimates a primitive with meshopt's *sloppy* simplifier.
+ *
+ * The reason this exists is visible in the build log without it: the LOD chain
+ * reduced every rock by four to one and every tree by almost nothing —
+ * `island_tree_02` went 53,185 -> 46,324 -> 44,089, and `jacaranda_tree` moved
+ * by thirty-four triangles across two levels. That is not the ratio being
+ * ignored; it is edge collapse doing what it is defined to do. A canopy is
+ * thousands of separate leaf islands with no shared edges between them, so there
+ * are almost no interior edges to collapse, and the simplifier correctly refuses
+ * to weld two leaves that merely happen to be adjacent in space.
+ *
+ * `simplifySloppy` drops the topology constraint entirely and reduces by spatial
+ * clustering instead. It is the wrong tool for LOD0 — it does not preserve
+ * boundaries, UV seams or the silhouette exactly — and the right one for a level
+ * that exists to be seen from 1.4 km, which is the trade every game foliage
+ * pipeline makes. It is used *only* for LOD levels; LOD0 is untouched.
+ */
+function simplifySloppyPrimitive(primitive, ratio, error) {
+  const position = primitive.getAttribute('POSITION');
+  const indices = primitive.getIndices();
+  if (!position || !indices) return;
+
+  const count = indices.getCount();
+  const target = Math.max(3, Math.floor((count * ratio) / 3) * 3);
+  if (target >= count) return;
+
+  // `weld` leaves POSITION tightly packed float32, but the accessor is free not
+  // to be, and handing meshopt a view over the wrong stride is silent garbage.
+  let positions = position.getArray();
+  if (!(positions instanceof Float32Array) || positions.length !== position.getCount() * 3) {
+    positions = new Float32Array(position.getCount() * 3);
+    const element = [0, 0, 0];
+    for (let i = 0; i < position.getCount(); i++) {
+      position.getElement(i, element);
+      positions.set(element, i * 3);
+    }
+  }
+
+  const source = new Uint32Array(count);
+  for (let i = 0; i < count; i++) source[i] = indices.getScalar(i);
+
+  // `null` is the vertex-lock mask: nothing here needs its border pinned, and
+  // the argument sits between the stride and the target, so omitting it silently
+  // passes the target as a lock and trips an assertion rather than a type error.
+  const [simplified] = MeshoptSimplifier.simplifySloppy(source, positions, 3, null, target, error);
+  if (simplified.length >= 3) indices.setArray(simplified);
+}
+
+/**
+ * Cuts the scan's ground contact off the bottom of a model.
+ *
+ * Poly Haven's trees are photogrammetry, and a photogrammetry capture of a tree
+ * includes the ground the tree was standing on: a flat sheet of scanned dirt
+ * welded under the trunk, roughly a metre across on `island_tree_02`. Planted on
+ * a hillside it reads as a white dinner plate at the foot of every tree, which
+ * is one of the things that made the island look like objects sprinkled on a
+ * dome rather than a place.
+ *
+ * Detection is by connected component rather than by a height-and-normal rule,
+ * because the plate genuinely *is* a separate surface — the trunk does not share
+ * an edge with it — and a rule stated in heights would have to be retuned per
+ * asset and would still catch the low limbs that a windswept scan rests on the
+ * ground. A component qualifies when it is flat (its height is under a quarter
+ * of its footprint), grounded (its lowest point is within 3% of the model's
+ * height of the model's own base) and broad enough to be scenery rather than a
+ * leaf. Deleting it leaves the trunk open at the bottom, which is invisible:
+ * `Props` seats trees with `sink`, so the cut is buried.
+ *
+ * Returns the number of triangles removed, so the build log can show it.
+ */
+function stripGroundPlate(document, asset) {
+  if (!asset.plate) return 0;
+  let removed = 0;
+
+  for (const mesh of document.getRoot().listMeshes()) {
+    for (const primitive of mesh.listPrimitives()) {
+      if (!asset.plate.test(primitive.getMaterial()?.getName() ?? '')) continue;
+
+      const indices = primitive.getIndices();
+      const position = primitive.getAttribute('POSITION');
+      if (!indices || !position) continue;
+
+      const count = indices.getCount();
+      const parent = new Int32Array(position.getCount());
+      for (let i = 0; i < parent.length; i++) parent[i] = i;
+      const find = (x) => {
+        while (parent[x] !== x) {
+          parent[x] = parent[parent[x]];
+          x = parent[x];
+        }
+        return x;
+      };
+      const union = (a, b) => {
+        const ra = find(a);
+        const rb = find(b);
+        if (ra !== rb) parent[rb] = ra;
+      };
+      for (let i = 0; i < count; i += 3) {
+        union(indices.getScalar(i), indices.getScalar(i + 1));
+        union(indices.getScalar(i + 1), indices.getScalar(i + 2));
+      }
+
+      // Bounds per component, and the model's own base, in one pass.
+      const components = new Map();
+      const element = [0, 0, 0];
+      let baseY = Infinity;
+      let topY = -Infinity;
+      for (let i = 0; i < count; i += 3) {
+        const root = find(indices.getScalar(i));
+        let box = components.get(root);
+        if (!box) {
+          box = { tris: 0, min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+          components.set(root, box);
+        }
+        box.tris += 1;
+        for (let k = 0; k < 3; k++) {
+          position.getElement(indices.getScalar(i + k), element);
+          for (let d = 0; d < 3; d++) {
+            if (element[d] < box.min[d]) box.min[d] = element[d];
+            if (element[d] > box.max[d]) box.max[d] = element[d];
+          }
+        }
+        if (box.min[1] < baseY) baseY = box.min[1];
+        if (box.max[1] > topY) topY = box.max[1];
+      }
+
+      const height = topY - baseY;
+      const doomed = new Set();
+      for (const [root, box] of components) {
+        const footprint = Math.max(box.max[0] - box.min[0], box.max[2] - box.min[2]);
+        const thickness = box.max[1] - box.min[1];
+        if (
+          thickness < PLATE_FLATNESS * footprint &&
+          box.min[1] < baseY + PLATE_GROUNDED * height &&
+          footprint > PLATE_MIN_FOOTPRINT * height
+        ) {
+          doomed.add(root);
+        }
+      }
+      if (doomed.size === 0) continue;
+
+      const kept = [];
+      for (let i = 0; i < count; i += 3) {
+        if (doomed.has(find(indices.getScalar(i)))) {
+          removed += 1;
+          continue;
+        }
+        kept.push(indices.getScalar(i), indices.getScalar(i + 1), indices.getScalar(i + 2));
+      }
+      // The orphaned vertices stay in the buffer until `prune` sweeps them.
+      indices.setArray(new Uint32Array(kept));
+    }
+  }
+
+  return removed;
+}
+
+/**
+ * Promotes `BLEND` materials that have no alpha to blend with back to `OPAQUE`.
+ *
+ * Every one of these trees declares its leaves `alphaMode: BLEND`, and every one
+ * of them supplies the leaf colour as a **JPEG** — a format with no alpha
+ * channel at all — with a base colour factor of 1. There is therefore nothing
+ * for the blend to do, and the declaration is pure cost: `GLTFLoader` maps
+ * `BLEND` to `transparent = true`, which moves the whole canopy out of the
+ * opaque pass into the sorted one, where an instanced mesh is sorted as a single
+ * object and the leaves of one tree cannot resolve against the leaves of the
+ * next.
+ *
+ * Narrow on purpose. It only fires for materials the asset names, and it is not
+ * an alpha-test conversion: these leaves are modelled geometry rather than cut
+ * cards, so testing an absent alpha at 0.5 would erase them.
+ */
+function promoteToOpaque(document, asset) {
+  if (!asset.opaque) return 0;
+  let promoted = 0;
+  for (const material of document.getRoot().listMaterials()) {
+    if (!asset.opaque.test(material.getName())) continue;
+    if (material.getAlphaMode() !== 'BLEND') continue;
+    material.setAlphaMode('OPAQUE');
+    promoted += 1;
+  }
+  return promoted;
+}
+
+/**
+ * Turns `BLEND` foliage into alpha-tested `MASK` foliage.
+ *
+ * The opposite case to `promoteToOpaque`, and the reason both exist: whether a
+ * `BLEND` declaration is spurious depends entirely on whether there is an alpha
+ * channel behind it. Poly Haven's scans model each leaf as geometry over a JPEG,
+ * so the blend does nothing and `OPAQUE` is free. The botanical trees model
+ * their leaves as *cards* over a PNG cut-out, so the alpha is the leaf shape —
+ * promote those to opaque and every tree grows rectangles.
+ *
+ * `MASK` is what a cut-out card actually wants. `BLEND` costs it depth writes,
+ * which is what makes a canopy of instanced cards sort against itself at all:
+ * without them three.js sorts the whole `InstancedMesh` as one object, so the
+ * leaves of the near tree draw behind the leaves of the far one and the canopy
+ * turns inside out as the camera moves. It also costs the shadow: a transparent
+ * material is skipped by the depth pass, so a `BLEND` canopy casts the shadow of
+ * its branches and nothing else. Alpha testing keeps both and is cheaper.
+ *
+ * The cutoff is 0.35 rather than 0.5 because these leaves are photographed with
+ * soft edges — at 0.5 the outline erodes by a pixel or two all round, which on
+ * a compound leaf is most of the leaflet.
+ */
+function cutOutFoliage(document, asset) {
+  if (!asset.cutOut) return 0;
+  let converted = 0;
+  for (const material of document.getRoot().listMaterials()) {
+    if (!asset.cutOut.test(material.getName())) continue;
+    if (material.getAlphaMode() !== 'BLEND') continue;
+    material.setAlphaMode('MASK');
+    material.setAlphaCutoff(asset.cutOutAt ?? 0.35);
+    converted += 1;
+  }
+  return converted;
+}
+
+/**
+ * Moves a model so it stands on y = 0, centred on x and z.
+ *
+ * `Props` places every instance by putting the model's origin on the terrain, so
+ * where the origin sits inside the model is not a detail — it *is* the placement.
+ * Most sources put it under the trunk or the base and this pass is a no-op for
+ * them. Sketchfab's `rock_boulder` puts it 1.8 **kilometres** above the rock,
+ * which is the author's scan rig showing through, and an instance of it lands
+ * that far underground.
+ *
+ * The correction goes into the scene's root nodes rather than into the vertex
+ * data, so it survives quantisation exactly and costs nothing: a translation on
+ * a node is a translation on a node whatever the accessor beneath it is stored
+ * as.
+ */
+function groundModel(document, asset) {
+  if (!asset.ground) return null;
+
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  const element = [0, 0, 0];
+
+  const visit = (node, matrix) => {
+    const world = multiply(matrix, node.getMatrix());
+    const mesh = node.getMesh();
+    if (mesh) {
+      for (const primitive of mesh.listPrimitives()) {
+        const position = primitive.getAttribute('POSITION');
+        if (!position) continue;
+        for (let i = 0; i < position.getCount(); i++) {
+          position.getElement(i, element);
+          for (let d = 0; d < 3; d++) {
+            const v =
+              world[d] * element[0] + world[4 + d] * element[1] + world[8 + d] * element[2] + world[12 + d];
+            if (v < min[d]) min[d] = v;
+            if (v > max[d]) max[d] = v;
+          }
+        }
+      }
+    }
+    for (const child of node.listChildren()) visit(child, world);
+  };
+
+  const roots = [];
+  for (const scene of document.getRoot().listScenes()) {
+    for (const node of scene.listChildren()) {
+      roots.push(node);
+      visit(node, IDENTITY);
+    }
+  }
+  if (!Number.isFinite(min[1])) return null;
+
+  const shift = [-(min[0] + max[0]) / 2, -min[1], -(min[2] + max[2]) / 2];
+  if (Math.hypot(...shift) < 1e-4) return null;
+
+  for (const node of roots) {
+    const t = node.getTranslation();
+    node.setTranslation([t[0] + shift[0], t[1] + shift[1], t[2] + shift[2]]);
+  }
+  return shift;
+}
+
+const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+/** Column-major 4x4 multiply, matching glTF's node matrices. */
+function multiply(a, b) {
+  const out = new Array(16).fill(0);
+  for (let c = 0; c < 4; c++) {
+    for (let r = 0; r < 4; r++) {
+      let sum = 0;
+      for (let k = 0; k < 4; k++) sum += a[k * 4 + r] * b[c * 4 + k];
+      out[c * 4 + r] = sum;
+    }
+  }
+  return out;
 }
 
 function countTriangles(document) {

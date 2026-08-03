@@ -64,6 +64,41 @@ const RUDDER_REFERENCE_SPEED = 5.5;
 /** Yaw damping, N·m per (rad/s). Stops a turn winding up. */
 const YAW_DAMPING = 5_600_000;
 
+/**
+ * Where the hull stops, and why it is a depth rather than a fence.
+ *
+ * A viewer could sail the ship up the beach and onto the island. The obvious fix
+ * is a circle around the island the hull may not enter, and it is the wrong one
+ * twice over: it is invisible in a world that otherwise explains itself, and it
+ * is a *circle* on a coastline that is deliberately not one — the shore runs from
+ * 0.70 to 1.25 of `ISLAND.radius` by bearing, so any single radius is either well
+ * out to sea on the bays or inland on the headland. It would also do nothing
+ * about the reef, which is the other place a hull has no business being.
+ *
+ * So the boundary is the seabed. `dutch_ship_medium` floats with about 3.4 m
+ * under her, and a hull is in trouble well before the keel touches: 7 m is where
+ * a ship this size starts sounding and turning away, which is the behaviour to
+ * reproduce. Below that the water pushes back, and it pushes *down the depth
+ * gradient* — toward deeper water, whichever way that happens to be — so the same
+ * rule works on the beach, on the reef and on the spit without knowing about any
+ * of them.
+ */
+const SHOAL_DEPTH = 7;
+/** Depth at which the push is at full strength and thrust is fully cut. */
+const SHOAL_HARD_DEPTH = 3.6;
+/**
+ * Peak force pushing the hull off a shoal, N.
+ *
+ * Comfortably more than `MAX_THRUST`, and it has to be: a boundary a player can
+ * out-power by holding W is not a boundary, it is a suggestion. Applied as a
+ * ramp rather than a wall so a hull that drifts into the shallows is turned
+ * rather than stopped dead, which is what makes it read as water shoaling
+ * instead of as a collision.
+ */
+const SHOAL_FORCE = 5_600_000;
+/** Metres between the samples the depth gradient is taken from. */
+const SHOAL_PROBE = 12;
+
 export interface ShipControlState {
   /** -1 (full astern) … 1 (full ahead). */
   throttle: number;
@@ -97,8 +132,19 @@ export class ShipController {
   private readonly force = new THREE.Vector3();
   private readonly torque = new THREE.Vector3();
 
-  constructor(body: BuoyantBody) {
+  /**
+   * Seabed elevation at a world xz, or `null` to disable the shoal boundary.
+   *
+   * Injected rather than imported so the physics layer keeps knowing nothing
+   * about the scene: this is `Seafloor`'s own CPU heightfield, the same field the
+   * floor mesh is displaced by and the props are placed on, so the hull is
+   * turned away by exactly the sand a viewer can see.
+   */
+  private readonly floorHeight: ((x: number, z: number) => number) | null;
+
+  constructor(body: BuoyantBody, floorHeight: ((x: number, z: number) => number) | null = null) {
     this.body = body;
+    this.floorHeight = floorHeight;
 
     const { signal } = this.abort;
     window.addEventListener('keydown', this.onKeyDown, { signal });
@@ -258,6 +304,58 @@ export class ShipController {
 
     this.torque.set(0, steer + damping, 0);
     this.body.externalTorque.copy(this.torque);
+
+    this.applyShoal();
+  }
+
+  /**
+   * Turns the hull away from shoaling water, and cuts her thrust in it.
+   *
+   * The direction is the negated horizontal gradient of the seabed, which points
+   * downhill — toward deeper water — by construction. Central differences over
+   * `SHOAL_PROBE`, which is about a hull length: a finer probe reads the ripples
+   * in the relief rather than the slope of the shore, and steers the ship along
+   * the sand ridges instead of off them.
+   */
+  private applyShoal(): void {
+    if (!this.floorHeight) return;
+
+    const { x, z } = this.body.object.position;
+    const floor = this.floorHeight(x, z);
+    const depth = -floor;
+    if (depth >= SHOAL_DEPTH) return;
+
+    const strength = Math.min(
+      1,
+      Math.max(0, (SHOAL_DEPTH - depth) / (SHOAL_DEPTH - SHOAL_HARD_DEPTH)),
+    );
+
+    const dx = this.floorHeight(x + SHOAL_PROBE, z) - this.floorHeight(x - SHOAL_PROBE, z);
+    const dz = this.floorHeight(x, z + SHOAL_PROBE) - this.floorHeight(x, z - SHOAL_PROBE);
+    const length = Math.hypot(dx, dz);
+
+    // On genuinely flat ground the gradient is degenerate and there is no
+    // "deeper" to point at. Falling back to pushing the hull back the way she
+    // came is not a guess about the terrain — it is the one direction that is
+    // certainly navigable, because she was just there.
+    if (length < 1e-4) {
+      const speed = this.body.velocity.length();
+      if (speed > 1e-3) {
+        this.force.copy(this.body.velocity).multiplyScalar(-SHOAL_FORCE * strength / speed);
+        this.force.y = 0;
+        this.body.externalForce.add(this.force);
+      }
+    } else {
+      this.force.set(-dx / length, 0, -dz / length).multiplyScalar(SHOAL_FORCE * strength);
+      this.body.externalForce.add(this.force);
+    }
+
+    // And take the engine off her. Without this the boundary is a tug of war the
+    // player can feel; with it, running aground simply does not work.
+    this.body.externalForce.addScaledVector(
+      this.forward,
+      -Math.max(0, this.throttle) * MAX_THRUST * strength,
+    );
   }
 
   /** Live state, for the HUD and for tests. */

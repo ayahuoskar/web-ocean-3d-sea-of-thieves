@@ -948,3 +948,80 @@ body {
     scroll-behavior: auto !important;
   }
 }
+
+/* ==========================================================================
+   Storm quote
+   A single line over the sea when the viewer takes the helm in heavy weather.
+   ========================================================================== */
+
+.quote {
+  position: absolute;
+  /* Centred horizontally, and on the upper third vertically rather than the
+     middle: the hull sits low in frame in chase mode, and a line across the
+     centre would land on it. The upper third is where a title card goes. */
+  inset: 0;
+  display: grid;
+  place-items: start center;
+  padding-top: 22vh;
+  pointer-events: none;
+  opacity: 0;
+  /* Transformed as well as faded. A pure opacity fade reads as a UI element
+     appearing; a few pixels of rise reads as something arriving, which is the
+     difference between a notification and a moment. */
+  transform: translateY(14px);
+  transition:
+    opacity 1.6s cubic-bezier(0.22, 0.61, 0.36, 1),
+    transform 1.6s cubic-bezier(0.22, 0.61, 0.36, 1);
+  z-index: 5;
+}
+
+/* `#ui-root > *` above opts every direct child back into hit-testing, and this
+   one must not be. The quote is a full-viewport `inset: 0` box, so at `auto` it
+   sits over the entire application and swallows every pointer event in it — the
+   on-screen throttle underneath it, and the canvas drag underneath that. The
+   `.quote` rule already asks for `pointer-events: none` and loses on
+   specificity: (0,1,0) against the id selector's (1,0,0). This restates it at
+   (1,1,0) so it wins, rather than reaching for `!important`.
+
+   Caught by the touch-control test, which is the only test in the suite that
+   dispatches a real pointer gesture rather than driving state directly — every
+   other interaction test would have passed with the whole UI inert. */
+#ui-root > .quote {
+  pointer-events: none;
+}
+
+.quote--on {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.quote__line {
+  margin: 0;
+  max-width: min(90vw, 44ch);
+  text-align: center;
+  font-family: Georgia, 'Iowan Old Style', 'Palatino Linotype', Palatino, 'Times New Roman', serif;
+  /* Serif, and deliberately not the UI stack. The panel and the HUD are
+     instrumentation and read as software; this is the only text in the project
+     that is *voice*, and setting it in the same face as the frame-rate counter
+     would make it read as one more readout. */
+  font-size: clamp(1.4rem, 3.1vw, 2.85rem);
+  font-weight: 400;
+  font-style: italic;
+  line-height: 1.28;
+  letter-spacing: 0.012em;
+  color: #f4f8fc;
+  /* Two shadows doing two jobs: a tight dark one for legibility against a
+     bright whitecap, and a wide soft one that lifts the line off the water
+     without turning into a glow. The sea underneath is high-contrast and moving,
+     so a single shadow is not enough to hold the text at any one moment. */
+  text-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.72),
+    0 6px 34px rgba(0, 10, 22, 0.6);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quote {
+    transform: none;
+    transition: opacity 0.4s linear;
+  }
+}

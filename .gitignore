@@ -3,6 +3,11 @@ dist/
 .vite/
 *.local
 
+# Sketchfab API token. `scripts/fetch-assets.mjs` reads it from
+# SKETCHFAB_API_TOKEN or from this file; it is a personal credential and must
+# never be committed. See the Sketchfab section of ASSET_LICENSES.md.
+sketchfab-token
+
 # Playwright
 test-results/
 playwright-report/
@@ -20,39 +25,24 @@ reference/shots/
 
 # Raw asset downloads for the scene dressing.
 #
-# `scripts/fetch-assets.mjs` pulls Poly Haven's film-quality source — 177 MB of
-# it — and `scripts/optimize-assets.mjs` decimates and Meshopt-encodes that into
-# `public/models/dressing/*.glb`, which is what ships and what is committed. Both
-# steps are reproducible, so the source has no business in the history: keeping
-# it would multiply the repository by twelve to store geometry no frame draws.
+# `scripts/fetch-assets.mjs` pulls Poly Haven's and Sketchfab's film-quality
+# source — 555 MB of it — and `scripts/optimize-assets.mjs` decimates and
+# Meshopt-encodes that into `public/models/dressing/*.glb`, which is what ships
+# and what is committed. Both steps are reproducible, so the source has no
+# business in the history: keeping it would multiply the repository by fifteen to
+# store geometry no frame draws.
 #
-# The five models below this block predate the optimiser and are still committed
-# raw. They are small, and re-cutting their load paths would be churn for no
-# payload win.
-public/models/coast_rocks_01/
-public/models/coast_rocks_03/
-public/models/coastal_cliff_02/
-public/models/sand_rocks_small_01/
-public/models/island_tree_01/
-public/models/pachira_aquatica_01/
-public/models/fern_02/
-public/models/shrub_sorrel_01/
-public/models/grass_bermuda_01/
-public/models/anthurium_botany_01/
-public/models/calathea_orbifolia_01/
-public/models/ship_pinnace/
-public/models/modular_wooden_pier/
-public/models/cannon_01/
-public/models/wooden_barrels_01/
-public/models/wooden_lantern_01/
-public/models/wooden_crate_02/
-public/models/treasure_chest/
-public/models/wooden_crate_01/
-public/models/lambis_shell/
+# It lives outside `public/` for a second reason. Vite copies `public/` into
+# `dist/` verbatim, so while these sat there the optimiser was being undone one
+# directory up and the build shipped 818 MB. `public/models/` now holds only what
+# a URL points at: the ship, the buoy, the barrel, the two silhouette rocks, and
+# the `dressing/` outputs.
+#
+# Re-fetching the Sketchfab half needs a personal API token, so a contributor
+# without one still gets a working build from the committed outputs.
+assets/source/
 
-# The jacaranda source is the worst offender of the lot: 199 MB of raw geometry
-# in one `.bin`, which is past GitHub's 100 MB per-file ceiling and so cannot be
-# pushed at all. `public/models/dressing/jacaranda_tree.glb` — the 3 MB decimated
-# cut that the scene actually loads — stays committed, and `fetch-assets.mjs`
-# re-downloads this source whenever the optimiser needs to run again.
-public/models/jacaranda_tree/
+# Scratch space for `scripts/modelkit/sketchfab.mjs get`, which lands a candidate
+# here so `inspect`/`shells`/`plates` and the viewer can be pointed at it before
+# anyone decides whether it is worth a manifest entry. Nothing here ships.
+public/models/_preview/

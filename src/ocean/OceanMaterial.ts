@@ -9,6 +9,7 @@ import {
   normalize,
   positionLocal,
   positionWorld,
+  sin,
   dFdx,
   dFdy,
   screenUV,
@@ -297,6 +298,10 @@ export class OceanMaterial {
   private readonly uSlopeAnisotropy = uniform(1.9);
   private readonly uFoamThreshold = uniform(DEFAULT_APPEARANCE.foamThreshold);
   private readonly uFoamSoftness = uniform(DEFAULT_APPEARANCE.foamSoftness);
+  /** Seconds, for the travelling sets in the shore break. See `setSurf`. */
+  private readonly uSurfPhase = uniform(0);
+  /** How strongly the shore break draws, 0..1. */
+  private readonly uSurfStrength = uniform(1);
 
   // --- environment ---------------------------------------------------------
   private readonly uSunDirection = uniform(new THREE.Vector3(0.4, 0.5, 0.3).normalize());
@@ -458,6 +463,18 @@ export class OceanMaterial {
    * hard-coding it is what lets a glassy dusk have a round highlight and a gale
    * have a long one.
    */
+  /**
+   * Drives the shore break: a clock for the travelling sets, and a master.
+   *
+   * Separate from `setRain`, which also carries a clock, because the two are
+   * unrelated media and sharing a uniform between them is how a rain slider ends
+   * up freezing the surf.
+   */
+  setSurf(phase: number, strength = 1): void {
+    this.uSurfPhase.value = phase;
+    this.uSurfStrength.value = Math.max(0, strength);
+  }
+
   setWind(bearingRadians: number, speed: number): void {
     const axis = this.uWindAxis.value as THREE.Vector2;
     axis.set(Math.cos(bearingRadians), Math.sin(bearingRadians));
@@ -1404,7 +1421,78 @@ export class OceanMaterial {
       // it — but it only covers a 420 m square around the camera. Past that the
       // instantaneous mask is all there is, so it is faded in exactly as the
       // buffer's own edge fades out and the two never overlap.
-      const foamMask = accumulated.max(crestFoam.mul(buffered.oneMinus())).toVar();
+      // --- shore break ---------------------------------------------------------
+      //
+      // The single largest thing missing from the shoreline: waves arrived at the
+      // beach and simply stopped, with no surf at all, because every foam term
+      // above is driven by the *surface* — the Jacobian fold and the wake buffer
+      // — and neither knows the seabed is there. A wave does not break because it
+      // steepened; it breaks because it ran out of water.
+      //
+      // So this is driven by depth. Three things have to be right, and the first
+      // attempt got only the first of them.
+      //
+      // **Where it breaks.** McCowan's criterion puts the break where the depth
+      // falls to about 1.3 wave heights, so the surf line walks seaward as the
+      // sea gets up — which is what makes a shore read as the same shore in a
+      // calm and in a blow. The wave height to use is *not* `uWaveScale`: that is
+      // Pierson-Moskowitz significant height for a fully developed sea, which at
+      // this preset's 15 m/s is 5.5 m, and 1.3 times that put the break line in
+      // eight metres of water. The whole lagoon came out solid white. What breaks
+      // on a beach is the swell that reaches it, which here is nearer 1.5 m, so
+      // the height is taken as a fraction of the sea state rather than as the
+      // sea state.
+      //
+      // **That it is a band, not a region.** Everything shallower than the break
+      // depth is not white; the strip *at* the break is. A parabola in normalised
+      // depth peaks a third of the way in and returns to zero at both ends, which
+      // gives a line of white with clear water outside it and a lull behind it.
+      //
+      // **That it has gaps.** Real surf arrives in groups — the spectrum is
+      // narrow-banded, so the envelope beats and the beach gets three or four big
+      // ones and then a lull. Without that the surf line is a static ribbon,
+      // which is the other half of why a foam contour reads as painted.
+      const surf = float(0).toVar();
+      if (floorDepth !== null) {
+        const seabed = floorDepth(worldPos).max(0).toVar();
+        const swell = this.uWaveScale.mul(0.26).add(0.55).toVar();
+        const breakDepth = swell.mul(1.3).toVar();
+
+        // Normalised depth through the surf zone, 1 at the break line.
+        const band = seabed.div(breakDepth.max(0.2)).clamp(0, 1).toVar();
+        // Parabola: 0 at the sand, 0 at the break line, 1 between them. Skewed
+        // shoreward by the exponent so the white sits inside the break rather
+        // than straddling it, which is where broken water actually is.
+        const bore = band.oneMinus().mul(band.mul(2.6).min(1)).mul(1.9).clamp(0, 1).toVar();
+
+        // The swash: the strip that is never dry. Narrow, and separate from the
+        // bore because it has to survive when the surf is quiet — a beach with no
+        // line of white at the water's edge reads as a texture boundary, which is
+        // exactly how this one read.
+        const swash = smoothstepDownClamped(seabed, 0, swell.mul(0.42)).toVar();
+
+        // Sets, travelling shoreward along the wind axis. Two harmonics at
+        // incommensurate wavelengths so the pattern does not visibly repeat, and
+        // a low floor so the lulls are real gaps rather than a dimming.
+        const along = worldPos.xz.dot(this.uWindAxis).toVar();
+        const setA = sin(along.mul(0.026).sub(this.uSurfPhase.mul(0.62))).toVar();
+        const setB = sin(along.mul(0.0111).sub(this.uSurfPhase.mul(0.34))).toVar();
+        const sets = setA.mul(0.4).add(setB.mul(0.3)).add(0.44).clamp(0, 1).toVar();
+
+        // The same breakup noise the crest foam uses, so surf and whitecaps are
+        // made of the same bubbles and the join between them is invisible.
+        surf.assign(
+          bore
+            .mul(sets)
+            .max(swash.mul(0.7))
+            .add(perturb.mul(0.3))
+            .smoothstep(0.3, 0.78)
+            .clamp(0, 1)
+            .mul(this.uSurfStrength),
+        );
+      }
+
+      const foamMask = accumulated.max(crestFoam.mul(buffered.oneMinus())).max(surf).toVar();
 
       // Foam is lit, not painted.
       //

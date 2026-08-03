@@ -1,0 +1,89 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>modelkit viewer</title>
+    <style>
+      body { margin: 0; background: #202428; }
+      canvas { display: block; }
+      #label { position: fixed; left: 8px; top: 6px; color: #eee; font: 13px monospace; z-index: 5; }
+    </style>
+    <script type="importmap">
+      { "imports": {
+          "three": "/node_modules/three/build/three.module.js",
+          "three/addons/": "/node_modules/three/examples/jsm/"
+      } }
+    </script>
+  </head>
+  <body>
+    <div id="label"></div>
+    <script type="module">
+      import * as THREE from 'three';
+      import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+      import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+      import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.setPixelRatio(1);
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.1;
+      document.body.appendChild(renderer.domElement);
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x2a3138);
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+      scene.add(new THREE.DirectionalLight(0xffffff, 2.2).translateX(3).translateY(5).translateZ(2));
+      scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+
+      const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.01, 5000);
+      const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+      const root = new THREE.Group();
+      scene.add(root);
+
+      const grid = new THREE.GridHelper(10, 20, 0x666666, 0x3a3a3a);
+      scene.add(grid);
+
+      let yaw = 0, pitch = 0.2, dist = 5;
+      const target = new THREE.Vector3();
+
+      window.loadModel = async (url, opts = {}) => {
+        root.clear();
+        const gltf = await loader.loadAsync(url);
+        const obj = opts.onlyNode ? (gltf.scene.getObjectByName(opts.onlyNode) ?? gltf.scene) : gltf.scene;
+        root.add(obj);
+        root.updateMatrixWorld(true);
+        let tris = 0;
+        root.traverse((m) => { if (m.isMesh) tris += (m.geometry.index ? m.geometry.index.count : m.geometry.attributes.position.count) / 3; });
+        const box = new THREE.Box3().setFromObject(root);
+        const size = box.getSize(new THREE.Vector3());
+        box.getCenter(target);
+        dist = Math.max(size.x, size.y, size.z) * (opts.zoom ?? 1.9);
+        grid.scale.setScalar(Math.max(size.x, size.z) / 10 * 1.6 || 1);
+        grid.position.y = box.min.y;
+        window.__info = {
+          size: [+size.x.toFixed(3), +size.y.toFixed(3), +size.z.toFixed(3)],
+          yMin: +box.min.y.toFixed(3), tris: Math.round(tris),
+        };
+        document.getElementById('label').textContent =
+          `${url}  ${window.__info.size.join(' x ')}  yMin=${window.__info.yMin}  ${window.__info.tris} tris`;
+        return window.__info;
+      };
+
+      window.setView = (a, elev = 0.2) => { yaw = a; pitch = elev; };
+      window.setGrid = (v) => { grid.visible = v; };
+
+      renderer.setAnimationLoop(() => {
+        camera.position.set(
+          target.x + Math.sin(yaw) * Math.cos(pitch) * dist,
+          target.y + Math.sin(pitch) * dist,
+          target.z + Math.cos(yaw) * Math.cos(pitch) * dist,
+        );
+        camera.lookAt(target);
+        renderer.render(scene, camera);
+      });
+      window.__ready = true;
+    </script>
+  </body>
+</html>

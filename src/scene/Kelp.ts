@@ -140,7 +140,8 @@ const REGION_PLATEAU = 1;
  *
  * That is not a hypothetical robustness argument. Between one revision and the
  * next the island's radius went from 260 m to 500 m, its summit from 30 m to
- * 72 m, and its coastline from a circle to a bay, a headland and a spit — and
+ * 72 m and then to 150 m, and its coastline from a circle to a bay, a headland
+ * and a spit — and
  * the only thing that had to change here was this bracket, because everything
  * downstream reads the heightfield rather than a coordinate. On the shape as it
  * now stands the mean waterline sits at about one radius and the accepted sites

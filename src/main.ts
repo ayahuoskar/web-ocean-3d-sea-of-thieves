@@ -6,13 +6,15 @@ import {
   AssetLoader,
   Birds,
   FishSchool,
+  loadReefFish,
+  IslandCanopy,
+  IslandMeadow,
   KelpForest,
-  Palms,
   Props,
   Remains,
   Seafloor,
+  seafloorHeight,
   ISLAND,
-  scatterPalms,
   Ship,
   SurfaceWetness,
 } from './scene';
@@ -41,6 +43,7 @@ import { CameraDirector } from './cameras/CameraDirector';
 import { getPreset } from './presets';
 import { Panel } from './ui/Panel';
 import { Hud } from './ui/Hud';
+import { StormQuote } from './ui/Quote';
 import { TouchControls } from './ui/TouchControls';
 import { DEFAULT_UI_STATE, type UiState } from './ui/types';
 
@@ -56,6 +59,8 @@ const _hullCenter = new THREE.Vector3();
 const _hullRadius = new THREE.Vector3(1, 1, 1);
 /** Scratch for the birds' ambient colour, recomputed every frame. */
 const _birdShade = new THREE.Color();
+const _meadowAmbient = new THREE.Color();
+const _meadowWind = new THREE.Vector2();
 
 const boot = {
   root: document.getElementById('boot'),
@@ -111,7 +116,8 @@ class App {
   /** Reef school. Parented to the scene root: its vertex stage emits world space. */
   private fish!: FishSchool;
   private kelp!: KelpForest;
-  private palms!: Palms;
+  private meadow!: IslandMeadow;
+  private canopy!: IslandCanopy;
   private remains!: Remains;
   /**
    * Procedural audio.
@@ -158,6 +164,7 @@ class App {
 
   private panel!: Panel;
   private hud!: Hud;
+  private stormQuote!: StormQuote;
   /** On-screen throttle/rudder. Null on devices with a fine pointer. */
   private touchControls: TouchControls | null = null;
   private loop!: Loop;
@@ -191,6 +198,27 @@ class App {
   private pendingQuality: QualityTier | null = null;
   /** The in-flight drain, so concurrent requests coalesce into one. */
   private qualityApply: Promise<void> | null = null;
+  /**
+   * True from the moment `resetDeterministic` takes the clock until the page
+   * goes away, so nothing else may hand it back.
+   *
+   * `drainQualityRequests` pauses the loop, does its work and restores whatever
+   * pause state it found on entry. That is correct in isolation and wrong when
+   * two owners overlap: the adaptive tier system can request a drain from a live
+   * frame, and if `resetDeterministic` pauses while that drain is in flight, the
+   * drain's `finally` sees the `wasPaused = false` it captured *before* the
+   * capture started and un-pauses on the way out. The world then runs on wall
+   * clock underneath a harness that believes it owns the clock, and every
+   * subsequent `step()` is contaminated by however long the browser spent
+   * between two `page.evaluate` calls.
+   *
+   * That is how it presented: the cinematic tour's loop position, which should
+   * advance by exactly `steps * dt`, moved 109 seconds during 7 seconds of
+   * driven stepping — and by a different amount every run, because it was
+   * measuring real time. It only became reachable when the scene got heavy
+   * enough for the adaptive system to want a downgrade in the first place.
+   */
+  private captureOwnsClock = false;
 
   constructor(canvas: HTMLCanvasElement, uiRoot: HTMLElement) {
     this.canvas = canvas;
@@ -306,21 +334,27 @@ class App {
     this.kelp = new KelpForest(quality.kelp);
     this.scene.add(this.kelp.object);
 
-    // Palms and the wreck's owner. Poly Haven publishes neither a coconut palm
-    // nor a skeleton, and every CC0 source that does is low-poly stylised and
-    // would sit badly against photoscanned rock — so both are built, which is
-    // also how this project already solves gulls and fish.
-    this.palms = new Palms({
-      count: quality.palms,
-      prevailingWind: getPreset(this.state.preset).sea.windDirection,
-      // Placed at full capacity and drawn as a prefix, so a tier change thins
-      // the grove instead of relocating it. Weighted toward the cove's bearing
-      // — a coconut grove is a shoreline plant and the cove is the shoreline
-      // anyone actually arrives at — but with enough spread to reach round the
-      // bay rather than sitting in one clump.
-      placements: scatterPalms(Palms.MAX_COUNT, { bearing: 0.7, spread: 1.5 }),
-    });
-    this.scene.add(this.palms.object);
+    // Grass, placed on the GPU from the seafloor's own heightfield node rather
+    // than scattered as instances — the island is 0.8 km2 and a scatter dense
+    // enough to read as a sward is a million draws. See `src/scene/Meadow.ts`.
+    this.meadow = new IslandMeadow(quality.meadow, (worldPosition) =>
+      this.seafloor.heightNode(worldPosition),
+    );
+    this.scene.add(this.meadow.object);
+
+    // Distant canopy. The island's trees are LOD2 specks from the play area and
+    // the biome in the terrain colour cannot give a dome a broken edge, so past
+    // the last mesh LOD the forest becomes billboards. See `src/scene/Canopy.ts`.
+    this.canopy = new IslandCanopy(quality.canopy, (worldPosition) =>
+      this.seafloor.heightNode(worldPosition),
+    );
+    this.scene.add(this.canopy.object);
+
+    // The wreck's owner. Poly Haven publishes no skeleton and every CC0 source
+    // that does is low-poly stylised and would sit badly against photoscanned
+    // rock — so it is built, which is also how this project solves gulls and
+    // the pelagic fish. The island's palms used to be built here too and are
+    // now `palm_coconut` and `palm_tall`, scattered by `Props.dressIsland`.
 
     this.remains = new Remains();
     // Above the tideline on the cove's own bearing, but off to one side of the
@@ -598,11 +632,19 @@ class App {
     /** Roots added hidden, revealed together once their pipelines exist. */
     const loaded: THREE.Object3D[] = [];
 
-    const [shipResult, propsResult] = await Promise.allSettled([
+    const [shipResult, propsResult, reefFishResult] = await Promise.allSettled([
       Ship.load(this.assets),
       Props.load(this.assets, { detailScale: QUALITY_TIERS[this.state.quality].propsDetail }),
+      // The reef species. Already settled-by-construction — `loadReefFish`
+      // resolves null rather than rejecting — but it rides in the same batch so
+      // its request overlaps the ship's rather than queueing behind it.
+      loadReefFish(this.assets),
     ]);
     if (this.disposed) return;
+
+    if (reefFishResult.status === 'fulfilled' && reefFishResult.value) {
+      this.fish.setSpecies('reef', reefFishResult.value);
+    }
 
     if (shipResult.status === 'fulfilled') {
       const ship = shipResult.value;
@@ -633,7 +675,10 @@ class App {
 
       // The controller exists from load but stays inert until Boat mode selects
       // it, so W/S and A/D cannot steer a ship the viewer is not driving.
-      this.shipControls = new ShipController(this.shipBody);
+      // The heightfield goes in with her: the hull is turned away from shoaling
+      // water by the same sand the floor mesh is displaced by, which is what
+      // stops a viewer sailing the ship onto the island. See `applyShoal`.
+      this.shipControls = new ShipController(this.shipBody, (x, z) => seafloorHeight(x, z));
       // Both flags from the current mode, not just `enabled`. The mode change
       // that would have set them may already have happened — the models take
       // seconds to arrive, and a viewer who selects Cinematic during the
@@ -697,7 +742,13 @@ class App {
     await this.loop.settle();
     for (const object of loaded) object.visible = true;
     await this.prewarm();
-    if (!wasPaused && !this.disposed) this.loop.setPaused(false);
+    // `captureOwnsClock` for the same reason `drainQualityRequests` checks it,
+    // and this is the site that actually bit: `prewarm` compiles every material
+    // the scene just loaded, which grew from twenty models to nearly sixty files
+    // once the dressing gained LOD chains. It is now slow enough to still be
+    // running when a harness calls `resetDeterministic`, and restoring the
+    // pre-load pause state on the way out handed the clock back underneath it.
+    if (!wasPaused && !this.disposed && !this.captureOwnsClock) this.loop.setPaused(false);
 
     this.sceneContentLoaded = true;
   }
@@ -711,6 +762,7 @@ class App {
     };
     this.panel = new Panel(this.uiRoot, this.state, callbacks);
     this.hud = new Hud(this.uiRoot, this.state.cameraMode, callbacks);
+    this.stormQuote = new StormQuote(this.uiRoot);
     this.hud.setBackend(this.backend);
 
     // Built only where it will be used. A mouse user has better controls and a
@@ -776,6 +828,11 @@ class App {
         this.applyShipControlMode();
         // The on-screen throttle stays with the mode that can actually use it.
         this.touchControls?.setVisible(this.state.cameraMode === 'boat');
+        // Leaving the tour hands the sun back. The flight drives the sun's
+        // position directly every frame (see `update`), so without this the hour
+        // it happened to be at when the viewer pressed a key would stick until
+        // something else re-applied the preset.
+        if (this.state.cameraMode !== 'cinematic') this.applyPreset(false);
         break;
       case 'volume':
         this.audio.setVolume(this.state.volume);
@@ -887,7 +944,8 @@ class App {
     this.birds.setCount(quality.birds);
     this.fish.setCount(quality.fish);
     this.kelp.setCount(quality.kelp);
-    this.palms.setCount(quality.palms);
+    this.meadow.setCount(quality.meadow);
+    this.canopy.setCount(quality.canopy);
     this.audio.setQuality(tier);
 
     // WebGL2 gets the analytic path regardless of tier. The backdrop and depth
@@ -1225,12 +1283,33 @@ class App {
       }
     } finally {
       this.qualityApply = null;
-      if (!wasPaused && !this.disposed) this.loop.setPaused(false);
+      // `captureOwnsClock`, not just `wasPaused`: see its declaration. A capture
+      // that took the clock while this drain was in flight keeps it.
+      if (!wasPaused && !this.disposed && !this.captureOwnsClock) this.loop.setPaused(false);
     }
   }
 
   private update = (dt: number, elapsed: number): void => {
     this.director.update(dt);
+
+    /**
+     * The tour owns the sun while it is running.
+     *
+     * Driven straight into `Atmosphere.setParams` rather than through
+     * `applyPreset`, and the distinction matters twice. `applyPreset` also
+     * rebuilds the clouds, the weather and the water appearance and optionally
+     * re-captures the environment cube, none of which the hour of the day needs
+     * and all of which would be paid for sixty times a second. And `setParams`
+     * merges — its own header says so — so the preset's turbidity, Mie and
+     * overcast survive being re-timed, which is what keeps the tour recognisably
+     * *this* place at every hour it passes through.
+     *
+     * `cinematicTimeOfDay` is a pure function of the loop clock, so this stays
+     * inside the determinism guarantee the capture harness depends on.
+     */
+    if (this.state.cameraMode === 'cinematic') {
+      this.atmosphere.setParams(this.sunFromClock(this.director.cinematicTimeOfDay));
+    }
 
     // Before `update`, which is what reads it to place the light and its target.
     // The shadowed region follows the viewer rather than sitting on the origin,
@@ -1246,6 +1325,11 @@ class App {
     this.birds.setLightColors(this.atmosphere.sunColor, _birdShade.copy(this.atmosphere.zenithColor).multiplyScalar(0.4));
     this.birds.update(dt, this.camera.position);
 
+    // Cheap by construction: it early-outs unless the camera has moved far
+    // enough for a level boundary to have plausibly been crossed. See
+    // `Props.updateLod`.
+    this.props?.updateLod(this.camera.position);
+
     this.fish.setSunDirection(this.atmosphere.sunDirection);
     this.fish.update(dt);
 
@@ -1259,12 +1343,29 @@ class App {
     );
     this.kelp.update(dt);
 
-    this.palms.setSun(this.atmosphere.sunDirection, this.atmosphere.sunColor);
-    this.palms.setWind(
-      getPreset(this.state.preset).sea.windDirection,
-      this.state.windSpeed,
-    );
-    this.palms.update(dt);
+    // The grass field follows the camera, so unlike everything else on the
+    // island it has to be told where that is every frame. Two uniform writes.
+    this.meadow.setSunDirection(this.atmosphere.sunDirection);
+    this.meadow.setSunColor(this.atmosphere.sunColor);
+    this.meadow.setAmbientColor(_meadowAmbient.copy(this.atmosphere.zenithColor).multiplyScalar(0.5));
+    {
+      const bearing = getPreset(this.state.preset).sea.windDirection;
+      _meadowWind.set(Math.cos(bearing), Math.sin(bearing));
+      // Blade travel saturates well below a gale: past about 12 m/s grass is
+      // already lying flat and more wind moves the *sea*, not the sward.
+      this.meadow.setWind(_meadowWind, Math.min(1, this.state.windSpeed / 12));
+    }
+    this.meadow.update(dt, this.camera.position);
+
+    // The canopy shares the meadow's light and wind — they are the same
+    // vegetation under the same sky, and two sets of uniforms drifting apart is
+    // how a sward ends up lit at a different hour from the trees above it.
+    this.canopy.setSunDirection(this.atmosphere.sunDirection);
+    this.canopy.setSunColor(this.atmosphere.sunColor);
+    this.canopy.setAmbientColor(_meadowAmbient);
+    this.canopy.setWind(_meadowWind, Math.min(1, this.state.windSpeed / 14));
+    this.canopy.update(dt);
+
     this.remains.setSun(this.atmosphere.sunDirection, this.atmosphere.sunColor);
 
 
@@ -1307,6 +1408,9 @@ class App {
       this.rainOverride ??
       (this.weather.getKind() === 'rain' ? this.weather.getIntensity() : 0);
     this.water.setRain(raining, elapsed);
+    // The shore break runs off the same clock the rest of the sea does, so a
+    // deterministic rewind puts the surf sets back where they were.
+    this.water.setSurf(elapsed);
     // Agitation: heavy rain whitens a sea surface on its own, independently of
     // whether the waves are steep enough to break.
     this.wake.setRainAgitation(raining);
@@ -1467,6 +1571,18 @@ class App {
     this.water.setFoamCenter(this.wake.centerX, this.wake.centerZ);
 
     this.hud.setFps(this.loop.stats.fps);
+
+    // The line, when the viewer takes the helm in weather. Driven from `elapsed`
+    // rather than a wall clock so a deterministic rewind puts it back where it
+    // was instead of leaving one fading across a capture.
+    this.stormQuote.update(
+      {
+        preset: this.state.preset,
+        windSpeed: this.state.windSpeed,
+        atHelm: this.state.cameraMode === 'boat' && (this.shipControls?.isEnabled ?? false),
+      },
+      elapsed,
+    );
 
     // Adaptive quality answers sustained *real-time* frame pressure, so it has
     // no business running while the clock is detached. `Loop.step` deliberately
@@ -1656,6 +1772,18 @@ class App {
           shipInput: { throttle: number; rudder: number } | null = null,
         ) => {
           const settleDt = 1 / 60;
+          // Claim the clock before anything else, and settle any tier change
+          // that is already running — a drain in flight restores the pause state
+          // it captured on entry, so both halves are needed to close the race.
+          this.captureOwnsClock = true;
+          this.loop.setPaused(true);
+          // Settle both things that pause the loop on their own account: the
+          // scene load's compile pass and any tier change in flight. Awaiting
+          // them is what makes the pause stick — the flag above only stops them
+          // *undoing* it, and a capture that begins while shaders are still
+          // compiling is not reproducible anyway.
+          await this.contentReady?.catch(() => undefined);
+          await this.qualityApply?.catch(() => undefined);
           this.loop.setPaused(true);
 
           // Rewind far enough that the settle run *ends* exactly at `time`.
@@ -1692,7 +1820,9 @@ class App {
           this.birds.resetClock(start);
           this.fish.resetClock(start);
           this.kelp.resetClock(start);
-          this.palms.resetClock(start);
+          this.meadow.resetClock(start);
+          this.stormQuote.reset();
+          this.canopy.resetClock(start);
           this.audio.resetClock(start);
           // The cinematic carries a position on its own 120 s loop, which is
           // state exactly like a clock: without this, a capture taken in
@@ -1795,7 +1925,9 @@ class App {
     this.birds?.dispose();
     this.fish?.dispose();
     this.kelp?.dispose();
-    this.palms?.dispose();
+    this.meadow?.dispose();
+    this.stormQuote?.dispose();
+    this.canopy?.dispose();
     this.remains?.dispose();
     this.audio?.dispose();
     this.weather?.dispose();

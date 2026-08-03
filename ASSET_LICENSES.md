@@ -11,13 +11,19 @@
 
 Nothing else may be committed. In particular, **no assets are taken from
 threejswaterpro.com or any other commercial product**. Assets are sourced from
-[Poly Haven](https://polyhaven.com), [ambientCG](https://ambientcg.com) and the
-[Khronos glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets)
-repository (the latter licence-checked per model).
+[Poly Haven](https://polyhaven.com), [Sketchfab](https://sketchfab.com) (CC0 and
+CC-BY only, licence-checked per model at fetch time), [ambientCG](https://ambientcg.com)
+and the [Khronos glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets)
+repository.
 
-As of this revision **every asset in `public/` is CC0 1.0 from Poly Haven**, so no
-attribution is legally required. We record the authors anyway, as a courtesy and
-because Poly Haven asks contributors be credited where practical.
+**Most of `public/` is CC0 1.0 from Poly Haven**, and for those no attribution is
+legally required — we record the authors anyway, as a courtesy and because Poly
+Haven asks contributors be credited where practical. The exceptions are the
+twelve Sketchfab assets described under [Sketchfab assets](#sketchfab-assets):
+three are CC0 from the Smithsonian and **nine are CC-BY 4.0, whose attribution is
+a condition of the licence**. Those nine credits must survive redistribution, and
+they are collected in one block at the end of that section for exactly that
+reason.
 
 Sources that were surveyed and not used, so the next reader does not repeat the
 search:
@@ -28,7 +34,7 @@ search:
 | [Kenney](https://kenney.nl) | CC0 | Excellent, and stylistically incompatible: flat-shaded low-poly next to photogrammetry reads as two projects. |
 | [ambientCG](https://ambientcg.com) | CC0 | Materials and HDRIs rather than props; its "3D model" category is scatter meshes. Worth revisiting for ground materials. |
 | [Khronos glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets) | per model | `BarramundiFish` is CC0 and genuinely good, but it is a 12 MB single fish. A school wants instanced geometry, not one hero mesh. |
-| [Smithsonian Open Access](https://www.si.edu/openaccess) | CC0 | Real scanned artefacts, plausible for the treasure. Scans are heavy and would need the same decimation pass; not needed once Poly Haven's cove set covered it. |
+| [Smithsonian Open Access](https://www.si.edu/openaccess) | CC0 | Now **used**, via their Sketchfab account, for the three coral colonies — see [Sketchfab assets](#sketchfab-assets). The scans are heavy (100k faces each) and take the same decimation pass everything else does. |
 
 > Poly Haven's licence terms: <https://polyhaven.com/license> — *"All assets on Poly
 > Haven are licensed as CC0, which is the same as public domain. This means you can use,
@@ -48,7 +54,10 @@ API (`https://api.polyhaven.com/files/<slug>`), verifies each file's size and MD
 against the API manifest, checks glTF/HDR/JPEG magic bytes, and is idempotent (existing
 non-empty files are skipped). It exits non-zero on any failure.
 
-**Total size of `public/`: 57,433,343 bytes (54.77 MiB / 57.43 MB) across 36 files.**
+**Total size of `public/`: 92,425,273 bytes (88.14 MiB) across 135 files** — which
+is everything a build ships. The raw downloads the optimiser eats are another
+555 MB and live in `assets/source/`, outside the Vite public root and outside git;
+see the note in `.gitignore`.
 
 ### Paths the application should load
 
@@ -58,7 +67,6 @@ non-empty files are skipped). It exits non-zero on any failure.
 | Floating buoy | `/models/ocean_buoy/ocean_buoy_1k.gltf` |
 | Floating barrel | `/models/barrel_03/barrel_03_1k.gltf` |
 | Rock (island detail) | `/models/rock_07/rock_07_1k.gltf` |
-| Cliff (island silhouette) | `/models/namaqualand_cliff_01/namaqualand_cliff_01_1k.gltf` |
 | Environment — day preset | `/hdris/kloofendal_43d_clear_puresky_2k.hdr` |
 | Environment — sunset preset | `/hdris/industrial_sunset_puresky_2k.hdr` |
 | Environment — foggy preset | `/hdris/kloofendal_misty_morning_puresky_2k.hdr` |
@@ -102,11 +110,6 @@ One row per file shipped in `public/`.
 | Rock 07 (`rock_07`, 1k) | `public/models/rock_07/textures/rock_07_diff_1k.jpg` | https://polyhaven.com/a/rock_07 | Jenelle van Heerden | CC0 1.0 | None (as downloaded) |
 | Rock 07 (`rock_07`, 1k) | `public/models/rock_07/textures/rock_07_arm_1k.jpg` | https://polyhaven.com/a/rock_07 | Jenelle van Heerden | CC0 1.0 | None (as downloaded) |
 | Rock 07 (`rock_07`, 1k) | `public/models/rock_07/textures/rock_07_nor_gl_1k.jpg` | https://polyhaven.com/a/rock_07 | Jenelle van Heerden | CC0 1.0 | None (as downloaded) |
-| Namaqualand Cliff 01 (`namaqualand_cliff_01`, 1k) | `public/models/namaqualand_cliff_01/namaqualand_cliff_01_1k.gltf` | https://polyhaven.com/a/namaqualand_cliff_01 | Jenelle van Heerden (photography); Rico Cilliers (modeling) | CC0 1.0 | None (as downloaded) |
-| Namaqualand Cliff 01 (`namaqualand_cliff_01`, 1k) | `public/models/namaqualand_cliff_01/namaqualand_cliff_01.bin` | https://polyhaven.com/a/namaqualand_cliff_01 | Jenelle van Heerden; Rico Cilliers | CC0 1.0 | None (as downloaded) |
-| Namaqualand Cliff 01 (`namaqualand_cliff_01`, 1k) | `public/models/namaqualand_cliff_01/textures/namaqualand_cliff_01_diff_1k.jpg` | https://polyhaven.com/a/namaqualand_cliff_01 | Jenelle van Heerden; Rico Cilliers | CC0 1.0 | None (as downloaded) |
-| Namaqualand Cliff 01 (`namaqualand_cliff_01`, 1k) | `public/models/namaqualand_cliff_01/textures/namaqualand_cliff_01_arm_1k.jpg` | https://polyhaven.com/a/namaqualand_cliff_01 | Jenelle van Heerden; Rico Cilliers | CC0 1.0 | None (as downloaded) |
-| Namaqualand Cliff 01 (`namaqualand_cliff_01`, 1k) | `public/models/namaqualand_cliff_01/textures/namaqualand_cliff_01_nor_gl_1k.jpg` | https://polyhaven.com/a/namaqualand_cliff_01 | Jenelle van Heerden; Rico Cilliers | CC0 1.0 | None (as downloaded) |
 | Kloofendal 43d Clear (Pure Sky) (`kloofendal_43d_clear_puresky`, 2k HDR) | `public/hdris/kloofendal_43d_clear_puresky_2k.hdr` | https://polyhaven.com/a/kloofendal_43d_clear_puresky | Greg Zaal | CC0 1.0 | None (as downloaded) |
 | Industrial Sunset (Pure Sky) (`industrial_sunset_puresky`, 2k HDR) | `public/hdris/industrial_sunset_puresky_2k.hdr` | https://polyhaven.com/a/industrial_sunset_puresky | Jarod Guest (sky edits); Sergej Majboroda (original) | CC0 1.0 | None (as downloaded) |
 | Kloofendal Misty Morning (Pure Sky) (`kloofendal_misty_morning_puresky`, 2k HDR) | `public/hdris/kloofendal_misty_morning_puresky_2k.hdr` | https://polyhaven.com/a/kloofendal_misty_morning_puresky | Greg Zaal | CC0 1.0 | None (as downloaded) |
@@ -143,6 +146,8 @@ they differ.
 | Fern 02 (`fern_02`) | `public/models/dressing/fern_02.glb` | https://polyhaven.com/a/fern_02 | Rob Tuytel (scanning); Rico Cilliers (modeling) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
 | Shrub Sorrel 01 (`shrub_sorrel_01`) | `public/models/dressing/shrub_sorrel_01.glb` | https://polyhaven.com/a/shrub_sorrel_01 | Rico Cilliers (All) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
 | Grass Bermuda 01 (`grass_bermuda_01`) | `public/models/dressing/grass_bermuda_01.glb` | https://polyhaven.com/a/grass_bermuda_01 | Rico Cilliers (All) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
+| Grass Medium 01 (`grass_medium_01`) | `public/models/dressing/grass_medium_01.glb` | https://polyhaven.com/a/grass_medium_01 | Rico Cilliers (All) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP; `alphaMode` corrected from `BLEND` to `OPAQUE` (the diffuse is a JPEG and carries no alpha) |
+| Grass Medium 02 (`grass_medium_02`) | `public/models/dressing/grass_medium_02.glb` | https://polyhaven.com/a/grass_medium_02 | Rico Cilliers (All) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP; `alphaMode` corrected from `BLEND` to `OPAQUE` |
 | Anthurium Botany 01 (`anthurium_botany_01`) | `public/models/dressing/anthurium_botany_01.glb` | https://polyhaven.com/a/anthurium_botany_01 | Rob Tuytel (scanning); Rico Cilliers (modeling) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
 | Calathea Orbifolia 01 (`calathea_orbifolia_01`) | `public/models/dressing/calathea_orbifolia_01.glb` | https://polyhaven.com/a/calathea_orbifolia_01 | Rob Tuytel (scanning); Rico Cilliers (modeling) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
 | Ship Pinnace (`ship_pinnace`) | `public/models/dressing/ship_pinnace.glb` | https://polyhaven.com/a/ship_pinnace | James Ray Cock (model, textures, cleanup); Rico Cilliers (sails model, textures); Nicolò Zubbini (original model); Yann Kervran (Rigging) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
@@ -166,6 +171,85 @@ they differ.
 | Wooden Bucket 01 (`wooden_bucket_01`) | `public/models/dressing/wooden_bucket_01.glb` | https://polyhaven.com/a/wooden_bucket_01 | James Ray Cock (All) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
 | Modular Fort 01 (`modular_fort_01`) | `public/models/dressing/modular_fort_01.glb` | https://polyhaven.com/a/modular_fort_01 | Rico Cilliers (All) | CC0 1.0 | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP |
 
+### Sketchfab assets
+
+Every other asset in this project is CC0 from Poly Haven. These twelve are not,
+and there are three separate reasons, none of them convenience.
+
+**Poly Haven publishes no marine life.** All 521 of their
+models were checked against `https://api.polyhaven.com/assets?t=models`, and
+`lambis_shell` — one shell — is the entire catalogue. ambientCG is materials and
+HDRIs. So the reef, the island shallows and the fish schools had nothing to be
+made of, and the submerged half of the scene was bare sand with a few procedural
+kelp stipes on it.
+
+**Poly Haven publishes no coconut palm.** `src/scene/Remains.ts` grew a
+procedural one because of it, and that palm was a good piece of engineering and a
+bad tree: its fronds faked transmission through `emissiveNode`, which is neither
+shadowed nor tone-mapped with the rest of the scene, so under a clear sky the
+whole grove came out chrome blue. Two real palms replaced it and the procedural
+one has been deleted.
+
+**Two of Poly Haven's coastal scans only read from one direction, and two of its
+trees are the wrong plant.** `coastal_cliff_02` and `_04` measure 0.21 and 0.28
+deep over their own length: they are cliff *faces*, authored to be set into a
+hillside, and on an island a viewer can circle they show their backs. Neither is
+a bad asset; both had exactly one correct placement. `island_tree_01` and `_03`
+are beautiful captures of half-bare coastal scrub, which on a tropical island
+reads as a dead stick. All four are gone, replaced by the closed rocks and the
+botanical trees below. The measurement is reproducible —
+`node scripts/modelkit/shells.mjs <file>`.
+
+Three of these are CC0. **Nine are CC-BY 4.0, and the attributions below are
+therefore a licence condition rather than a courtesy** — they must survive into
+any redistribution of this repository or a build of it.
+
+Sketchfab's download API is authenticated, so `scripts/fetch-assets.mjs` skips
+this section unless a token is present in `SKETCHFAB_API_TOKEN` or a git-ignored
+`sketchfab-token` file at the repository root. That is not a barrier to building:
+the decimated `.glb` outputs are committed exactly as the Poly Haven ones are,
+and the token is only needed to re-run `scripts/optimize-assets.mjs`. The fetcher
+re-checks each model's licence and author against this table on every download
+and fails if either has changed.
+
+| Asset | Path | Source | Author | Licence | Modifications |
+| --- | --- | --- | --- | --- | --- |
+| Soft Coral Set | `public/models/dressing/soft_coral_set.glb` | https://sketchfab.com/3d-models/soft-coral-set-256355f15fcb4095af17b75ae572bff0 | **Kanna-Nakajima** | **CC-BY 4.0** | Decimated, welded and Meshopt-encoded by `scripts/optimize-assets.mjs`; textures resized and re-encoded to WebP. `Props` plants subsets of its 24 forms as separate instanced kinds. |
+| Stylaster sanguineus (lace coral) | `public/models/dressing/stylaster_coral.glb` | https://sketchfab.com/3d-models/stylaster-sanguineus-4f1ddd8352944d16bf3b821b3e71b473 | The Smithsonian Institution | CC0 1.0 | Decimated, welded and Meshopt-encoded; textures resized and re-encoded to WebP |
+| Seriatopora hystrix (birdsnest coral) | `public/models/dressing/seriatopora_coral.glb` | https://sketchfab.com/3d-models/seriatopora-hystrix-b6be88ce19e14e5bb038918d111430d5 | The Smithsonian Institution | CC0 1.0 | Decimated, welded and Meshopt-encoded; textures resized and re-encoded to WebP |
+| Goniastrea favulus (brain coral) | `public/models/dressing/goniastrea_coral.glb` | https://sketchfab.com/3d-models/goniastrea-favulus-526ede8a83f943ee868d6991a6d5a533 | The Smithsonian Institution | CC0 1.0 | Decimated, welded and Meshopt-encoded; textures resized and re-encoded to WebP |
+| Emperor Angelfish (`Pomacanthus imperator`) | `public/models/dressing/emperor_angelfish.glb` | https://sketchfab.com/3d-models/emperor-angelfish-update-v2-3dc2d360d98c485496899121792ebcce | **Mikhail Nesterov** | **CC-BY 4.0** | Skin, skeleton and swim clip stripped by `scripts/optimize-assets.mjs` (`static: true`); geometry re-oriented and normalised to unit length by `src/scene/Fish.ts`, which animates it with the same travelling-wave vertex shader as the procedural fish. Textures resized and re-encoded to WebP. |
+| Royal Poinciana (`Delonix regia`), in flower | `public/models/dressing/tree_poinciana.glb` | https://sketchfab.com/3d-models/realistic-hd-royal-poinciana-1740-066ca51810ad483aa34ef738c0b7ae6a | **PlantCatalog** | **CC-BY 4.0** | Decimated 323,555 -> 67,450 triangles with a separate budget for leaves and flowers; leaf and flower materials converted from `BLEND` to alpha-tested `MASK`; two LOD levels generated; textures resized and re-encoded to WebP. All by `scripts/optimize-assets.mjs`. |
+| Hong Kong Orchid Tree (`Bauhinia blakeana`) | `public/models/dressing/tree_orchid.glb` | https://sketchfab.com/3d-models/realistic-hd-hong-kong-orchid-tree-4040-160de59f02b946b0aa51f1c0f34ecbdd | **PlantCatalog** | **CC-BY 4.0** | Decimated 122,297 -> 35,329 triangles; leaf materials converted to alpha-tested `MASK`; two LOD levels generated; textures resized and re-encoded to WebP. |
+| Rock 17 (layered outcrop) | `public/models/dressing/rock_slab_a.glb` | https://sketchfab.com/3d-models/rock-17-e7778771c06d4705a80cccb23a471d5c | **mohamedhussien** | **CC-BY 4.0** | Decimated 40,000 -> 23,224 triangles; recentred onto its own base; two LOD levels generated; textures resized and re-encoded to WebP. |
+| Rock 6 (layered outcrop) | `public/models/dressing/rock_slab_b.glb` | https://sketchfab.com/3d-models/rock-6-f4f983f89c6f4b10a54ebb0a30787e56 | **mohamedhussien** | **CC-BY 4.0** | Decimated 40,000 -> 7,478 triangles; recentred; two LOD levels generated; textures resized and re-encoded to WebP. |
+| Big Boulder | `public/models/dressing/rock_boulder.glb` | https://sketchfab.com/3d-models/big-boulder-d25c7784bc68468d88add544db970e3f | **3dhdscan** | **CC-BY 4.0** | Decimated 65,029 -> 7,802 triangles. The source's origin sits 1.8 km above the rock, so `groundModel` in `scripts/optimize-assets.mjs` bakes a correcting translation into the scene nodes. Two LOD levels generated; textures resized and re-encoded to WebP. |
+| Coconut Palm | `public/models/dressing/palm_coconut.glb` | https://sketchfab.com/3d-models/coconut-palm-26e787f2ff2e4c0fb004c3b0210805a3 | **evolveduk** | **CC-BY 4.0** | Kept at full geometry — already game-ready at 6.6k triangles. Two LOD levels generated; textures resized and re-encoded to WebP. |
+| Tropical Palm | `public/models/dressing/palm_tall.glb` | https://sketchfab.com/3d-models/tropical-palm-08ccca74a0594fd999acaf4cfbd597e0 | **Šimon Ustal** | **CC-BY 4.0** | Decimated to 35% of its triangles; two LOD levels generated; textures resized and re-encoded to WebP. |
+
+> Required attribution, in the form the licence asks for:
+>
+> - "Soft Coral Set" (https://sketchfab.com/3d-models/soft-coral-set-256355f15fcb4095af17b75ae572bff0)
+>   by Kanna-Nakajima, licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/).
+> - "Emperor Angelfish (Update v2)" (https://sketchfab.com/3d-models/emperor-angelfish-update-v2-3dc2d360d98c485496899121792ebcce)
+>   by Mikhail Nesterov, licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/).
+> - "Realistic HD Royal Poinciana (17/40)" (https://sketchfab.com/3d-models/realistic-hd-royal-poinciana-1740-066ca51810ad483aa34ef738c0b7ae6a)
+>   by PlantCatalog, licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/).
+> - "Realistic HD Hong Kong Orchid Tree (40/40)" (https://sketchfab.com/3d-models/realistic-hd-hong-kong-orchid-tree-4040-160de59f02b946b0aa51f1c0f34ecbdd)
+>   by PlantCatalog, licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/).
+> - "Rock 17" (https://sketchfab.com/3d-models/rock-17-e7778771c06d4705a80cccb23a471d5c)
+>   by mohamedhussien, licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/).
+> - "Rock 6" (https://sketchfab.com/3d-models/rock-6-f4f983f89c6f4b10a54ebb0a30787e56)
+>   by mohamedhussien, licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/).
+> - "Big Boulder" (https://sketchfab.com/3d-models/big-boulder-d25c7784bc68468d88add544db970e3f)
+>   by 3dhdscan, licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/).
+> - "Coconut Palm" (https://sketchfab.com/3d-models/coconut-palm-26e787f2ff2e4c0fb004c3b0210805a3)
+>   by evolveduk, licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/).
+> - "Tropical Palm" (https://sketchfab.com/3d-models/tropical-palm-08ccca74a0594fd999acaf4cfbd597e0)
+>   by Šimon Ustal, licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/).
+>
+> All nine are modified — see the Modifications column.
+
 ### Substitutions
 
 Some slugs floated during planning do not exist on Poly Haven. Verified against
@@ -177,7 +261,7 @@ Some slugs floated during planning do not exist on Poly Haven. Verified against
 | `buoy` | no | `ocean_buoy` | Closest real equivalent; `lifebuoy` is the only other buoy. |
 | `wooden_barrel` | no | `barrel_03` | Real barrels are `barrel_03`, `barrel_stove`, `wine_barrel_01`, `wooden_barrels_01`. `barrel_03` is the cleanest single floating prop. |
 | `rock_02` | no | `rock_07` | Only `rock_07` and `rock_09` exist in the plain `rock_NN` series. |
-| `cliff_side_rock` | no | `namaqualand_cliff_01` | Real cliffs are `coastal_cliff_01/02/04` and `namaqualand_cliff_01/02`. The `coastal_cliff_*` and `coast_rocks_*` scans carry 20–42 MB mesh buffers even at 1k texture resolution; `namaqualand_cliff_01` gives the same silhouette for 4.3 MiB. |
+| `cliff_side_rock` | no | *(none — retired)* | `namaqualand_cliff_01` stood in for this and has since been dropped: it is a closed solid, but it is one 90 m mass with one composed silhouette, and five copies of one silhouette is a repeat no rotation hides. The island's crags are now built from the closed 1-2 m Sketchfab rocks, stretched and clumped. |
 | `kloofendal_43d_clear_puresky` | yes | — | Day preset. |
 | `industrial_sunset_puresky` | yes | — | Sunset preset. |
 | `satara_night_no_lamps` | yes | — | Moonlit preset. |

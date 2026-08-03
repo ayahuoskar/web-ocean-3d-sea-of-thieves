@@ -1,5 +1,17 @@
 import * as THREE from 'three/webgpu';
-import { Fn, float, mix, positionWorld, texture, uniform, vec2, vec3, vec4 } from 'three/tsl';
+import {
+  Fn,
+  float,
+  mix,
+  normalMap,
+  normalize,
+  positionWorld,
+  texture,
+  uniform,
+  vec2,
+  vec3,
+  vec4,
+} from 'three/tsl';
 // Aliased because this module needs a CPU twin of the same ramp under the
 // unqualified name; see `smoothstepDown` below.
 import { smoothstepDown as smoothstepDownNode } from '../core/tslMath';
@@ -188,8 +200,25 @@ export const ISLAND = {
    * `seafloorHeight` where the water is.
    */
   radius: 500,
-  /** Height of the summit above mean sea level, before props and before relief. */
-  peak: 72,
+  /**
+   * Height of the summit above mean sea level, before props and before relief.
+   *
+   * 150 m over a 1 km island, and the number is framing rather than geology.
+   * At the 72 m it was, the island had a width-to-height ratio of 14:1 — which
+   * is honest for a real Pacific island and *unreadable* at the distance anyone
+   * sees this one from. Photographed from 900 m off the beach it was a green
+   * bank on the horizon sixty pixels tall: no summit, no profile, nothing for
+   * the eye to land on. The whole planting scheme was invisible at the range it
+   * was authored for.
+   *
+   * At 150 the profile is about 7:1, the island is a shape against the sky, and
+   * — because everything below plants in absolute metres and the summit rock
+   * band is a *fraction* of this constant — the extra height arrives as bare
+   * rock above the treeline rather than as more hillside. That silhouette
+   * (green flanks, pale crown) is what a tropical high island actually reads
+   * as, and it is what the reference frame in `docs/ref/` shows.
+   */
+  peak: 150,
 } as const;
 
 /**
@@ -209,8 +238,16 @@ const VEGETATION_FULL_METRES = 16;
  * Deliberately short of 1. Even closed canopy shows sand and rock through it
  * from above, and leaving a fraction of the substrate visible is what stops the
  * interior reading as painted felt.
+ *
+ * This is a weight on *albedo*, though, not a percentage of visible ground, and
+ * the two are only the same number when the two albedos are close. They are
+ * not: the substrate is four times the canopy's luminance, so at the 0.86 this
+ * was, a seventh of the mix carried half the brightness and the vegetated
+ * slopes came out khaki rather than green — the substrate was showing through
+ * as *value* even where it was invisible as texture. 0.93 with a darker
+ * `dryInland` gets the same broken-up read without bleaching the hue.
  */
-const VEGETATION_COVER = 0.86;
+const VEGETATION_COVER = 0.93;
 
 const DEEP_Y = -88;
 const PLATEAU_Y = -17;
@@ -454,6 +491,88 @@ export function seafloorDepth(x: number, z: number): number {
   return Math.max(0, -seafloorHeight(x, z));
 }
 
+// ------------------------------------------------------------------- the reef
+
+/**
+ * Where the reef gathers, in world XZ.
+ *
+ * This lives here, with the heightfield, rather than in `Props` — which is the
+ * only module that *builds* anything out of it — because it is a fact about the
+ * world and two modules need to agree on it. `Props` grows the coral and the
+ * rock on these centres and `Fish` stations its resident schools over them, and
+ * the point of the whole exercise is that those are the same places: a diver who
+ * finds coral finds fish, and a diver who follows fish arrives at coral. Two
+ * independent scatters over the same annulus produce neither.
+ *
+ * A uniform scatter was the problem this replaces. The plateau's reef band is
+ * about 210,000 m² and underwater visibility here runs to a few tens of metres,
+ * so any even spread — at any instance count a frame can afford — is invisible
+ * on average and the seabed reads as an empty plain. Gathering it into a handful
+ * of patches with open sand between them is both what a reef actually looks like
+ * and the only arrangement that puts something in front of the camera.
+ *
+ * Stratified by bearing, one patch per sector, for the same reason the fish
+ * radii are: seven free angles leave a third of the compass empty about half the
+ * time, and a viewer who swims the wrong way finds the plain again. Radii are
+ * square-rooted so the patches spread evenly by area, and inset by the patch
+ * radius so none hangs off the plateau into the drop.
+ *
+ * Memoised: it is a pure function of module constants, and both callers want the
+ * same list rather than two draws from the same distribution.
+ */
+export const REEF_BAND = {
+  /** Clear of the spawn point, and inside the shallow plateau. */
+  inner: 26,
+  outer: 260,
+  patches: 7,
+  patchRadius: 15,
+} as const;
+
+const REEF_PATCH_SEED = 0x8f2c11;
+
+let reefPatchCache: readonly { x: number; z: number }[] | null = null;
+
+export function reefPatches(): readonly { x: number; z: number }[] {
+  if (reefPatchCache) return reefPatchCache;
+
+  const random = mulberry32(REEF_PATCH_SEED);
+  const inner = REEF_BAND.inner + REEF_BAND.patchRadius;
+  const outer = REEF_BAND.outer - REEF_BAND.patchRadius;
+  const out: { x: number; z: number }[] = [];
+
+  for (let i = 0; i < REEF_BAND.patches; i++) {
+    const angle = ((i + 0.15 + random() * 0.7) / REEF_BAND.patches) * Math.PI * 2;
+    const radius = inner + Math.sqrt(random()) * (outer - inner);
+    out.push({ x: Math.cos(angle) * radius, z: Math.sin(angle) * radius });
+  }
+
+  // The nearest patch is pulled in to the inner edge of the band. Without it the
+  // closest reef to the spawn point is wherever the seed happened to put one —
+  // 90 m on this seed — and the first thing a viewer does when they dive at the
+  // origin is swim across sand looking for the thing the scene is about.
+  let nearest = 0;
+  for (let i = 1; i < out.length; i++) {
+    if (Math.hypot(out[i].x, out[i].z) < Math.hypot(out[nearest].x, out[nearest].z)) nearest = i;
+  }
+  const bearing = Math.atan2(out[nearest].z, out[nearest].x);
+  const close = REEF_BAND.inner + REEF_BAND.patchRadius * 1.2;
+  out[nearest] = { x: Math.cos(bearing) * close, z: Math.sin(bearing) * close };
+
+  reefPatchCache = out;
+  return out;
+}
+
+/**
+ * The two world periods the sand normal is sampled at, metres.
+ *
+ * 13 and 47 are coprime enough that the pair does not visibly repeat inside the
+ * few hundred metres a viewer can resolve detail over: the beat is at their
+ * least common multiple, 611 m, by which distance the map is a mip average.
+ * Neither is a round number for that reason — 12 and 48 would beat at 48.
+ */
+const SAND_DETAIL_NEAR = 13;
+const SAND_DETAIL_FAR = 47;
+
 // --------------------------------------------------------------- sand detail
 
 /**
@@ -471,7 +590,15 @@ function createSandNormalTexture(): THREE.DataTexture {
       const a = valueNoise((x / size) * 16, (y / size) * 16);
       const b = valueNoise((x / size) * 48 + 31.7, (y / size) * 48 + 11.3);
       // Ripple ridges: sand under swell forms parallel bars, not isotropic bumps.
-      const ripple = Math.sin((x / size) * Math.PI * 2 * 6 + a * 5.5) * 0.5 + 0.5;
+      //
+      // The phase is dragged by the low-frequency octave rather than being a
+      // clean multiple of the tile. Six bars per tile with a fixed phase is
+      // exactly six bars per tile *everywhere*, and repeated across a seabed it
+      // reads as corduroy with a visible seam — which is what it did. Modulating
+      // the phase by `a` makes the bars wander, bifurcate and lose count, which
+      // is both what real ripple fields do and what stops the eye locking onto
+      // the period. The map still tiles exactly, because `a` does.
+      const ripple = Math.sin((x / size) * Math.PI * 2 * 6 + a * 14) * 0.5 + 0.5;
       height[y * size + x] = a * 0.55 + b * 0.2 + ripple * 0.25;
     }
   }
@@ -544,7 +671,9 @@ export class Seafloor {
 
     this.noiseTexture = createNoiseTexture();
     this.sandNormal = createSandNormalTexture();
-    this.sandNormal.repeat.set(extent / detailTiling, extent / detailTiling);
+    // No `repeat`: the normal node below supplies its own world-space uv at two
+    // scales, and a repeat set here would be applied on top of them.
+    void detailTiling;
 
     this.nodes = buildNoiseNodes(this.noiseTexture);
 
@@ -565,8 +694,72 @@ export class Seafloor {
     this.material.name = 'seafloor-sand';
     this.material.roughness = 0.93;
     this.material.metalness = 0;
-    this.material.normalMap = this.sandNormal;
-    this.material.normalScale.set(0.75, 0.75);
+    /**
+     * The sky is a source of light on this surface, not a mirror in it.
+     *
+     * `scene.environment` is the atmosphere's own cube capture, and at full
+     * strength on a 0.8 km² dome it does something no amount of albedo work can
+     * undo: it lays a flat blue-white fill over the whole island. Measured on the
+     * hero frame, the vegetated slopes came out at sRGB (176, 183, 184) — a
+     * saturation of 0.04, against 0.49 for the same slope in
+     * `docs/ref/tropical-island-sea-level-v2.png`. Turning the environment off
+     * entirely moved them to (164, 159, 145): still too bright, but a *colour*
+     * again. The blue was the environment.
+     *
+     * It is not wrong that skylight is blue, and this does not pretend otherwise
+     * — it is that the term arrives unoccluded. A canopy shades itself, a slope
+     * shades its own hollows, and none of that exists here because the greenery
+     * on the mid-slopes lives in this material's colour rather than in geometry
+     * that could cast. 0.42 is the fraction of sky an averagely-enclosed patch of
+     * ground actually sees, and using it is cheaper and steadier than the ambient
+     * occlusion term this surface has no way to compute.
+     */
+    // 0.78, up from the 0.42 this was, and the two numbers describe the same
+    // amount of light. 0.42 was chosen to hold back a blue-white fill from a sky
+    // dome that has since been re-calibrated — `SKY_RADIANCE_SCALE` fell from
+    // 0.35 to 0.16 when the grade change left it stale — so the term it was
+    // fighting is already 2.2x smaller. Leaving it here would have charged the
+    // island for the sky's brightness twice and taken the ambient off the
+    // shaded slopes with it.
+    this.material.envMapIntensity = 0.78;
+    /**
+     * Sand detail, sampled at two incommensurate world scales and blended.
+     *
+     * A single tiling map has one period, and that period is visible. This one
+     * was laid down at `extent / detailTiling` repeats over a 4 km quad — with
+     * the defaults, 571 repeats, which is a **7 metre** tile. Seven metres is
+     * inside the range a viewer standing on the beach or swimming over the reef
+     * resolves easily, so the seabed came out as a grid of identical patches,
+     * and the ripple bars inside each one lined up across the seams into
+     * corduroy. It is the single most obvious tell in the underwater frames.
+     *
+     * The fix is the standard one and it is not "make the tile bigger": that
+     * trades a visible grid for a blurry one, because the texel density falls
+     * with the same factor. Two samples at scales with no common multiple — 13 m
+     * and 47 m here — put the beat frequency of the pair at hundreds of metres,
+     * which is past where the detail is resolvable at all. The large scale also
+     * costs nothing extra in memory: it is the same 256² map.
+     *
+     * Combined by the whiteout blend (add the tangent xy, multiply z) rather
+     * than by averaging. Averaging two normals flattens both — two independent
+     * bump fields average toward flat — and the result was a seabed that tiled
+     * correctly and had no relief left. Whiteout keeps the slope of each.
+     */
+    const detail = (metres: number): Node =>
+      texture(this.sandNormal, vec2(positionWorld.x, positionWorld.z).mul(1 / metres)).xyz
+        .mul(2)
+        .sub(1);
+
+    this.material.normalNode = Fn(() => {
+      const near = detail(SAND_DETAIL_NEAR).toVar();
+      const far = detail(SAND_DETAIL_FAR).toVar();
+      const blended = normalize(
+        vec3(near.x.add(far.x), near.y.add(far.y), near.z.mul(far.z)),
+      ).toVar();
+      // Re-encoded to [0,1] because `normalMap` decodes: it is the tangent-space
+      // entry point and expects a sampled texel, not a decoded normal.
+      return normalMap(vec4(blended.mul(0.5).add(0.5), 1), vec2(0.75, 0.75));
+    })();
 
     this.mesh = new THREE.Mesh(this.geometry, this.material);
     this.mesh.name = 'seafloor';
@@ -647,8 +840,17 @@ export class Seafloor {
       // reads as snow. These land it near 195 and keep the warm ratio a quartz
       // beach actually has, so the normal map, the caustics and the swash band
       // all have somewhere to go.
-      const dryRock = vec3(0.19, 0.16, 0.13);
-      const dryInland = vec3(0.24, 0.20, 0.14);
+      // Pale warm stone, and brighter than the soil below it rather than darker:
+      // this is the crown, and in the reference frame it is the lightest thing
+      // on the island after the beach — sRGB (167, 152, 131) against the
+      // canopy's (54, 62, 41).
+      const dryRock = vec3(0.26, 0.235, 0.2);
+      // Soil under a closed canopy, not open ground. It used to be 0.24 — nearly
+      // as bright as the beach — and since `VEGETATION_COVER` lets a fraction of
+      // it through everywhere, that one constant was contributing about half the
+      // luminance of every vegetated slope on the island and taking the hue with
+      // it. A shaded forest floor is dark and warm.
+      const dryInland = vec3(0.15, 0.125, 0.082);
       const beachSand = vec3(0.30, 0.26, 0.18);
       const wetSand = vec3(0.15, 0.13, 0.10);
       const shallowSand = vec3(0.42, 0.4, 0.3);
@@ -679,19 +881,54 @@ export class Seafloor {
       // The band starts above the swash and stops below the summit rock, and the
       // mottling below breaks its edge up so it is a treeline rather than a
       // contour.
-      const canopy = vec3(0.075, 0.115, 0.05);
-      const scrub = vec3(0.17, 0.185, 0.095);
-      const growth = mix(scrub, canopy, wp.y.smoothstep(9, 34)).toVar();
+      //
+      // Measured against `docs/ref/tropical-island-sea-level-v2.png` rather
+      // than chosen. Sampled over the canopy the reference sits at sRGB
+      // (54, 62, 41) and (61, 71, 48): green ahead of red by about eight
+      // levels, blue at three quarters of red. What stood here was
+      // (0.075, 0.115, 0.05), whose hue is not far off — but the same frame
+      // from this renderer measured (176, 183, 184), a saturation of 0.04
+      // against the reference's 0.49. Which is not a green hill. It is a grey
+      // one.
+      //
+      // The hue is therefore barely touched and the *value* is more than
+      // halved. A sunlit broadleaf canopy is dark — in the reference it is a
+      // third of the beach it grows behind, and here it was nine tenths of it,
+      // which is why the island read as chalk with shrubs on. The blue is
+      // lifted a little relative to what it was, because at a kilometre the
+      // sky IBL puts a blue-white fill over everything and a band with no blue
+      // in it turns grey rather than staying green.
+      const canopy = vec3(0.03, 0.043, 0.024);
+      const scrub = vec3(0.062, 0.074, 0.036);
+      const growth = mix(scrub, canopy, wp.y.smoothstep(9, 60)).toVar();
       const vegetated = mix(
         exposed,
         growth,
         wp.y.smoothstep(BEACH_TOP_METRES, VEGETATION_FULL_METRES).mul(VEGETATION_COVER),
       ).toVar();
 
+      // The treeline, and it is high on purpose.
+      //
+      // At 0.42 the bare rock started 63 m up a 150 m island, so two thirds of
+      // the dome came out pale stone and the whole planting scheme sat in a ring
+      // round the bottom of it: a bald hill with a hedge. What a tropical high
+      // island looks like is the other way round — the reference frame is
+      // continuous dark canopy over the lower two thirds with a pale crown above
+      // it — and bare rock only appears where the slope gets too steep and too
+      // thin to hold anything.
+      //
+      // 0.72 to 0.95, and the numbers are read off the frame rather than off
+      // the contour, because on a dome those are not the same thing. Elevation
+      // 0.58 of the peak sounds like the lower half staying green; it is not.
+      // The crest falls away over 0.9 of the shore radius, so 87 m of a 150 m
+      // island is still 225 m out from the summit — a cap 45% of the island's
+      // radius across, which side-on is most of what the eye sees. Measured on
+      // the capture, a band starting at 0.58 left two thirds of the visible dome
+      // pale and the reference has pale rock over about a third of it.
       const land = mix(
         vegetated,
         dryRock,
-        wp.y.smoothstep(ISLAND.peak * 0.42, ISLAND.peak * 0.85),
+        wp.y.smoothstep(ISLAND.peak * 0.72, ISLAND.peak * 0.95),
       ).toVar();
 
       const base = mix(submerged, land, aboveWater).toVar();

@@ -81,6 +81,9 @@ const GALLERY: readonly GalleryShot[] = [
   canonical('near-water-detail', 'waves'),
   canonical('underwater', 'underwater'),
   canonical('boat-chase', 'boat'),
+  canonical('island-approach', 'island'),
+  canonical('shore-break', 'shore'),
+  canonical('reef-dive', 'reef'),
   // `waterline` is deliberately absent. The per-pixel split is a real capability
   // and the canonical shot regression-tests it, but the image it produces is a
   // pale wash that sells it badly — and publishing a weak picture to advertise a

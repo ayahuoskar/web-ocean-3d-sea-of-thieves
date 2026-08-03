@@ -6,17 +6,11 @@ export {
   type AssetProgressCallback,
 } from './AssetLoader';
 export { Birds } from './Birds';
-export { FishSchool, type FishSchoolOptions } from './Fish';
+export { FishSchool, loadReefFish, type FishSchoolOptions, type FishSpecies } from './Fish';
 export { KelpForest, type KelpForestOptions } from './Kelp';
-export {
-  Palms,
-  Remains,
-  scatterPalms,
-  type PalmPlacement,
-  type PalmScatterOptions,
-  type PalmsOptions,
-  type RemainsOptions,
-} from './Remains';
+export { IslandCanopy, type IslandCanopyOptions } from './Canopy';
+export { IslandMeadow, type IslandMeadowOptions } from './Meadow';
+export { Remains, type RemainsOptions } from './Remains';
 export { Ship } from './Ship';
 export { SurfaceWetness } from './Wetness';
 export { Props, type Floater, type PropsOptions } from './Props';

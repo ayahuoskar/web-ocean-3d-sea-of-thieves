@@ -1,0 +1,39 @@
+{
+  "shot": "cinematic-reef",
+  "capturedAt": "2026-08-03T22:37:34.598Z",
+  "width": 1280,
+  "height": 720,
+  "definition": {
+    "state": {
+      "quality": "high",
+      "cameraMode": "orbit",
+      "windSpeed": 15,
+      "peakWavelength": 47,
+      "cloudCoverage": 0.32,
+      "preset": "skyPro"
+    },
+    "camera": {
+      "position": [
+        -116,
+        -10.5,
+        -104
+      ],
+      "target": [
+        -52,
+        -15.5,
+        -62
+      ]
+    },
+    "time": 44,
+    "settleSteps": 90
+  },
+  "stack": {
+    "backend": "webgpu",
+    "gpu": "ANGLE (NVIDIA, NVIDIA GeForce RTX 5090 (0x00002B85) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    "adapter": "nvidia/blackwell",
+    "browser": "Chrome/151.0.7922.34",
+    "width": 1280,
+    "height": 720,
+    "devicePixelRatio": 1
+  }
+}

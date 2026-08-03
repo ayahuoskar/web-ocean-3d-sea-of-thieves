@@ -265,6 +265,177 @@ export const SHOTS: readonly Shot[] = [
     time: 72.5,
     settleSteps: 90,
   },
+  {
+    id: 'island-approach',
+    title: 'Island, from the water',
+    purpose:
+      'The island as a whole: shoreline rock, beach, canopy band and summit ' +
+      'rock, the depth ramp from turquoise shallows to open blue, and the ' +
+      'aerial perspective over about a kilometre. This is the frame the ' +
+      'planting and the terrain biome are tuned against.',
+    state: {
+      quality: 'high',
+      cameraMode: 'orbit',
+      windSpeed: 15,
+      peakWavelength: 47,
+      cloudCoverage: 0.32,
+      preset: 'skyPro',
+    },
+    /**
+     * Sea level, roughly 400 m off the shore on the bearing the play area sees.
+     *
+     * `ISLAND` sits at (-1150, -780) with a mean shore radius of 500 m, so a
+     * camera 900 m from its centre along the bearing toward the origin is about
+     * that far off the beach — the distance at which the whole island fits the
+     * frame and none of it is a silhouette. Six metres up rather than two: a
+     * 1.5 m swell puts a wave crest through the lens at eye height, and the shot
+     * is about the island rather than about the water in front of it.
+     */
+    /**
+     * 780 m from the island centre, not the 900 the brief specifies.
+     *
+     * The brief gives both a camera — (-405, 6, -275) — and a framing target, the
+     * island filling 85-90% of frame width, and on this terrain the two do not
+     * agree: from 900 m out the island fills about two thirds. The reference
+     * image is the ground truth for the look, so the framing wins and the camera
+     * moves in along the same bearing until it matches. 660 m was tried first and
+     * is too close: the island runs edge to edge and the foreground is all
+     * lagoon, where the brief asks for substantial open ocean in the lower third.
+     * 780 m keeps both headlands inside the frame and the deep water in front of
+     * them.
+     *
+     * It also makes the colour comparison against the reference mean something.
+     * Every "far sea" measurement taken from the old position was sampling water
+     * a kilometre further away, and therefore at a far more grazing angle, than
+     * the pixel it was being compared against — which is why three separate
+     * attempts to explain a saturation gap of 0.20 against 0.66 each moved the
+     * number by a rounding error.
+     */
+    camera: { position: [-505, 6, -342], target: [-1150, 58, -780] },
+    time: 40,
+    settleSteps: 90,
+  },
+  {
+    id: 'shore-break',
+    title: 'The shore break',
+    purpose:
+      'Where the sea meets the sand, from inside the surf zone. Depth-driven ' +
+      'breaking foam, the swash band, wet sand, and rock crossing the ' +
+      'waterline — none of which can be judged from the offshore shot, where ' +
+      'the whole beach is forty pixels tall.',
+    state: {
+      quality: 'high',
+      cameraMode: 'orbit',
+      windSpeed: 15,
+      peakWavelength: 47,
+      cloudCoverage: 0.32,
+      preset: 'skyPro',
+    },
+    /**
+     * Standing in about a metre of water on the cove's bearing, looking up the
+     * beach.
+     *
+     * `COVE_BEARING` in `Props` is 0.7 rad from the island centre and the shore
+     * there is near the mean 500 m radius, which puts the waterline around
+     * (-768, -458). This sits 35 m seaward of it at chest height on the swell,
+     * angled along the beach rather than square at it so the surf line runs
+     * across the frame instead of being a horizontal band.
+     */
+    camera: { position: [-726, 2.6, -424], target: [-830, 3, -516] },
+    time: 52,
+    settleSteps: 90,
+  },
+  {
+    id: 'reef-dive',
+    title: 'Over the reef',
+    purpose:
+      'The populated half of the underwater scene: coral, reef rock, kelp and ' +
+      'the fish that live on it. The `underwater` shot deliberately looks *up* ' +
+      'at the surface and the hull, so it can and does pass with an empty reef ' +
+      'below it — which is exactly how a reef with no fish within visibility ' +
+      'range went unnoticed.',
+    state: {
+      quality: 'high',
+      cameraMode: 'orbit',
+      windSpeed: 10,
+      peakWavelength: 36,
+      cloudCoverage: 0.32,
+      preset: 'skyPro',
+    },
+    /**
+     * Five metres off the bottom, fifteen out from the nearest reef patch, looking
+     * back *at* it.
+     *
+     * The aim is the whole shot. `reefPatches` puts its closest patch at
+     * (33, 29) and `findReefStation` gives reef school 0 that same patch, so the
+     * first cut of this shot — standing at (34, 26) looking outward to (82, 54)
+     * — had the school directly behind the lens and photographed empty sand
+     * beyond it. It passed, twice, and was used as evidence that the reef had no
+     * fish. Standing off and looking in puts the coral bed and its residents in
+     * the same frame.
+     *
+     * Fifteen metres, not thirty. `schoolCentres` reports school 1 milling on an
+     * 11 m circuit centred at (33, 31), so thirty metres did frame it — and a
+     * 0.42 m fish at thirty metres, through water whose visibility is 45 m, is
+     * four pixels of something the same colour as the water behind it. The
+     * second cut of this shot proved the school was in frame and still showed
+     * nothing, which is worth recording: "no fish visible" had two independent
+     * causes and fixing the aim only removed the first.
+     */
+    camera: { position: [45, -12, 43], target: [33, -14.6, 31] },
+    time: 68,
+    settleSteps: 90,
+  },
+  {
+    id: 'cinematic-reef',
+    title: 'The tour, under the surface',
+    purpose:
+      "What the cinematic flight's `reef-run` beat actually sees. The tour is " +
+      'the one camera a viewer does not steer, so a leg of it pointed at empty ' +
+      'sand is a defect nobody can work around — and that is what it was, for ' +
+      'the whole 26 s of it.',
+    state: {
+      quality: 'high',
+      cameraMode: 'orbit',
+      windSpeed: 15,
+      peakWavelength: 47,
+      cloudCoverage: 0.32,
+      preset: 'skyPro',
+    },
+    /**
+     * The `reef-run` beat's middle key, verbatim.
+     *
+     * Pinned as an orbit camera rather than by running the tour, because the
+     * canonical shots cannot select cinematic mode — `ShotState.cameraMode` does
+     * not offer it, since the flight owns the pose and a shot cannot pin one.
+     * Copying the key gives the same frame from a camera the harness can hold
+     * still, which is what a baseline needs. If the beat moves, this must move
+     * with it; that is the cost of the arrangement and it is written down here
+     * so the next person moving a key knows to.
+     */
+    camera: { position: [-116, -10.5, -104], target: [-52, -15.5, -62] },
+    time: 44,
+    settleSteps: 90,
+  },
+  {
+    id: 'cinematic-landfall',
+    title: 'The tour, over the cove',
+    purpose:
+      "The `landfall` beat's middle key: the cove, the jetty and the beached " +
+      'pinnace from the air. The previous flight never came within 1.7 km of ' +
+      'any of them.',
+    state: {
+      quality: 'high',
+      cameraMode: 'orbit',
+      windSpeed: 15,
+      peakWavelength: 47,
+      cloudCoverage: 0.32,
+      preset: 'skyPro',
+    },
+    camera: { position: [-812, 58, -318], target: [-768, 6, -476] },
+    time: 30,
+    settleSteps: 90,
+  },
 ] as const;
 
 // --------------------------------------------------------------- noise floor
@@ -305,6 +476,15 @@ export const MEASURED_NOISE_FLOOR: Readonly<Record<string, NoiseFloor>> = {
   'boat-chase': { meanDeltaE: 0.0318, p95DeltaE: 0.0, fractionAbove: 0.00324 },
   waterline: { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
   underwater: { meanDeltaE: 0.005, p95DeltaE: 0.0, fractionAbove: 0.00019 },
+  // Exactly reproducible, and it should be: nothing in this frame moves except
+  // the sea, and at 900 m a wave is a fraction of a pixel. The gate it produces
+  // is `ABSOLUTE_FLOOR` alone, which is the intended behaviour for a shot with
+  // no measurable noise — see the note there.
+  'island-approach': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
+  'shore-break': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
+  'reef-dive': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
+  'cinematic-reef': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
+  'cinematic-landfall': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
 };
 
 /**

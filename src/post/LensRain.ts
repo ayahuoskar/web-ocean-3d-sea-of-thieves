@@ -752,7 +752,31 @@ export class LensRain {
     this.clock = ((time % CLOCK_WRAP) + CLOCK_WRAP) % CLOCK_WRAP;
     this.uClock.value = this.clock;
     this.wetness = this.intensity;
-    this.previousSubmersion = this.submersion;
+    /**
+     * Zero, not `this.submersion` — the edge detector is cleared rather than
+     * carried across.
+     *
+     * A reset is a *teleport*, and the surfacing flood in `update` infers a
+     * continuous motion: it fires when submersion falls from above 0.5 to below
+     * 0.05, on the reasonable assumption that the only way to do that is to come
+     * up through the surface. Carrying the previous shot's submersion over a
+     * reset made a camera cut satisfy the same test. Cutting from the underwater
+     * shot to a clear-day one therefore flooded the lens to full coverage on the
+     * first settle step, and since the lens dries on a 26 s constant and a settle
+     * run is a second and a half, the clear-day frame was photographed through
+     * a screenful of droplets.
+     *
+     * That is what it looked like in the `island-approach` baseline, which
+     * follows `underwater` in the shot list: a clear midday frame photographed
+     * through a wet lens.
+     *
+     * It is *not* what `tests/isolation.spec.ts` measures, which was worth
+     * checking rather than assuming — that test goes storm to clear-day with
+     * nothing submerged in between, and its figure is unmoved by this fix
+     * (1.598 before, 1.595 after). Its residual is sea state surviving the
+     * reset, which is a separate leak and still open.
+     */
+    this.previousSubmersion = 0;
 
     const gravity = this.uGravity.value as THREE.Vector2;
     gravity.copy(this.gravityTarget);

@@ -30,7 +30,52 @@ export interface CameraDirectorOptions {
   surfaceHeight: (x: number, z: number) => number;
 }
 
+/**
+ * Fly speed, and the range the wheel moves it over.
+ *
+ * 22 m/s is a reasonable default for looking at the ship and useless for
+ * anything else in this world: the island is 1.4 km away, so crossing to it at
+ * the default takes over a minute, and once there the same speed is far too
+ * quick to look at a tree with. A fixed speed plus a boost key cannot serve both
+ * — which is why every editor fly camera in the industry puts the speed on the
+ * wheel.
+ *
+ * Geometric steps, not linear ones. The useful range spans two and a half
+ * orders of magnitude, and a linear step that is sensible at 200 m/s is
+ * imperceptible at 2. Each notch is a fixed *ratio*, so the control feels the
+ * same everywhere in the range.
+ */
+/**
+ * The chase rig's orbit, and why it has one at all.
+ *
+ * The camera used to be a pure function of the hull: stern bearing, fixed
+ * distance, fixed height. That is a good default framing and a bad *only*
+ * framing — at the helm the viewer could not look at the island they were
+ * sailing toward, could not see what was off the bow, and could not look at
+ * their own ship. Every third-person game solves it the same way, by letting the
+ * mouse orbit the follow point while the rig keeps following.
+ *
+ * The offsets recentre when the mouse is released, on a 2.2 s constant. Games
+ * split on this and both answers are defensible: leaving the camera where it was
+ * put is predictable, and returning it means a viewer who looked over their
+ * shoulder in a chase does not then sail for a minute facing sideways. The
+ * return is slow enough to read as the camera settling rather than as the game
+ * taking the controls back, and it is suspended entirely while a drag is live.
+ */
+const CHASE_DISTANCE = 34;
+const CHASE_HEIGHT = 14;
+const CHASE_DISTANCE_MIN = 12;
+const CHASE_DISTANCE_MAX = 120;
+const CHASE_SENSITIVITY = 0.0052;
+/** Just short of straight down and straight up the mast. */
+const CHASE_PITCH_MIN = -0.5;
+const CHASE_PITCH_MAX = 1.15;
+const CHASE_RECENTRE_TAU = 2.2;
+
 const FLY_SPEED = 22;
+const FLY_SPEED_MIN = 1.5;
+const FLY_SPEED_MAX = 600;
+const FLY_SPEED_STEP = 1.18;
 const FLY_BOOST = 5;
 const FLY_DAMPING = 6;
 const MOUSE_SENSITIVITY = 0.0022;
@@ -51,6 +96,13 @@ export class CameraDirector {
 
   // Fly state
   private readonly keys = new Set<string>();
+  /** Metres per second the fly camera accelerates at. Driven by the wheel. */
+  private flySpeed = FLY_SPEED;
+  /** Chase-rig orbit offsets from the stern bearing, and its dolly. */
+  private chaseYaw = 0;
+  private chasePitch = 0;
+  private chaseDistance = CHASE_DISTANCE;
+  private chaseDragging = false;
   private yaw = 0;
   private pitch = 0;
   private pointerLocked = false;
@@ -111,6 +163,10 @@ export class CameraDirector {
     this.domElement.addEventListener('mousedown', this.onMouseDown, { signal });
     document.addEventListener('pointerlockchange', this.onPointerLockChange, { signal });
     document.addEventListener('mousemove', this.onMouseMove, { signal });
+    // Not passive: the wheel has to stop the page scrolling under the canvas
+    // while the fly camera is using it.
+    this.domElement.addEventListener('wheel', this.onWheel, { signal, passive: false });
+    window.addEventListener('mouseup', this.onMouseUp, { signal });
   }
 
   get currentMode(): DirectorMode {
@@ -140,6 +196,14 @@ export class CameraDirector {
   /** Position on the cinematic loop in seconds. Meaningless in other modes. */
   get cinematicTime(): number {
     return this.cinematic.time;
+  }
+
+  /**
+   * Hour of the day the cinematic tour wants to be lit at. Meaningless in other
+   * modes; see `Cinematic.timeOfDayHours`.
+   */
+  get cinematicTimeOfDay(): number {
+    return this.cinematic.timeOfDayHours;
   }
 
   setChaseTarget(target: CameraTarget | null): void {
@@ -310,7 +374,7 @@ export class CameraDirector {
     const right = this.tmpVec2.set(1, 0, 0).applyQuaternion(this.desiredQuaternion);
 
     const boost = this.keys.has('shiftleft') || this.keys.has('shiftright') ? FLY_BOOST : 1;
-    const speed = FLY_SPEED * boost;
+    const speed = this.flySpeed * boost;
 
     // Accelerate toward the requested direction, then damp — instant velocity
     // changes make a flying camera feel like a cursor rather than a body.
@@ -338,12 +402,36 @@ export class CameraDirector {
       return;
     }
 
-    // Sit behind and above the target, looking slightly down at it.
-    const back = this.tmpVec.set(Math.sin(this.target.heading), 0, Math.cos(this.target.heading));
+    // Recentre toward the stern whenever the viewer is not driving it. Framed as
+    // an exponential rather than a lerp so the rate is the same at any frame
+    // rate — the same reason the follow below is one.
+    if (!this.chaseDragging) {
+      const settle = 1 - Math.exp(-dt / CHASE_RECENTRE_TAU);
+      this.chaseYaw -= this.chaseYaw * settle;
+      this.chasePitch -= this.chasePitch * settle;
+    }
+
+    // Sit behind and above the target, looking slightly down at it — with the
+    // viewer's orbit applied on top of the hull's own bearing, so the rig keeps
+    // following while the camera can point anywhere.
+    const bearing = this.target.heading + this.chaseYaw;
+    const lift = CHASE_HEIGHT / CHASE_DISTANCE + this.chasePitch;
+    const planar = Math.cos(Math.atan(lift));
+    const back = this.tmpVec.set(
+      Math.sin(bearing) * planar,
+      0,
+      Math.cos(bearing) * planar,
+    );
     this.desiredPosition
       .copy(this.target.position)
-      .addScaledVector(back, -34)
-      .add(this.tmpVec2.set(0, 14, 0));
+      .addScaledVector(back, -this.chaseDistance)
+      .add(this.tmpVec2.set(0, this.chaseDistance * lift * planar, 0));
+
+    // Never below the sea. A rig orbited to a low pitch in a seaway would
+    // otherwise dip through the surface every swell, which reads as the camera
+    // being swamped rather than as a low angle.
+    const surface = this.surfaceHeight(this.desiredPosition.x, this.desiredPosition.z);
+    if (this.desiredPosition.y < surface + 1.6) this.desiredPosition.y = surface + 1.6;
 
     this.tmpVec2.copy(this.target.position).y += 4;
     this.tmpQuat.setFromRotationMatrix(
@@ -441,6 +529,13 @@ export class CameraDirector {
     if (this.mode === 'fly' && !this.pointerLocked) {
       void this.domElement.requestPointerLock?.();
     }
+    // Boat mode drags to orbit. No pointer lock: the helm is a mode a viewer
+    // sits in for minutes at a time and locking the cursor there would trap it.
+    if (this.mode === 'boat') this.chaseDragging = true;
+  };
+
+  private onMouseUp = (): void => {
+    this.chaseDragging = false;
   };
 
   private onPointerLockChange = (): void => {
@@ -448,6 +543,13 @@ export class CameraDirector {
   };
 
   private onMouseMove = (event: MouseEvent): void => {
+    if (this.mode === 'boat') {
+      if (!this.chaseDragging) return;
+      this.chaseYaw -= event.movementX * CHASE_SENSITIVITY;
+      this.chasePitch += event.movementY * CHASE_SENSITIVITY;
+      this.chasePitch = THREE.MathUtils.clamp(this.chasePitch, CHASE_PITCH_MIN, CHASE_PITCH_MAX);
+      return;
+    }
     if (this.mode !== 'fly' || !this.pointerLocked) return;
     this.yaw -= event.movementX * MOUSE_SENSITIVITY;
     this.pitch -= event.movementY * MOUSE_SENSITIVITY;
@@ -455,6 +557,43 @@ export class CameraDirector {
     const limit = Math.PI / 2 - 0.01;
     this.pitch = THREE.MathUtils.clamp(this.pitch, -limit, limit);
   };
+
+  /**
+   * Wheel changes fly speed; every other mode leaves the event alone.
+   *
+   * Orbit mode is the one that must not be touched: `OrbitControls` owns the
+   * wheel there for dolly, and swallowing it would break zoom. So this returns
+   * without calling `preventDefault` unless the fly camera is actually the thing
+   * being driven — a guard, not a global capture.
+   */
+  private onWheel = (event: WheelEvent): void => {
+    if (this.mode === 'boat') {
+      event.preventDefault();
+      const steps = event.deltaY > 0 ? 1 : -1;
+      this.chaseDistance = THREE.MathUtils.clamp(
+        this.chaseDistance * Math.pow(1.14, steps),
+        CHASE_DISTANCE_MIN,
+        CHASE_DISTANCE_MAX,
+      );
+      return;
+    }
+    if (this.mode !== 'fly') return;
+    event.preventDefault();
+    // Only the sign is used. Wheel deltas are not comparable between a mouse, a
+    // trackpad and a browser's `deltaMode`, so a notch is a notch.
+    const steps = event.deltaY > 0 ? -1 : 1;
+    this.setFlySpeed(this.flySpeed * Math.pow(FLY_SPEED_STEP, steps));
+  };
+
+  /** Fly speed in m/s, clamped to the useful range. */
+  setFlySpeed(value: number): void {
+    this.flySpeed = THREE.MathUtils.clamp(value, FLY_SPEED_MIN, FLY_SPEED_MAX);
+  }
+
+  /** Current fly speed in m/s, for a HUD readout. */
+  get flySpeedValue(): number {
+    return this.flySpeed;
+  }
 
   private exitPointerLock(): void {
     if (document.pointerLockElement === this.domElement) document.exitPointerLock();

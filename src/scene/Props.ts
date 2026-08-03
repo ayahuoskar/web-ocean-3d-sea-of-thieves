@@ -1,7 +1,7 @@
 import * as THREE from 'three/webgpu';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import type { AssetLoader } from './AssetLoader';
-import { ISLAND, seafloorHeight } from './Seafloor';
+import { dequantiseGeometry, type AssetLoader } from './AssetLoader';
+import { ISLAND, REEF_BAND, reefPatches, seafloorHeight } from './Seafloor';
 import { SEEDS, mulberry32 } from '../core/random';
 
 /**
@@ -50,27 +50,34 @@ import { SEEDS, mulberry32 } from '../core/random';
 
 const BUOY_URL = '/models/ocean_buoy/ocean_buoy_1k.gltf';
 const BARREL_URL = '/models/barrel_03/barrel_03_1k.gltf';
-const ROCK_URL = '/models/rock_07/rock_07_1k.gltf';
-const CLIFF_URL = '/models/namaqualand_cliff_01/namaqualand_cliff_01_1k.gltf';
 
 /** Scene-dressing library. Every entry is optional: a 404 thins the scene. */
 const DRESSING_URLS = {
-  coastalCliff: '/models/dressing/coastal_cliff_02.glb',
-  coastalRampart: '/models/dressing/coastal_cliff_04.glb',
+  // Shore rock. The three `rock_*` kinds are closed solids and the coast kinds
+  // are not — see `headlandRock`'s note in `dressIsland` for why that decided
+  // which of them survived.
+  headlandRock: '/models/dressing/rock_slab_a.glb',
+  shoreOutcrop: '/models/dressing/rock_slab_b.glb',
+  shoreBoulder: '/models/dressing/rock_boulder.glb',
   coastLineWide: '/models/dressing/coast_line_01.glb',
   coastLineNarrow: '/models/dressing/coast_line_02.glb',
   coastRocksWide: '/models/dressing/coast_rocks_01.glb',
   coastRocksTall: '/models/dressing/coast_rocks_03.glb',
   landRocks: '/models/dressing/coast_land_rocks_03.glb',
-  sandRocks: '/models/dressing/sand_rocks_small_01.glb',
-  tree: '/models/dressing/island_tree_01.glb',
+  // The island skirt and the reef. These two were loaded raw out of
+  // `public/models` until the LOD pass, because they predate the dressing
+  // pipeline — which meant the scene's two largest instanced costs were the
+  // only kinds in it without a LOD chain. `rock_07` alone stands 154 times.
+  islandRock: '/models/dressing/rock_07.glb',
+  // The canopy. `tree` and `treeFlame` are botanical models; `treeMid` is the
+  // one Poly Haven scan good enough to stand with them.
+  tree: '/models/dressing/tree_orchid.glb',
+  treeFlame: '/models/dressing/tree_poinciana.glb',
   treeMid: '/models/dressing/island_tree_02.glb',
-  treeWind: '/models/dressing/island_tree_03.glb',
   jacaranda: '/models/dressing/jacaranda_tree.glb',
   pachira: '/models/dressing/pachira_aquatica_01.glb',
   fern: '/models/dressing/fern_02.glb',
   sorrel: '/models/dressing/shrub_sorrel_01.glb',
-  grass: '/models/dressing/grass_bermuda_01.glb',
   anthurium: '/models/dressing/anthurium_botany_01.glb',
   calathea: '/models/dressing/calathea_orbifolia_01.glb',
   pinnace: '/models/dressing/ship_pinnace.glb',
@@ -86,21 +93,154 @@ const DRESSING_URLS = {
   chest: '/models/dressing/treasure_chest.glb',
   reefCrate: '/models/dressing/wooden_crate_01.glb',
   shell: '/models/dressing/lambis_shell.glb',
+  // The reef garden. See `placeReefGarden` for why these are the shapes and
+  // ASSET_LICENSES.md for where they come from — these are the only assets in
+  // the project not from Poly Haven, because Poly Haven publishes no coral.
+  coralSoft: '/models/dressing/soft_coral_set.glb',
+  coralFan: '/models/dressing/stylaster_coral.glb',
+  coralBirdsnest: '/models/dressing/seriatopora_coral.glb',
+  coralBrain: '/models/dressing/goniastrea_coral.glb',
+  // Ground cover, replacing the lawn-grass sprig that used to carry the island.
+  grassMeadow: '/models/dressing/grass_medium_01.glb',
+  grassTussock: '/models/dressing/grass_medium_02.glb',
+  // The palms. These replace `Remains.ts`'s procedural one — see the note over
+  // their scatters in `dressIsland`.
+  palmCoconut: '/models/dressing/palm_coconut.glb',
+  palmTall: '/models/dressing/palm_tall.glb',
 } as const;
 
 type DressingKey = keyof typeof DRESSING_URLS;
-type Dressing = Record<DressingKey, THREE.Group | null>;
+
+/**
+ * One dressing asset: the full-detail model and whatever LOD levels ship with it.
+ *
+ * `scripts/optimize-assets.mjs` writes `<slug>_lod1.glb` and `<slug>_lod2.glb`
+ * beside the base model for the kinds that earn them, so the URLs are derived
+ * rather than listed — there is no second table to keep in step with the first.
+ * A level that does not exist is simply absent, and a kind with no levels draws
+ * exactly as it did before any of this.
+ */
+interface DressingEntry {
+  base: THREE.Group | null;
+  lods: THREE.Group[];
+}
+
+type Dressing = Record<DressingKey, DressingEntry>;
+
+/** Levels the loader will look for beside each base model. */
+const LOD_LEVELS = 2;
+
+/**
+ * Distances at which an instance drops to the next level, metres.
+ *
+ * Set against the two places the camera actually is. From the play area the
+ * island is 1.4 km away, so everything on it is past the second switch and wears
+ * LOD2 — which is the case that matters, because that is the view the scene
+ * spends most of its time in and the island is most of its triangles. From the
+ * fly camera over the island, the trees within a hundred metres keep LOD0 and
+ * the far side of the island does not.
+ *
+ * 120 m is roughly where a 5 m tree stops resolving its individual leaves at
+ * this field of view, and 420 m is where its canopy is a shape rather than a
+ * texture. Both are generous: a LOD that switches too late costs frame time,
+ * and one that switches too early is visible as a pop.
+ */
+const LOD_SWITCH_METRES = [120, 420];
+
+/**
+ * How far the camera must move before the levels are re-dealt, metres.
+ *
+ * The deal is O(instances) and uploads a matrix buffer, so it must not run every
+ * frame; it also must not lag far enough behind the camera for a switch to
+ * happen visibly late. 25 m is a fifth of the near switch, which bounds the
+ * error in where the boundary falls to something well inside the distance at
+ * which the two levels are distinguishable.
+ */
+const LOD_REFRESH_DISTANCE = 25;
 
 const BUOY_COUNT = 5;
 const BARREL_COUNT = 6;
 const ROCK_COUNT = 34;
-const CLIFF_COUNT = 5;
 
 /** Reef outcrops on the seafloor. One instanced draw, so this can be generous. */
-const REEF_COUNT = 90;
+const REEF_COUNT = 120;
 /** Clear of the spawn point, and inside the shallow plateau (radius 320 m). */
-const REEF_INNER = 26;
-const REEF_OUTER = 260;
+const REEF_INNER = REEF_BAND.inner;
+const REEF_OUTER = REEF_BAND.outer;
+const REEF_PATCH_RADIUS = REEF_BAND.patchRadius;
+
+/**
+ * Fraction of the reef rock that gathers into the patches.
+ *
+ * The rest stays scattered as the rubble between them — a reef has an apron. See
+ * `reefPatches` in `Seafloor` for why the patches exist at all and why they are
+ * shared with the fish rather than drawn here.
+ */
+const REEF_PATCH_SHARE = 0.62;
+
+/**
+ * The reef garden.
+ *
+ * Two jobs, and they want different assets. `coralSoft` is the carpet — small
+ * varied heads at high density, which is what makes a patch read as *reef*
+ * rather than as rocks with decoration on them. The three photogrammetry
+ * colonies are the statement pieces: an order of magnitude more expensive per
+ * instance, so they are placed an order of magnitude less often, one or two per
+ * patch where the eye lands.
+ *
+ * Counts are per detail scale 1, thinned by `propsDetail` like everything else.
+ */
+const CORAL_BED_COUNT = 260;
+const CORAL_BED_ALT_COUNT = 200;
+const CORAL_HEAD_COUNT = 150;
+const CORAL_HEAD_ALT_COUNT = 110;
+const CORAL_PLATE_COUNT = 60;
+const CORAL_FAN_COUNT = 24;
+const CORAL_BIRDSNEST_COUNT = 9;
+const CORAL_BRAIN_COUNT = 13;
+
+/**
+ * Metres a coral stands, before per-instance variation.
+ *
+ * The source scales differ by an order of magnitude — `stylaster_coral` is a
+ * 17 cm museum specimen, the kit pieces are authored against a unit box — so
+ * every kind is scaled to a target *height* rather than by a factor. That keeps
+ * one comparable table instead of a column of magic numbers whose meaning
+ * depends on which file the row came from.
+ */
+const CORAL_BED_HEIGHT = 0.9;
+const CORAL_HEAD_HEIGHT = 1.8;
+const CORAL_PLATE_HEIGHT = 1.0;
+const CORAL_FAN_HEIGHT = 2.1;
+const CORAL_BIRDSNEST_HEIGHT = 1.7;
+const CORAL_BRAIN_HEIGHT = 1.3;
+
+/**
+ * Radius of a coral colony's own clump, metres, and how many heads it gets.
+ *
+ * Reef growth is not a Poisson scatter. It colonises a patch of hard substrate
+ * and spreads from it, so the spatial signature is clumps of a few heads with
+ * bare sand between — and a uniform draw inside the patch, which is what the
+ * first version of this did, reads as gravel. Two levels of clustering (patch,
+ * then colony) is the cheapest way to get the third scale of structure that
+ * makes a reef look grown rather than sprinkled.
+ */
+const CORAL_COLONY_RADIUS = 2.6;
+const CORAL_COLONY_MIN = 3;
+const CORAL_COLONY_MAX = 7;
+
+/**
+ * Metres every coral is pushed into the sand on top of its proportional sink.
+ *
+ * The floor *mesh* is a 256-segment grid over a 4 km extent, so it samples
+ * `seafloorHeight` every fifteen metres and lerps between; the analytic field
+ * these are seated against curves away from that by a decimetre or two in the
+ * worst places. A head seated at exactly the analytic height therefore hovers
+ * about half the time, and a hovering coral is instantly a bug — `Kelp` carries
+ * the same constant for the same reason. Burying the base costs nothing: it is
+ * the part of a coral that is cemented to the substrate anyway.
+ */
+const CORAL_BED_SINK = 0.22;
 
 /**
  * Instance counts for the island dressing at detail 1.
@@ -118,14 +258,15 @@ const REEF_OUTER = 260;
  * never be *covered* by 40 m scans, so the coast kinds are accents chosen for
  * where they land, not for how much of the shore they fill.
  */
-const COASTAL_CLIFF_COUNT = 6;
-const COASTAL_RAMPART_COUNT = 3;
+const ISLAND_CRAG_COUNT = 22;
+const HEADLAND_ROCK_COUNT = 34;
+const SHORE_OUTCROP_COUNT = 26;
+const SHORE_BOULDER_COUNT = 54;
 const COAST_LINE_WIDE_COUNT = 4;
 const COAST_LINE_NARROW_COUNT = 4;
 const COAST_ROCKS_WIDE_COUNT = 4;
 const COAST_ROCKS_TALL_COUNT = 4;
 const LAND_ROCKS_COUNT = 4;
-const SAND_ROCKS_COUNT = 4;
 /**
  * Planting density, and these numbers are the difference between an island and
  * a sandbank.
@@ -142,15 +283,40 @@ const SAND_ROCKS_COUNT = 4;
  * still the largest single cost in this file; the entire canopy is less.
  */
 const JACARANDA_COUNT = 14;
-const TREE_COUNT = 46;
+const TREE_COUNT = 52;
 const TREE_MID_COUNT = 44;
-const TREE_WIND_COUNT = 26;
+/**
+ * The flame trees, and why there are so few of them.
+ *
+ * A royal poinciana in full flower is the loudest thing that grows on an island
+ * and the reference frame has four of them in a canopy of hundreds. That ratio
+ * is the point: at twenty they are what the eye finds in the green, and at sixty
+ * the island is an orange hill.
+ */
+const TREE_FLAME_COUNT = 20;
 const PACHIRA_COUNT = 40;
 const ANTHURIUM_COUNT = 70;
 const CALATHEA_COUNT = 84;
 const FERN_COUNT = 110;
 const SORREL_COUNT = 130;
-const GRASS_COUNT = 620;
+const MEADOW_COUNT = 380;
+const TUSSOCK_COUNT = 200;
+
+/**
+ * Palms, and why there are two kinds of them.
+ *
+ * A coconut grove is the one silhouette everybody associates with a tropical
+ * island, so it is also the one where a single repeated shape is most obvious.
+ * `palmCoconut` is a low double-trunk bearing fruit and `palmTall` is a tall
+ * slender single; between them the shoreline reads as a grove rather than as
+ * one asset stamped seventy times.
+ *
+ * Weighted toward the coconut because it is the cheaper mesh and the better
+ * shape: 6.6k triangles against 9.9k, and it breaks the skyline at two heights
+ * on its own.
+ */
+const PALM_COCONUT_COUNT = 54;
+const PALM_TALL_COUNT = 34;
 const SHELL_COUNT = 9;
 
 /**
@@ -420,6 +586,39 @@ interface Thinnable {
   capacity: number;
   /** Count below which this kind stops thinning. */
   floor: number;
+  /** Present when the kind ships a LOD chain; see `LodKind`. */
+  lod?: LodKind;
+}
+
+/**
+ * A kind drawn at whichever level of detail each instance has earned.
+ *
+ * `THREE.LOD` is no use here: it switches a whole object, and every kind in this
+ * file is one `InstancedMesh` carrying up to six hundred instances spread over a
+ * kilometre of island. Half of them can be forty metres away and half of them
+ * fourteen hundred, and picking one level for the group means picking it wrong
+ * for one of those halves.
+ *
+ * So each level gets its own mesh, sized for the whole population, and the
+ * instances are dealt between them by distance. The matrices are held on the CPU
+ * once and re-dealt only when the camera has actually moved — see
+ * `LOD_REFRESH_DISTANCE`, which is what keeps this off the per-frame budget.
+ */
+interface LodKind {
+  /** `levels[0]` is LOD0. One entry per level, each one mesh per material. */
+  levels: THREE.InstancedMesh[][];
+  /**
+   * Squared distance at which each level gives way to the next. The last level
+   * has no bound — it draws everything past the one before it.
+   */
+  switchesSq: number[];
+  /** Every placement, in the seeded order `setDetailScale` truncates. */
+  matrices: Float32Array;
+  /** World position of each placement, for the distance test. */
+  centres: Float32Array;
+  /** Camera position the current deal was computed for. */
+  dealtAt: THREE.Vector3;
+  dealt: boolean;
 }
 
 /** A loaded asset baked down to one geometry per material. */
@@ -523,6 +722,8 @@ export class Props {
   private readonly ownedGeometries: THREE.BufferGeometry[] = [];
   private readonly sources: THREE.Group[] = [];
   private readonly thinnable: Thinnable[] = [];
+  /** Where the reef gathers. Shared by the rock scatter and the coral garden. */
+  private reefPatches: readonly { x: number; z: number }[] = [];
   private detail = 1;
   private disposed = false;
 
@@ -534,16 +735,21 @@ export class Props {
   ) {
     this.object = new THREE.Group();
     this.object.name = 'props';
-    this.sources.push(sources.buoy, sources.barrel, sources.rock, sources.cliff);
-    for (const group of Object.values(dressing)) if (group) this.sources.push(group);
+    this.sources.push(sources.buoy, sources.barrel);
+    for (const entry of Object.values(dressing)) {
+      if (entry.base) this.sources.push(entry.base);
+      for (const lod of entry.lods) this.sources.push(lod);
+    }
 
     const random = mulberry32(seed);
 
     this.placeFloaters(sources.buoy, sources.barrel, random);
-    this.placeIsland(sources.rock, sources.cliff, random);
-    this.placeReef(sources.rock, random);
+    this.placeIsland(dressing, random);
+    this.reefPatches = reefPatches();
+    this.placeReef(dressing, random);
 
     const dressingRandom = mulberry32((seed ^ DRESSING_SEED_MIX) >>> 0);
+    this.placeReefGarden(dressing, dressingRandom);
     this.dressIsland(dressing, dressingRandom);
     this.placeCove(dressing);
     this.placeFort(dressing);
@@ -556,35 +762,53 @@ export class Props {
     const dressingKeys = Object.keys(DRESSING_URLS) as DressingKey[];
 
     const [hero, dressingResults] = await Promise.all([
-      Promise.all([
-        loader.load(BUOY_URL),
-        loader.load(BARREL_URL),
-        loader.load(ROCK_URL),
-        loader.load(CLIFF_URL),
-      ]),
+      Promise.all([loader.load(BUOY_URL), loader.load(BARREL_URL)]),
       // Settled, not `all`. The dressing is thirty independent files and no one
       // of them is worth the scene: a missing fern should cost a fern, not the
       // island, the cove and the ship's wake along with it.
-      Promise.allSettled(dressingKeys.map((key) => loader.load(DRESSING_URLS[key]))),
+      //
+      // The LOD levels ride in the same batch and under the same rule, one step
+      // weaker: a level that is absent is not an error at all. Only some kinds
+      // earn a chain, the optimiser decides which, and a kind without one simply
+      // draws at full detail wherever it stands.
+      Promise.allSettled(
+        dressingKeys.flatMap((key) => [
+          loader.load(DRESSING_URLS[key]),
+          ...lodUrls(DRESSING_URLS[key]).map((url) => loader.load(url)),
+        ]),
+      ),
     ]);
 
-    const [buoy, barrel, rock, cliff] = hero;
+    const [buoy, barrel] = hero;
     for (const group of hero) group.updateMatrixWorld(true);
 
+    const stride = 1 + LOD_LEVELS;
     const dressing = {} as Dressing;
     dressingKeys.forEach((key, index) => {
-      const result = dressingResults[index];
-      if (result.status === 'fulfilled') {
-        result.value.updateMatrixWorld(true);
-        dressing[key] = result.value;
+      const base = dressingResults[index * stride];
+      const entry: DressingEntry = { base: null, lods: [] };
+
+      if (base.status === 'fulfilled') {
+        base.value.updateMatrixWorld(true);
+        entry.base = base.value;
       } else {
-        console.warn(`[ocean] dressing asset unavailable: ${DRESSING_URLS[key]}`, result.reason);
-        dressing[key] = null;
+        console.warn(`[ocean] dressing asset unavailable: ${DRESSING_URLS[key]}`, base.reason);
       }
+
+      // Levels are taken in order and stop at the first gap, so a kind that
+      // ships only `_lod1` cannot end up with `_lod2` standing in for it.
+      for (let level = 1; level <= LOD_LEVELS; level++) {
+        const result = dressingResults[index * stride + level];
+        if (result.status !== 'fulfilled') break;
+        result.value.updateMatrixWorld(true);
+        entry.lods.push(result.value);
+      }
+
+      dressing[key] = entry;
     });
 
     return new Props(
-      { buoy, barrel, rock, cliff },
+      { buoy, barrel },
       dressing,
       options.seed ?? SEEDS.props,
       options.detailScale ?? 1,
@@ -613,6 +837,67 @@ export class Props {
     for (const entry of this.thinnable) {
       const count = Math.max(entry.floor, Math.round(entry.capacity * clamped));
       for (const mesh of entry.meshes) mesh.count = Math.min(entry.capacity, count);
+      // A LOD kind's counts are owned by the deal, not by this: the meshes above
+      // are only level 0, and how many instances belong to it depends on where
+      // the camera is. Invalidating is enough — `updateLod` redeals next frame.
+      if (entry.lod) entry.lod.dealt = false;
+    }
+  }
+
+  /**
+   * Deals every LOD kind's instances to the level each has earned.
+   *
+   * Cheap to call every frame and normally does nothing: the deal only runs when
+   * the camera has moved far enough for a switch to plausibly have changed, and
+   * the whole island is a few thousand distance tests when it does. The
+   * alternative — sorting per frame — would cost a megabyte of matrix upload
+   * every frame to answer a question whose answer changes about once a second.
+   */
+  updateLod(cameraPosition: THREE.Vector3): void {
+    if (this.disposed) return;
+
+    for (const entry of this.thinnable) {
+      const lod = entry.lod;
+      if (!lod) continue;
+      if (lod.dealt && lod.dealtAt.distanceToSquared(cameraPosition) < LOD_REFRESH_DISTANCE ** 2) {
+        continue;
+      }
+
+      const drawn = Math.min(entry.capacity, Math.max(entry.floor, Math.round(entry.capacity * this.detail)));
+      const counts = new Array<number>(lod.levels.length).fill(0);
+
+      for (let i = 0; i < drawn; i++) {
+        const dx = lod.centres[i * 3] - cameraPosition.x;
+        const dy = lod.centres[i * 3 + 1] - cameraPosition.y;
+        const dz = lod.centres[i * 3 + 2] - cameraPosition.z;
+        const distanceSq = dx * dx + dy * dy + dz * dz;
+
+        let level = lod.levels.length - 1;
+        for (let k = 0; k < lod.switchesSq.length; k++) {
+          if (distanceSq < lod.switchesSq[k]) {
+            level = k;
+            break;
+          }
+        }
+
+        const slot = counts[level]++;
+        for (const mesh of lod.levels[level]) {
+          (mesh.instanceMatrix.array as Float32Array).set(
+            lod.matrices.subarray(i * 16, i * 16 + 16),
+            slot * 16,
+          );
+        }
+      }
+
+      for (let level = 0; level < lod.levels.length; level++) {
+        for (const mesh of lod.levels[level]) {
+          mesh.count = counts[level];
+          mesh.instanceMatrix.needsUpdate = true;
+        }
+      }
+
+      lod.dealtAt.copy(cameraPosition);
+      lod.dealt = true;
     }
   }
 
@@ -685,13 +970,12 @@ export class Props {
    * clears the spawn point but stays inside the plateau, where the water is
    * shallow enough that light still reaches the bottom.
    */
-  private placeReef(rock: THREE.Group, random: () => number): void {
-    const reefMesh = this.buildInstanced(rock, REEF_COUNT, 'reef-rocks');
-    if (!reefMesh) return;
+  private placeReef(dressing: Dressing, random: () => number): void {
+    const kind = this.openKind(dressing.islandRock, REEF_COUNT, 'reef-rocks');
+    if (!kind) return;
     // Never culled by its own bounds against the surface: the reef is read
     // through refraction from above as well as directly from below.
-    reefMesh.castShadow = false;
-    this.object.add(reefMesh);
+    for (const level of kind.levels) for (const mesh of level) mesh.castShadow = false;
 
     const matrix = new THREE.Matrix4();
     const position = new THREE.Vector3();
@@ -700,13 +984,15 @@ export class Props {
     const euler = new THREE.Euler();
 
     for (let i = 0; i < REEF_COUNT; i++) {
-      const angle = random() * Math.PI * 2;
-      // Square-root radius keeps the scatter even in *area* rather than
-      // clustering everything at the inner edge.
-      const radius = REEF_INNER + Math.sqrt(random()) * (REEF_OUTER - REEF_INNER);
-      const x = Math.cos(angle) * radius;
-      const z = Math.sin(angle) * radius;
-      const s = 1.6 + random() * 7;
+      // Most of the rock gathers into the patches and the rest stays scattered
+      // between them — see `REEF_PATCHES`. The split is by index rather than by
+      // a per-instance draw so that thinning the kind at a lower detail scale
+      // keeps the same ratio instead of eating the patches first.
+      const inPatch = i < REEF_COUNT * REEF_PATCH_SHARE;
+      const site = inPatch ? this.reefSample(random) : reefScatterSample(random);
+      const x = site.x;
+      const z = site.z;
+      const s = inPatch ? 1.8 + random() * 6 : 1.6 + random() * 7;
 
       // Sunk into the floor by a fraction of their size, so they read as
       // outcrops rather than as boulders resting on a plane.
@@ -714,27 +1000,266 @@ export class Props {
       euler.set((random() - 0.5) * 0.7, random() * Math.PI * 2, (random() - 0.5) * 0.7);
       quaternion.setFromEuler(euler);
       scale.set(s, s * (0.5 + random() * 0.7), s);
-      reefMesh.setMatrixAt(i, matrix.compose(position, quaternion, scale));
+      matrix.compose(position, quaternion, scale);
+      for (const mesh of kind.meshes) mesh.setMatrixAt(i, matrix);
+      if (kind.matrices && kind.centres) {
+        matrix.toArray(kind.matrices, i * 16);
+        kind.centres[i * 3] = position.x;
+        kind.centres[i * 3 + 1] = position.y;
+        kind.centres[i * 3 + 2] = position.z;
+      }
     }
-    reefMesh.instanceMatrix.needsUpdate = true;
-    reefMesh.computeBoundingSphere();
-    this.registerThinnable([reefMesh], REEF_COUNT);
+    this.closeKind(kind, this.object, REEF_COUNT);
+  }
+
+  /** A point inside one of the reef patches, chosen round-robin then jittered. */
+  private reefSample(random: () => number): { x: number; z: number } {
+    const patch = this.reefPatches[Math.floor(random() * this.reefPatches.length)];
+    if (!patch) return reefScatterSample(random);
+    const angle = random() * Math.PI * 2;
+    // Square root again, for the same reason as the annulus: without it the
+    // patch is a ring rather than a mound.
+    const radius = Math.sqrt(random()) * REEF_PATCH_RADIUS;
+    return { x: patch.x + Math.cos(angle) * radius, z: patch.z + Math.sin(angle) * radius };
   }
 
   /**
-   * Builds the island silhouette: a few large cliff blocks forming the mass,
-   * ringed with boulders down to the waterline, all seated on the seafloor
-   * heightfield so nothing floats or buries itself.
+   * Plants the coral.
+   *
+   * The one thing the underwater view had none of. Everything alive down there
+   * was either a fish or a kelp stipe, and both of those are *sparse* by nature,
+   * so a viewer who dived found sand, some rocks and a couple of blades. Coral
+   * is what fills the space between the rocks, and it is also the only thing
+   * here with strong local colour — which matters more than the geometry does,
+   * because ten metres of this water has already taken the contrast out of
+   * everything else.
+   *
+   * Every head is seated on the heightfield and sunk slightly, tilted a little
+   * off vertical, and given a spin: coral grows toward the light, so the lean is
+   * small and the yaw is free. They cast no shadows — a shadow map that reaches
+   * the seabed is not something this scene budgets for, and the caustics already
+   * carry the light on the bottom.
+   *
+   * Density comes from `coralSoft`, which is a set of twenty-four distinct forms
+   * in one file: `bake.include` takes a different three of them per kind and
+   * stacks them into a clump, so two draws' worth of geometry produce a bed that
+   * does not read as one shape repeated. The three photogrammetry colonies are
+   * placed sparsely on top of that as the pieces the eye actually lands on.
    */
-  private placeIsland(rock: THREE.Group, cliff: THREE.Group, random: () => number): void {
+  private placeReefGarden(dressing: Dressing, random: () => number): void {
+    const garden = new THREE.Group();
+    garden.name = 'reef-garden';
+    this.object.add(garden);
+
+    const kinds: {
+      source: DressingEntry;
+      count: number;
+      height: number;
+      name: string;
+      include?: (name: string) => boolean;
+      lean: number;
+      sink: number;
+    }[] = [
+      // The carpet: three low mound forms stacked into one colony, at 800
+      // triangles for the clump. This is where the density comes from, and it
+      // is only affordable because these forms are cheap — the same count of
+      // the tube corals below would be a million triangles on its own.
+      {
+        source: dressing.coralSoft,
+        count: CORAL_BED_COUNT,
+        height: CORAL_BED_HEIGHT,
+        name: 'reef-coral-bed',
+        include: (n) => /^coral(12|16|18)_/.test(n),
+        lean: 0.3,
+        sink: 0.16,
+      },
+      {
+        source: dressing.coralSoft,
+        count: CORAL_BED_ALT_COUNT,
+        height: CORAL_BED_HEIGHT * 0.85,
+        name: 'reef-coral-bed-alt',
+        include: (n) => /^coral(21|27|28)_/.test(n),
+        lean: 0.3,
+        sink: 0.16,
+      },
+      // The upright forms — organ-pipe and barrel corals. These are what stop a
+      // reef reading as lumps on a floor: they are the only thing down here
+      // except the rocks with a vertical silhouette, and a diver's sense of
+      // being *inside* something depends on them.
+      {
+        source: dressing.coralSoft,
+        count: CORAL_HEAD_COUNT,
+        height: CORAL_HEAD_HEIGHT,
+        name: 'reef-coral-head',
+        include: (n) => /^coral(10|11)_/.test(n),
+        lean: 0.18,
+        sink: 0.1,
+      },
+      {
+        source: dressing.coralSoft,
+        count: CORAL_HEAD_ALT_COUNT,
+        height: CORAL_HEAD_HEIGHT * 0.85,
+        name: 'reef-coral-head-alt',
+        include: (n) => /^coral(19|25)_/.test(n),
+        lean: 0.18,
+        sink: 0.1,
+      },
+      // Table and plate corals: the horizontal counterpoint, and the shape that
+      // gives the fish something to shelter under.
+      {
+        source: dressing.coralSoft,
+        count: CORAL_PLATE_COUNT,
+        height: CORAL_PLATE_HEIGHT,
+        name: 'reef-coral-plate',
+        include: (n) => /^coral(13|14)_/.test(n),
+        lean: 0.22,
+        sink: 0.1,
+      },
+      {
+        source: dressing.coralFan,
+        count: CORAL_FAN_COUNT,
+        height: CORAL_FAN_HEIGHT,
+        name: 'reef-coral-fan',
+        lean: 0.3,
+        sink: 0.08,
+      },
+      {
+        source: dressing.coralBirdsnest,
+        count: CORAL_BIRDSNEST_COUNT,
+        height: CORAL_BIRDSNEST_HEIGHT,
+        name: 'reef-coral-birdsnest',
+        lean: 0.2,
+        sink: 0.1,
+      },
+      {
+        source: dressing.coralBrain,
+        count: CORAL_BRAIN_COUNT,
+        height: CORAL_BRAIN_HEIGHT,
+        name: 'reef-coral-brain',
+        lean: 0.16,
+        sink: 0.22,
+      },
+    ];
+
+    const matrix = new THREE.Matrix4();
+    const position = new THREE.Vector3();
+    const quaternion = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    const euler = new THREE.Euler();
+    const box = new THREE.Box3();
+
+    for (const kind of kinds) {
+      const bake: BakeOptions = {
+        include: kind.include,
+        origin: kind.include ? 'stack' : 'cluster',
+      };
+      const parts = this.bakeParts(kind.source.base, bake);
+      const meshes = this.buildScatter(parts, kind.count, kind.name);
+      if (!meshes) continue;
+
+      const levels: THREE.InstancedMesh[][] = [meshes];
+      for (let i = 0; i < kind.source.lods.length; i++) {
+        const level = this.buildScatter(
+          this.bakeParts(kind.source.lods[i], bake),
+          kind.count,
+          `${kind.name}-lod${i + 1}`,
+        );
+        if (level) levels.push(level);
+      }
+      const hasLod = levels.length > 1;
+      const matrices = hasLod ? new Float32Array(kind.count * 16) : null;
+      const centres = hasLod ? new Float32Array(kind.count * 3) : null;
+
+      // The source scales differ by an order of magnitude between a museum
+      // specimen and an authored kit piece, so the instance scale is derived
+      // from the model's own height rather than written down per asset.
+      box.makeEmpty();
+      for (const part of parts) {
+        part.geometry.computeBoundingBox();
+        if (part.geometry.boundingBox) box.union(part.geometry.boundingBox);
+      }
+      const modelHeight = Math.max(1e-3, box.max.y - box.min.y);
+
+      for (const level of levels) {
+        for (const mesh of level) {
+          mesh.castShadow = false;
+          mesh.receiveShadow = true;
+          garden.add(mesh);
+        }
+      }
+
+      let placed = 0;
+      // The colony currently being filled, and how many heads it still owes.
+      let colony = { x: 0, z: 0 };
+      let colonyLeft = 0;
+
+      for (let i = 0; i < kind.count; i++) {
+        if (colonyLeft <= 0) {
+          // A tenth of colonies start out on the open sand, so a patch has
+          // outliers leading to it rather than an edge.
+          colony = random() < 0.9 ? this.reefSample(random) : reefScatterSample(random);
+          colonyLeft =
+            CORAL_COLONY_MIN + Math.floor(random() * (CORAL_COLONY_MAX - CORAL_COLONY_MIN + 1));
+        }
+        colonyLeft -= 1;
+
+        const spread = Math.sqrt(random()) * CORAL_COLONY_RADIUS;
+        const bearing = random() * Math.PI * 2;
+        const site = {
+          x: colony.x + Math.cos(bearing) * spread,
+          z: colony.z + Math.sin(bearing) * spread,
+        };
+        const floor = seafloorHeight(site.x, site.z);
+        // Nothing is planted where the plateau has fallen away past the light,
+        // and nothing above the waterline: this is a reef, not a rock pool.
+        if (floor > -3 || floor < -30) continue;
+
+        const s = (kind.height * (0.6 + random() * 0.9)) / modelHeight;
+        position.set(site.x, floor - modelHeight * s * kind.sink - CORAL_BED_SINK, site.z);
+        euler.set(
+          (random() - 0.5) * kind.lean,
+          random() * Math.PI * 2,
+          (random() - 0.5) * kind.lean,
+        );
+        quaternion.setFromEuler(euler);
+        scale.set(s, s * (0.85 + random() * 0.35), s);
+        matrix.compose(position, quaternion, scale);
+        for (const mesh of meshes) mesh.setMatrixAt(placed, matrix);
+        if (matrices && centres) {
+          matrix.toArray(matrices, placed * 16);
+          centres[placed * 3] = position.x;
+          centres[placed * 3 + 1] = position.y;
+          centres[placed * 3 + 2] = position.z;
+        }
+        placed += 1;
+      }
+
+      this.seal(meshes, placed, hasLod ? { levels, matrices: matrices!, centres: centres! } : undefined);
+    }
+  }
+
+  /**
+   * Boulders scattered from the island's shoulders down to the waterline, seated
+   * on the seafloor heightfield so nothing floats or buries itself.
+   *
+   * This used to *be* the island: five `namaqualand_cliff_01` blocks on the
+   * summit and thirty-four boulders round them, back when the terrain under them
+   * was a 72 m mound and needed the help. It does not any more. The heightfield
+   * carries a 150 m dome with its own crest, bays and headland, and five 90 m
+   * scans stacked on top of it read as a cairn somebody built there.
+   *
+   * The cliff kind is gone entirely rather than moved. `shells.mjs` measures it
+   * at a depth-over-length of 0.53 — closed, and not a facade — but it is a
+   * single 90 m mass with one composed silhouette, and five copies of one
+   * silhouette is a repeat the eye finds immediately whatever you do with the
+   * rotations. Crags on the upper slopes are now `islandCrag` in `dressIsland`,
+   * built from the closed 1-2 m rocks stretched and clumped, which gives the
+   * same job a different shape every time.
+   */
+  private placeIsland(dressing: Dressing, random: () => number): void {
     const island = new THREE.Group();
     island.name = 'island';
     this.object.add(island);
-
-    const cliffMesh = this.buildInstanced(cliff, CLIFF_COUNT, 'island-cliffs');
-    const rockMesh = this.buildInstanced(rock, ROCK_COUNT, 'island-rocks');
-    if (cliffMesh) island.add(cliffMesh);
-    if (rockMesh) island.add(rockMesh);
 
     const matrix = new THREE.Matrix4();
     const position = new THREE.Vector3();
@@ -742,26 +1267,19 @@ export class Props {
     const scale = new THREE.Vector3();
     const euler = new THREE.Euler();
 
-    if (cliffMesh) {
-      for (let i = 0; i < CLIFF_COUNT; i++) {
-        const angle = (i / CLIFF_COUNT) * Math.PI * 2 + random() * 0.4;
-        const radius = ISLAND.radius * (0.1 + random() * 0.3);
-        const x = ISLAND.x + Math.cos(angle) * radius;
-        const z = ISLAND.z + Math.sin(angle) * radius;
-        const s = 7.5 + random() * 4.5;
-
-        position.set(x, seafloorHeight(x, z) - 6 * s * 0.06, z);
-        euler.set(0, angle + Math.PI, (random() - 0.5) * 0.12);
-        quaternion.setFromEuler(euler);
-        scale.set(s, s * (0.85 + random() * 0.4), s);
-        cliffMesh.setMatrixAt(i, matrix.compose(position, quaternion, scale));
+    /** Writes the composed `matrix` into every level and into the deal arrays. */
+    const record = (kind: NonNullable<ReturnType<Props['openKind']>>, i: number): void => {
+      for (const mesh of kind.meshes) mesh.setMatrixAt(i, matrix);
+      if (kind.matrices && kind.centres) {
+        matrix.toArray(kind.matrices, i * 16);
+        kind.centres[i * 3] = position.x;
+        kind.centres[i * 3 + 1] = position.y;
+        kind.centres[i * 3 + 2] = position.z;
       }
-      cliffMesh.instanceMatrix.needsUpdate = true;
-      cliffMesh.computeBoundingSphere();
-      this.registerThinnable([cliffMesh], CLIFF_COUNT);
-    }
+    };
 
-    if (rockMesh) {
+    const rockKind = this.openKind(dressing.islandRock, ROCK_COUNT, 'island-rocks');
+    if (rockKind) {
       for (let i = 0; i < ROCK_COUNT; i++) {
         const angle = random() * Math.PI * 2;
         // Bias toward the shoreline ring so the island gets a broken edge
@@ -769,17 +1287,16 @@ export class Props {
         const radius = ISLAND.radius * (0.35 + Math.sqrt(random()) * 0.6);
         const x = ISLAND.x + Math.cos(angle) * radius;
         const z = ISLAND.z + Math.sin(angle) * radius;
-        const s = 14 + random() * 30;
+        const s = 9 + random() * 16;
 
         position.set(x, seafloorHeight(x, z) - s * 0.02, z);
         euler.set((random() - 0.5) * 0.3, random() * Math.PI * 2, (random() - 0.5) * 0.3);
         quaternion.setFromEuler(euler);
         scale.set(s, s * (0.7 + random() * 0.7), s);
-        rockMesh.setMatrixAt(i, matrix.compose(position, quaternion, scale));
+        matrix.compose(position, quaternion, scale);
+        record(rockKind, i);
       }
-      rockMesh.instanceMatrix.needsUpdate = true;
-      rockMesh.computeBoundingSphere();
-      this.registerThinnable([rockMesh], ROCK_COUNT);
+      this.closeKind(rockKind, island, ROCK_COUNT);
     }
   }
 
@@ -803,15 +1320,21 @@ export class Props {
    *  - **0-2 m** nothing. Bare sand and the swash band, which is what makes the
    *    beach read as a beach rather than as lawn that stops at the water.
    *  - **2-14 m** pachira on the fringe, grass and sorrel, the first ferns.
-   *  - **6-30 m** the closed canopy: the two broadleaf trees, with the jacaranda's
-   *    broad crown held to sheltered ground under a fifth grade — a crown that
-   *    wide on a ridge would be shredded, and a scan that big on a slope reads
-   *    as a mushroom sitting on the hill.
-   *  - **10-52 m** the smaller broadleaf carries the mid slopes and the ridge.
-   *  - **the headland arc, any height** the wind-shorn kind: smaller, squashed
-   *    below its natural proportions, leaning hard, and scattered singly rather
-   *    than in groves, because the exposed point is the one part of the island
-   *    where trees do not shelter each other.
+   *  - **5-100 m** the closed canopy: the orchid tree over most of the flanks,
+   *    with the jacaranda's broad crown held to sheltered ground below 40 m and
+   *    under a fifth grade — a crown that wide on a ridge would be shredded, and
+   *    a scan that big on a slope reads as a mushroom sitting on the hill.
+   *  - **7-78 m** the flame trees, in three clumps on the sheltered mid-slopes.
+   *  - **10-108 m** the second broadleaf carries the upper flanks to the
+   *    treeline, which `Seafloor` puts at 0.72 of `ISLAND.peak`.
+   *
+   * The ceilings are absolute metres rather than fractions of the peak, which is
+   * a choice and not an oversight: what decides where a species stops is
+   * exposure and soil depth, and both are properties of the slope rather than of
+   * how tall the hill happens to be. They do have to be revisited when the peak
+   * moves, and when it went from 72 m to 150 m they were — before that pass the
+   * entire canopy sat in a ring round the bottom third of the dome and the
+   * island read as a bald hill with a hedge.
    *
    * Density falls off toward the shore for free: the radial sample is uniform in
    * *radius*, so on a disc it concentrates inland, and the planting's minimum
@@ -822,44 +1345,106 @@ export class Props {
     island.name = 'island-dressing';
     this.object.add(island);
 
-    // Two cliff silhouettes, not one. Six copies of a single 41 m slab was half
-    // the reason the old coast read as a stage flat; the 87 m rampart breaks the
-    // repeat at a completely different scale, and `contourYaw` flips half of
-    // every kind end-for-end so even one model shows two profiles.
-    this.scatter(island, dressing.coastalCliff, COASTAL_CLIFF_COUNT, 'island-coastal-cliffs', random, {
-      inner: 0.6,
-      outer: 1.36,
-      minHeight: 1,
-      maxHeight: 24,
-      minScale: 1,
-      maxScale: 1.8,
-      minStretch: 0.85,
-      maxStretch: 1.3,
-      sink: 3.2,
-      // High, and deliberately so. At the old 0.35 the slabs stayed near-vertical
-      // whatever they were standing on, so a slab on the beach gradient buried
-      // one end and floated the other by two metres over its length.
-      slope: 0.75,
-      slopeSpan: 24,
-      facing: 'contour',
+    // Broken rock on the headlands, in clusters, and every piece of it a closed
+    // solid.
+    //
+    // What stood here was six copies of `coastal_cliff_02` and three of
+    // `coastal_cliff_04`: two beautiful Poly Haven scans that are *facades*. The
+    // measurement is in `scripts/modelkit/shells.mjs` — depth over length of
+    // 0.21 and 0.28 — and it means what it says. Each is a 41 m and an 87 m
+    // cliff *face*, eight and twenty-four metres deep, authored to be set into a
+    // hillside and looked at from the front. From behind, or from the water on
+    // the wrong side of the headland, they are a wall with nothing on the other
+    // side of it, and on an island a viewer can circle that is most approaches.
+    //
+    // The replacement is not a bigger facade. It is a different idea of what
+    // shoreline rock is: three closed solids at 1-2 m, scaled to 4-12 m and
+    // stacked in clumps the way rock actually breaks. Boundary-edge fractions of
+    // 0.0%, 0.0% and 2.8% against the facades' 0.8% and 0.9% — all five are
+    // closed *surfaces*; only these three are closed *shapes*. They can be spun
+    // freely, tipped onto any face and seen from below, which is what lets a
+    // clump read as a rockfall rather than as a row.
+    //
+    // Weighted onto the headland arc, which is where the terrain is steepest and
+    // where the fort stands. It is also what the reference frame shows: one
+    // rocky point holding the ruin, and sand everywhere the swell does not get
+    // to. A wide arc rather than a tight one — this is a bias, not a fence.
+    // Crags on the upper slopes, where the reference frame shows broken rock
+    // pushing through the canopy. Stretched hard and clumped in threes and
+    // fours: one scan repeated twenty-two times is a texture the eye learns, and
+    // the same scan at a different aspect and a different attitude every time is
+    // an outcrop. Held below the treeline's own start so they read as rock
+    // *through* the green rather than as a second bald summit.
+    this.scatter(island, dressing.headlandRock, ISLAND_CRAG_COUNT, 'island-crags', random, {
+      inner: 0.18,
+      outer: 0.86,
+      minHeight: 26,
+      maxHeight: ISLAND.peak * 0.7,
+      minScale: 6,
+      maxScale: 15,
+      minStretch: 0.6,
+      maxStretch: 1.6,
+      sink: 1.2,
+      slope: 0.4,
+      slopeSpan: 14,
+      clusters: 6,
+      clusterRadius: ISLAND.radius * 0.09,
     });
 
-    // The long rampart. A 24 m sample span, which is about a third of its own
-    // length: any narrower and it is levelled against a boulder rather than
-    // against the headland it is supposed to be part of.
-    this.scatter(island, dressing.coastalRampart, COASTAL_RAMPART_COUNT, 'island-ramparts', random, {
-      inner: 0.55,
-      outer: 1.3,
-      minHeight: 2,
-      maxHeight: 30,
-      minScale: 0.8,
-      maxScale: 1.25,
-      minStretch: 0.9,
-      maxStretch: 1.35,
-      sink: 3.5,
-      slope: 0.8,
-      slopeSpan: 40,
-      facing: 'contour',
+    this.scatter(island, dressing.headlandRock, HEADLAND_ROCK_COUNT, 'island-headland-rock', random, {
+      inner: 0.62,
+      outer: 1.36,
+      minHeight: 0,
+      maxHeight: 26,
+      bearing: HEADLAND_BEARING,
+      spread: 1.7,
+      minScale: 3,
+      maxScale: 8,
+      // Stretched hard and independently on each axis. One scan repeated thirty
+      // times is a texture the eye learns; the same scan at a different aspect
+      // every time is an outcrop.
+      minStretch: 0.7,
+      maxStretch: 1.5,
+      sink: 0.5,
+      slope: 0.55,
+      slopeSpan: 10,
+      clusters: 5,
+      clusterRadius: ISLAND.radius * 0.1,
+    });
+
+    this.scatter(island, dressing.shoreOutcrop, SHORE_OUTCROP_COUNT, 'island-shore-outcrop', random, {
+      inner: 0.7,
+      outer: 1.4,
+      minHeight: -2,
+      maxHeight: 14,
+      minScale: 2.6,
+      maxScale: 7,
+      minStretch: 0.7,
+      maxStretch: 1.45,
+      sink: 0.6,
+      slope: 0.6,
+      slopeSpan: 8,
+      clusters: 6,
+      clusterRadius: ISLAND.radius * 0.08,
+    });
+
+    // The waterline itself. Straddles mean sea level, so half of these stand in
+    // the swash and half are awash — which is the band the reference frame shows
+    // as dark broken rock between the sand and the turquoise.
+    this.scatter(island, dressing.shoreBoulder, SHORE_BOULDER_COUNT, 'island-shore-boulders', random, {
+      inner: 0.78,
+      outer: 1.42,
+      minHeight: -3.5,
+      maxHeight: 6,
+      minScale: 1.8,
+      maxScale: 5.5,
+      minStretch: 0.75,
+      maxStretch: 1.4,
+      sink: 0.35,
+      slope: 0.5,
+      slopeSpan: 6,
+      clusters: 8,
+      clusterRadius: ISLAND.radius * 0.07,
     });
 
     // Shoreline edges. These two are authored as coast rather than as rock: a
@@ -939,24 +1524,6 @@ export class Props {
       clusterRadius: ISLAND.radius * 0.09,
     });
 
-    // Beach rubble, confined to the cove's arc. This scan is 74k triangles for
-    // something four metres across: from the play area it is one pixel, so the
-    // only place it earns its cost is the stretch of beach the cove gives a
-    // reason to fly to.
-    this.scatter(island, dressing.sandRocks, SAND_ROCKS_COUNT, 'island-sand-rocks', random, {
-      inner: 0.8,
-      outer: 1.1,
-      minHeight: 0,
-      maxHeight: 5,
-      bearing: COVE_BEARING,
-      spread: 0.3,
-      minScale: 1.6,
-      maxScale: 3,
-      sink: 0.08,
-      slope: 1,
-      slopeSpan: 5,
-    });
-
     // The biggest crowns, in two groves on sheltered ground. Only four of them:
     // this scan is 45k triangles and 19 m across at unit scale, so it is worth
     // having where it can be the thing that gives the canopy a top and worth
@@ -965,7 +1532,7 @@ export class Props {
       inner: 0.25,
       outer: 1.15,
       minHeight: 6,
-      maxHeight: 26,
+      maxHeight: 40,
       maxSlope: 0.22,
       minScale: 0.55,
       maxScale: 0.95,
@@ -984,14 +1551,24 @@ export class Props {
     // clumping is most of what is left of them. The grove radius is a fraction
     // of the island rather than a fixed 45 m, or the same five groves would
     // cover a quarter of the ground they used to.
+    //
+    // The canopy is a Hong Kong orchid tree now, not `island_tree_01`. That scan
+    // is 5 m of half-bare coastal scrub — a beautiful capture of the wrong
+    // plant, and on a tropical island it read as a dead stick, which is exactly
+    // what it was asked about. This one is an authored botanical model: 5.2 m of
+    // closed broadleaf crown, leaves as alpha-tested cards rather than modelled
+    // geometry, so it costs a third of the triangles and fills four times the
+    // silhouette.
+    //
+    // Scale 1.5-2.4 puts it at 8-12 m, which is what a mature Bauhinia is.
     this.scatter(island, dressing.tree, TREE_COUNT, 'island-trees', random, {
       inner: 0.1,
       outer: 1.25,
-      minHeight: 6,
-      maxHeight: 42,
+      minHeight: 5,
+      maxHeight: 100,
       maxSlope: 0.4,
-      minScale: 2,
-      maxScale: 3.4,
+      minScale: 1.5,
+      maxScale: 2.4,
       minStretch: 0.9,
       maxStretch: 1.2,
       sink: 0.1,
@@ -1002,11 +1579,34 @@ export class Props {
       clusterRadius: ISLAND.radius * 0.18,
     });
 
+    // The flame trees. Held to the sheltered mid-slopes and clustered tightly:
+    // a poinciana is a valley tree, and the reference shows them in two or three
+    // clumps rather than spread through the wood. Scale 1.2-1.9 on a 9 m crown
+    // gives 11-17 m across, which is the shape — this is a tree that is half
+    // again as wide as it is tall.
+    this.scatter(island, dressing.treeFlame, TREE_FLAME_COUNT, 'island-flame-trees', random, {
+      inner: 0.2,
+      outer: 1.1,
+      minHeight: 7,
+      maxHeight: 78,
+      maxSlope: 0.3,
+      minScale: 1.2,
+      maxScale: 1.9,
+      minStretch: 0.9,
+      maxStretch: 1.15,
+      sink: 0.15,
+      slope: 0.12,
+      slopeSpan: 16,
+      lean: 0.05,
+      clusters: 3,
+      clusterRadius: ISLAND.radius * 0.12,
+    });
+
     this.scatter(island, dressing.treeMid, TREE_MID_COUNT, 'island-trees-mid', random, {
       inner: 0.05,
       outer: 1.15,
       minHeight: 10,
-      maxHeight: 52,
+      maxHeight: 108,
       minScale: 2.2,
       maxScale: 3.6,
       minStretch: 0.9,
@@ -1017,28 +1617,6 @@ export class Props {
       lean: 0.08,
       clusters: 5,
       clusterRadius: ISLAND.radius * 0.15,
-    });
-
-    // The exposed headland. Held under its natural proportions by the stretch
-    // range and leaned four times as hard as anything in the interior, because
-    // the difference between a sheltered tree and an exposed one is a shape, not
-    // a species — and scattered singly, since there are no groves out here to
-    // shelter each other.
-    this.scatter(island, dressing.treeWind, TREE_WIND_COUNT, 'island-trees-wind', random, {
-      inner: 0.6,
-      outer: 1.3,
-      minHeight: 6,
-      maxHeight: 38,
-      bearing: HEADLAND_BEARING,
-      spread: 0.52,
-      minScale: 1.5,
-      maxScale: 2.4,
-      minStretch: 0.7,
-      maxStretch: 0.95,
-      sink: 0.1,
-      slope: 0.4,
-      slopeSpan: 8,
-      lean: 0.16,
     });
 
     // The pachira ships as four plants laid out in a row; `_d` is the tallest of
@@ -1070,7 +1648,7 @@ export class Props {
       inner: 0.1,
       outer: 1.22,
       minHeight: 4,
-      maxHeight: 36,
+      maxHeight: 84,
       maxSlope: 0.3,
       minScale: 1.8,
       maxScale: 3.2,
@@ -1087,7 +1665,7 @@ export class Props {
       inner: 0.1,
       outer: 1.22,
       minHeight: 4,
-      maxHeight: 32,
+      maxHeight: 76,
       maxSlope: 0.3,
       minScale: 2.2,
       maxScale: 3.8,
@@ -1104,7 +1682,7 @@ export class Props {
       inner: 0.08,
       outer: 1.28,
       minHeight: 3,
-      maxHeight: 44,
+      maxHeight: 96,
       minScale: 2.4,
       maxScale: 4.2,
       slope: 0.35,
@@ -1120,7 +1698,7 @@ export class Props {
       inner: 0.08,
       outer: 1.28,
       minHeight: 3,
-      maxHeight: 46,
+      maxHeight: 98,
       minScale: 7,
       maxScale: 14,
       slope: 0.4,
@@ -1132,29 +1710,120 @@ export class Props {
       bake: { include: (name) => name.endsWith('_d'), origin: 'cluster' },
     });
 
-    // Grass is the one kind with a slope test. It is also the one kind whose
-    // source file is a row of twenty-one separate blades: stacking the medium
-    // and seedling variants on a common origin turns that row into a tuft, and
-    // merging them makes the tuft a single geometry and therefore a single draw.
-    this.scatter(island, dressing.grass, GRASS_COUNT, 'island-grass', random, {
+    // --- palms -------------------------------------------------------------
+    //
+    // These replace the procedural palm `Remains.ts` used to build. That palm
+    // was a good piece of engineering and a bad tree: its fronds faked
+    // transmission through `emissiveNode`, which is neither shadowed nor
+    // tone-mapped with the rest of the scene, so on a clear day the whole grove
+    // came out chrome blue against a blue sky.
+    //
+    // A coconut grows to the high-tide line and no further inland than the first
+    // rise, which is what the elevation band is: low enough to stand on the
+    // beach, high enough to climb the first slope behind it. The bearing weights
+    // them toward the cove, because that is the shoreline anyone arrives at.
+    this.scatter(island, dressing.palmCoconut, PALM_COCONUT_COUNT, 'island-palms', random, {
+      inner: 0.55,
+      outer: 1.32,
+      minHeight: 1.2,
+      maxHeight: 22,
+      maxSlope: 0.34,
+      bearing: 0.7,
+      spread: 1.6,
+      minScale: 1.5,
+      maxScale: 2.6,
+      minStretch: 0.9,
+      maxStretch: 1.25,
+      sink: 0.12,
+      // Palms grow *up*, not out of the slope, so the tilt toward the ground
+      // normal is small — but not zero: a shoreline coconut leans seaward, and
+      // a grove of perfectly vertical ones reads as telegraph poles.
+      slope: 0.18,
+      slopeSpan: 12,
+      lean: 0.16,
+      clusters: 7,
+      clusterRadius: ISLAND.radius * 0.11,
+    });
+
+    this.scatter(island, dressing.palmTall, PALM_TALL_COUNT, 'island-palms-tall', random, {
+      inner: 0.5,
+      outer: 1.3,
+      minHeight: 1.6,
+      maxHeight: 30,
+      maxSlope: 0.34,
+      bearing: 0.7,
+      spread: 2.1,
+      minScale: 1.8,
+      maxScale: 3.2,
+      minStretch: 0.9,
+      maxStretch: 1.3,
+      sink: 0.1,
+      slope: 0.15,
+      slopeSpan: 12,
+      lean: 0.14,
+      clusters: 6,
+      clusterRadius: ISLAND.radius * 0.13,
+    });
+
+    // --- ground cover ------------------------------------------------------
+    //
+    // Grass is the one kind with a slope test, and the one kind whose source
+    // files are rows of separate tufts rather than single plants: stacking a
+    // few variants on a common origin turns a row into a clump, and merging
+    // them makes the clump a single geometry and therefore a single draw.
+    //
+    // `grass_medium_01` and `_02` carry this, with `IslandMeadow`'s GPU field
+    // under them for the density no scatter can pay for.
+    //
+    // `grass_bermuda_01` used to be here and is gone. It is a *lawn* grass — the
+    // whole Poly Haven model is 15 cm tall and 8 cm across, twenty-one separate
+    // blades of it — so covering a hillside with it needed a scale of four to
+    // eight, and a 15 cm plant blown up to a metre does not read as grass. It
+    // reads as a black spiked shrub, which is how it looked on the slope. It was
+    // demoted to "fine turf close in" rather than removed, and that was the
+    // wrong call twice over: the shader meadow now owns close-in turf entirely,
+    // so the demotion left six hundred instances of a broken-looking model
+    // drawing underneath a field that had already replaced it.
+    this.scatter(island, dressing.grassMeadow, MEADOW_COUNT, 'island-meadow', random, {
       inner: 0.05,
       outer: 1.3,
       minHeight: 2,
-      maxHeight: 50,
-      maxSlope: 0.18,
-      minScale: 4,
-      maxScale: 8,
+      maxHeight: 108,
+      maxSlope: 0.2,
+      minScale: 1.6,
+      maxScale: 2.8,
       slope: 0.6,
       slopeSpan: 5,
-      lean: 0.07,
-      clusters: 10,
-      clusterRadius: ISLAND.radius * 0.06,
+      lean: 0.06,
+      clusters: 9,
+      clusterRadius: ISLAND.radius * 0.09,
       casts: false,
       bake: {
-        include: (name) => name.includes('_medium_') || name.includes('_seedling_'),
+        include: (name) => /_(mid_b|small_b|tall_a|tall_c)_/.test(name),
         origin: 'stack',
       },
     });
+
+    this.scatter(island, dressing.grassTussock, TUSSOCK_COUNT, 'island-tussock', random, {
+      inner: 0.05,
+      outer: 1.28,
+      minHeight: 3,
+      maxHeight: 100,
+      maxSlope: 0.26,
+      minScale: 2,
+      maxScale: 3.2,
+      slope: 0.5,
+      slopeSpan: 5,
+      lean: 0.08,
+      clusters: 8,
+      clusterRadius: ISLAND.radius * 0.07,
+      casts: false,
+      bake: {
+        include: (name) => /_(a|c|e)$/.test(name),
+        origin: 'stack',
+      },
+    });
+
   }
 
   // -------------------------------------------------------------- pirate cove
@@ -1186,7 +1855,7 @@ export class Props {
     const shore = shorelineRadius(COVE_BEARING);
     const point = new THREE.Vector3();
 
-    const pier = this.buildStatic(this.bakeParts(dressing.pier), 'cove-jetty-deck');
+    const pier = this.buildStatic(this.bakeParts(dressing.pier.base), 'cove-jetty-deck');
     let jetty: THREE.Group | null = null;
     if (pier) {
       jetty = new THREE.Group();
@@ -1205,7 +1874,7 @@ export class Props {
     // Parented to the jetty rather than placed in world space: a lantern on a
     // pier is on the pier, and this way moving the jetty cannot leave it hanging
     // over open water. The scale compensates for the jetty's own.
-    const lantern = this.buildStatic(this.bakeParts(dressing.lantern), 'cove-lantern');
+    const lantern = this.buildStatic(this.bakeParts(dressing.lantern.base), 'cove-lantern');
     if (lantern && jetty) {
       lantern.position.set(0.86, PIER_DECK_LOCAL, -1.4);
       lantern.rotation.y = 0.7;
@@ -1213,7 +1882,7 @@ export class Props {
       jetty.add(lantern);
     }
 
-    const pinnace = this.buildStatic(this.bakeParts(dressing.pinnace), 'cove-pinnace');
+    const pinnace = this.buildStatic(this.bakeParts(dressing.pinnace.base), 'cove-pinnace');
     if (pinnace) {
       const bearing = covePoint(shore + PINNACE_OFFSHORE, PINNACE_ALONGSHORE, point);
       pinnace.position.set(point.x, point.y + PINNACE_KEEL_LIFT, point.z);
@@ -1230,7 +1899,7 @@ export class Props {
       cove.add(pinnace);
     }
 
-    const barrels = this.buildStatic(this.bakeParts(dressing.barrels), 'cove-barrels');
+    const barrels = this.buildStatic(this.bakeParts(dressing.barrels.base), 'cove-barrels');
     if (barrels) {
       covePoint(shore + CAMP_OFFSHORE, -12, point);
       seatOnGround(barrels, point, 2.4, 0.9, 5);
@@ -1238,7 +1907,7 @@ export class Props {
       cove.add(barrels);
     }
 
-    const crate = this.buildStatic(this.bakeParts(dressing.coveCrate), 'cove-crate');
+    const crate = this.buildStatic(this.bakeParts(dressing.coveCrate.base), 'cove-crate');
     if (crate) {
       covePoint(shore + CAMP_OFFSHORE + 6, -4, point);
       seatOnGround(crate, point, 0.55, 0.8, 4);
@@ -1246,7 +1915,7 @@ export class Props {
       cove.add(crate);
     }
 
-    const bucket = this.buildStatic(this.bakeParts(dressing.bucket), 'cove-bucket');
+    const bucket = this.buildStatic(this.bakeParts(dressing.bucket.base), 'cove-bucket');
     if (bucket) {
       covePoint(shore + CAMP_OFFSHORE + 9, -18, point);
       seatOnGround(bucket, point, 1.9, 0.9, 3);
@@ -1259,14 +1928,14 @@ export class Props {
     // nothing, and three separate meshes would cost three. Baking them together
     // makes the whole group one draw and one bounding sphere, and lets the one
     // on its side be authored as a tilt rather than as a special case.
-    const jugs = this.buildStatic(this.assemble(dressing.jug, JUG_PIECES), 'cove-jugs');
+    const jugs = this.buildStatic(this.assemble(dressing.jug.base, JUG_PIECES), 'cove-jugs');
     if (jugs) {
       covePoint(shore + CAMP_OFFSHORE - 3, -7, point);
       seatOnGround(jugs, point, 1.2, 0.8, 3);
       cove.add(jugs);
     }
 
-    const estoc = this.buildStatic(this.bakeParts(dressing.estoc), 'cove-estoc');
+    const estoc = this.buildStatic(this.bakeParts(dressing.estoc.base), 'cove-estoc');
     if (estoc) {
       const bearing = covePoint(shore + CAMP_OFFSHORE + 14, 3, point);
       // Turned point-down (the pi) and then tilted back out of vertical, so the
@@ -1300,8 +1969,8 @@ export class Props {
    * on a hillside rather than as masonry on a plateau.
    */
   private placeFort(dressing: Dressing): void {
-    const walls = this.buildStatic(this.assemble(dressing.fort, FORT_PIECES), 'shore-fort-walls');
-    const cannon = this.buildStatic(this.bakeParts(dressing.cannon), 'shore-fort-cannon');
+    const walls = this.buildStatic(this.assemble(dressing.fort.base, FORT_PIECES), 'shore-fort-walls');
+    const cannon = this.buildStatic(this.bakeParts(dressing.cannon.base), 'shore-fort-cannon');
     if (!walls && !cannon) return;
 
     const fort = new THREE.Group();
@@ -1347,7 +2016,7 @@ export class Props {
 
     const point = new THREE.Vector3();
 
-    const chest = this.buildStatic(this.bakeParts(dressing.chest), 'reef-chest');
+    const chest = this.buildStatic(this.bakeParts(dressing.chest.base), 'reef-chest');
     if (chest) {
       groundPoint(FIND.x, FIND.z, point);
       seatOnGround(chest, point, 0.92, 1, 4);
@@ -1356,7 +2025,7 @@ export class Props {
       find.add(chest);
     }
 
-    const crate = this.buildStatic(this.bakeParts(dressing.reefCrate), 'reef-crate');
+    const crate = this.buildStatic(this.bakeParts(dressing.reefCrate.base), 'reef-crate');
     if (crate) {
       groundPoint(FIND.x + 3.6, FIND.z - 2.4, point);
       seatOnGround(crate, point, 2.6, 1, 4);
@@ -1365,7 +2034,7 @@ export class Props {
       find.add(crate);
     }
 
-    const shells = this.buildScatter(this.bakeParts(dressing.shell), SHELL_COUNT, 'reef-shells');
+    const shells = this.buildScatter(this.bakeParts(dressing.shell.base), SHELL_COUNT, 'reef-shells');
     if (!shells) return;
 
     const matrix = new THREE.Matrix4();
@@ -1412,14 +2081,29 @@ export class Props {
    */
   private scatter(
     parent: THREE.Object3D,
-    source: THREE.Group | null,
+    source: DressingEntry,
     count: number,
     name: string,
     random: () => number,
     spec: ScatterSpec,
   ): void {
-    const meshes = this.buildScatter(this.bakeParts(source, spec.bake), count, name);
+    const meshes = this.buildScatter(this.bakeParts(source.base, spec.bake), count, name);
     if (!meshes) return;
+
+    // Every level is baked with the same options as LOD0, so an instance matrix
+    // means the same thing at every level and the deal can move a placement
+    // between them without touching it.
+    const lodMeshes = source.lods.map((group, index) =>
+      this.buildScatter(this.bakeParts(group, spec.bake), count, `${name}-lod${index + 1}`),
+    );
+    const levels: THREE.InstancedMesh[][] = [meshes];
+    for (const level of lodMeshes) if (level) levels.push(level);
+
+    // Placements are kept so `updateLod` can re-deal them; without LOD levels
+    // there is nothing to deal and the arrays are not allocated.
+    const hasLod = levels.length > 1;
+    const matrices = hasLod ? new Float32Array(count * 16) : null;
+    const centres = hasLod ? new Float32Array(count * 3) : null;
 
     const matrix = new THREE.Matrix4();
     const position = new THREE.Vector3();
@@ -1485,11 +2169,20 @@ export class Props {
       scale.set(s, s * stretch, s);
       matrix.compose(position, quaternion, scale);
       for (const mesh of meshes) mesh.setMatrixAt(placed, matrix);
+      if (matrices && centres) {
+        matrix.toArray(matrices, placed * 16);
+        centres[placed * 3] = position.x;
+        centres[placed * 3 + 1] = position.y;
+        centres[placed * 3 + 2] = position.z;
+      }
       placed++;
     }
 
-    if (placed === 0) return;
-    this.seal(meshes, placed);
+    if (placed === 0) {
+      for (const level of lodMeshes) if (level) for (const mesh of level) mesh.dispose();
+      return;
+    }
+    this.seal(meshes, placed, hasLod ? { levels, matrices: matrices!, centres: centres! } : undefined);
     // Shadow flags stand. They used to be cleared here and in the cove, because
     // the sun's shadow camera was a +/-260 m box anchored at the world origin and
     // the island is 1.4 km from it — nothing out here could cast into that box or
@@ -1503,6 +2196,16 @@ export class Props {
       mesh.castShadow = spec.casts ?? true;
       parent.add(mesh);
     }
+    // Lower levels never cast. A shadow is a silhouette, and a silhouette from a
+    // model that has already given up its silhouette is worse than the one the
+    // full-detail caster would have drawn — while costing a second draw of the
+    // same instances into the depth map.
+    for (let i = 1; i < levels.length; i++) {
+      for (const mesh of levels[i]) {
+        mesh.castShadow = false;
+        parent.add(mesh);
+      }
+    }
   }
 
   /**
@@ -1515,20 +2218,55 @@ export class Props {
    * instances we are not currently drawing is conservative, and a conservative
    * sphere can never cull something that is on screen.
    */
-  private seal(meshes: THREE.InstancedMesh[], placed: number): void {
+  private seal(
+    meshes: THREE.InstancedMesh[],
+    placed: number,
+    lod?: { levels: THREE.InstancedMesh[][]; matrices: Float32Array; centres: Float32Array },
+  ): void {
     for (const mesh of meshes) {
       mesh.count = placed;
       mesh.instanceMatrix.needsUpdate = true;
       mesh.computeBoundingSphere();
     }
-    this.registerThinnable(meshes, placed);
+
+    if (lod) {
+      // Every level is given the full population's bounds. A level's own count
+      // is whatever the deal last gave it, and `computeBoundingSphere` only
+      // walks that prefix — so a sphere taken now, while a level might hold two
+      // instances, would cull the kind the moment the camera moved. The sphere
+      // has to describe where the instances *can* be, not where they are.
+      const sphere = meshes[0].boundingSphere?.clone() ?? null;
+      for (let i = 1; i < lod.levels.length; i++) {
+        for (const mesh of lod.levels[i]) {
+          mesh.count = 0;
+          mesh.instanceMatrix.needsUpdate = true;
+          if (sphere) mesh.boundingSphere = sphere.clone();
+        }
+      }
+    }
+
+    this.registerThinnable(meshes, placed, lod);
   }
 
-  private registerThinnable(meshes: THREE.InstancedMesh[], capacity: number): void {
+  private registerThinnable(
+    meshes: THREE.InstancedMesh[],
+    capacity: number,
+    lod?: { levels: THREE.InstancedMesh[][]; matrices: Float32Array; centres: Float32Array },
+  ): void {
     this.thinnable.push({
       meshes,
       capacity,
       floor: Math.max(1, Math.ceil(capacity * DETAIL_FLOOR)),
+      lod: lod
+        ? {
+            levels: lod.levels,
+            switchesSq: LOD_SWITCH_METRES.slice(0, lod.levels.length - 1).map((d) => d * d),
+            matrices: lod.matrices,
+            centres: lod.centres,
+            dealtAt: new THREE.Vector3(Number.POSITIVE_INFINITY, 0, 0),
+            dealt: false,
+          }
+        : undefined,
     });
   }
 
@@ -1562,7 +2300,18 @@ export class Props {
         if (filtered && options.include && !options.include(mesh.name)) return;
 
         const geometry = mesh.geometry.clone();
+        dequantiseGeometry(geometry);
         geometry.applyMatrix4(mesh.matrixWorld);
+        // Morph targets cannot survive what this class does with the geometry —
+        // it is baked into an `InstancedMesh` that has no morph influences to
+        // drive them — and leaving them attached breaks the merge below:
+        // `mergeGeometries` requires `morphTargetsRelative` to agree across
+        // every input, and `cannon_01` ships exactly one primitive out of ten
+        // with a leftover morph from its rig. That single flag was enough to
+        // send the whole model down the "ship the parts separately" path, at
+        // ten draws instead of one.
+        geometry.morphAttributes = {};
+        geometry.morphTargetsRelative = false;
         collected.push(geometry);
         materials.push(Array.isArray(mesh.material) ? mesh.material[0] : mesh.material);
       });
@@ -1733,21 +2482,68 @@ export class Props {
    * instance matrices are pure placement — otherwise every instance would need
    * to carry the asset's own arbitrary rotation.
    */
-  private buildInstanced(
-    source: THREE.Group,
+  /**
+   * A LOD-capable instanced kind for the placements that are not `scatter`.
+   *
+   * `scatter` builds its own levels inline because it also owns the sampling.
+   * The island skirt, the crags and the reef place by hand — each has its own
+   * idea of where a rock belongs — but they want exactly the same LOD machinery,
+   * and open/close is what lets them have it without a second copy of the
+   * dealing code. The caller fills `matrices` and `centres` as it places;
+   * `closeKind` seals and registers.
+   */
+  private openKind(
+    entry: DressingEntry,
     count: number,
     name: string,
-  ): THREE.InstancedMesh | null {
-    const meshes = this.buildScatter(this.bakeParts(source), count, name);
-    return meshes === null ? null : meshes[0];
+  ): {
+    meshes: THREE.InstancedMesh[];
+    levels: THREE.InstancedMesh[][];
+    matrices: Float32Array | null;
+    centres: Float32Array | null;
+  } | null {
+    const meshes = this.buildScatter(this.bakeParts(entry.base), count, name);
+    if (!meshes) return null;
+
+    const levels: THREE.InstancedMesh[][] = [meshes];
+    entry.lods.forEach((group, index) => {
+      const level = this.buildScatter(this.bakeParts(group), count, name + '-lod' + (index + 1));
+      if (level) levels.push(level);
+    });
+
+    const hasLod = levels.length > 1;
+    return {
+      meshes,
+      levels,
+      matrices: hasLod ? new Float32Array(count * 16) : null,
+      centres: hasLod ? new Float32Array(count * 3) : null,
+    };
+  }
+
+  /** Seals a kind opened by `openKind` and registers it for thinning and LOD. */
+  private closeKind(
+    kind: NonNullable<ReturnType<Props['openKind']>>,
+    parent: THREE.Object3D,
+    placed: number,
+  ): void {
+    const lod =
+      kind.matrices && kind.centres && kind.levels.length > 1
+        ? { levels: kind.levels, matrices: kind.matrices, centres: kind.centres }
+        : undefined;
+    // `seal` registers the kind itself — see its tail. Calling `registerThinnable`
+    // here as well put the reef and the island rocks in `this.thinnable` twice,
+    // so every detail change processed them twice and every LOD re-deal past the
+    // 25 m refresh threshold rebuilt and re-uploaded their instance matrices
+    // twice. Invisible in a frame and pure waste on the camera moves that are
+    // already the most expensive thing this class does.
+    this.seal(kind.meshes, placed, lod);
+    for (const level of kind.levels) for (const mesh of level) parent.add(mesh);
   }
 }
 
 interface LoadedSources {
   buoy: THREE.Group;
   barrel: THREE.Group;
-  rock: THREE.Group;
-  cliff: THREE.Group;
 }
 
 // ------------------------------------------------------------------- helpers
@@ -1756,6 +2552,29 @@ const spinQuaternion = new THREE.Quaternion();
 const leanQuaternion = new THREE.Quaternion();
 const leanEuler = new THREE.Euler();
 const seatNormal = new THREE.Vector3();
+
+/**
+ * The LOD URLs that might sit beside a base model.
+ *
+ * Derived rather than tabulated: `scripts/optimize-assets.mjs` writes
+ * `<slug>_lodN.glb` next to `<slug>.glb`, so asking for them by construction is
+ * what keeps the runtime from carrying a second copy of the optimiser's list of
+ * which kinds have levels — a list that would be wrong the first time a budget
+ * changed.
+ */
+function lodUrls(baseUrl: string): string[] {
+  const stem = baseUrl.replace(/\.glb$/i, '');
+  return Array.from({ length: LOD_LEVELS }, (_, i) => `${stem}_lod${i + 1}.glb`);
+}
+
+/** A point on the open plateau, even in area over the reef annulus. */
+function reefScatterSample(random: () => number): { x: number; z: number } {
+  const angle = random() * Math.PI * 2;
+  // Square-root radius keeps the scatter even in *area* rather than
+  // clustering everything at the inner edge.
+  const radius = REEF_INNER + Math.sqrt(random()) * (REEF_OUTER - REEF_INNER);
+  return { x: Math.cos(angle) * radius, z: Math.sin(angle) * radius };
+}
 
 /** Yaw that turns a model's +Z axis toward the world direction (dx, dz). */
 function yawAlignZ(dx: number, dz: number): number {

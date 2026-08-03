@@ -12,13 +12,16 @@ import {
   positionWorld,
   select,
   sin,
+  texture,
   uniform,
+  uv,
   varying,
   vec3,
   vec4,
 } from 'three/tsl';
 import { mulberry32 } from '../core/random';
-import { ISLAND, seafloorHeight } from './Seafloor';
+import { dequantiseGeometry, type AssetLoader } from './AssetLoader';
+import { ISLAND, reefPatches, seafloorHeight } from './Seafloor';
 
 /**
  * Schools of fish, over the plateau, the reef and the island's shallows.
@@ -105,8 +108,15 @@ const vec3n = vec3 as unknown as (x: unknown, y: unknown, z: unknown) => Node;
  */
 const FISH_SEED = 0x5f15c4;
 
-/** Instance buffer capacity. `setCount` draws a prefix of it — see `setCount`. */
-const MAX_FISH = 480;
+/**
+ * Instance buffer capacity. `setCount` draws a prefix of it — see `setCount`.
+ *
+ * 600, raised from 480 when the tier budgets went up. It is a *silent* ceiling —
+ * `setCount` clamps rather than warning — so a Max tier asking for 560 against a
+ * 480 capacity would simply have drawn 480 and looked, from every angle except
+ * this constant, like the tier table was being honoured.
+ */
+const MAX_FISH = 600;
 
 /**
  * The schools, in the order the tier's budget populates them.
@@ -145,13 +155,13 @@ type SchoolKind = 'open' | 'reef' | 'island' | 'patrol';
 const SCHOOL_LAYOUT: readonly SchoolKind[] = [
   'open',
   'reef',
-  'open',
+  'reef',
   'island',
   'reef',
   'open',
   'island',
   'reef',
-  'open',
+  'reef',
   'patrol',
 ];
 
@@ -374,7 +384,15 @@ interface StationBand {
 const REEF_STATION_BAND: StationBand = {
   x: 0,
   z: 0,
-  minRadius: 45,
+  // 22 m, not the 45 it was, and this is the difference between a reef with fish
+  // on it and a reef that is provably populated somewhere the diver never gets
+  // to. `Props` starts the coral at 26 m from the origin and the dive the scene
+  // invites — the `underwater` shot's own camera — sits at a radius of 22. The
+  // nearest school was therefore 45 m away through water whose visibility is 45
+  // m, which is to say it was one extinction length out and had been attenuated
+  // into the haze. Every fish in the scene was real, animated, and behind a wall
+  // of blue.
+  minRadius: 22,
   maxRadius: 190,
   minDepth: depthForSchool(RESIDENT_CLEARANCE, RESIDENT_HALF_HEIGHT) + 1,
   maxDepth: 22,
@@ -426,6 +444,15 @@ const PATROL_STATION_BAND: StationBand = {
 
 /** Candidate stations tried before the closest near-miss is taken. */
 const STATION_TRIES = 48;
+
+/**
+ * How far a reef school's station may sit from its patch centre, metres.
+ *
+ * Comfortably inside the patch, because the school's own circuit is another nine
+ * to fifteen metres on top of this and the point is that the fish are *over* the
+ * coral rather than beside it. See `findReefStation`.
+ */
+const REEF_STATION_OFFSET = 7;
 
 /** Bearings and radii the circuit fit probes, and how far it will shrink. */
 const CIRCUIT_PROBES = 12;
@@ -535,18 +562,43 @@ const WEAVE_ROLL = 0.16;
  */
 const BEAT_HZ = 3.4;
 
-/** Body wavelength as a fraction of body length; carangiform swimmers run near 1. */
-const WAVE_LENGTH = 1.1;
+/**
+ * Body wavelength as a fraction of body length.
+ *
+ * 1.75, and the number that was here before — 1.1 — is why every fish in the
+ * scene swam like an eel. The distinguishing measurement between the two gaits
+ * is not the amplitude envelope, which both share the general shape of; it is
+ * how many waves the body carries at once. Anguilliform swimmers hold **more
+ * than one** full wave along the body, which is what produces the continuous
+ * S travelling nose to tail that reads unmistakably as an eel. Carangiform
+ * swimmers — jacks, tuna, and every reef fish in this scene — hold about **half
+ * a wave**: one shallow bend, in the back half, and a head that stays pointed
+ * where it is going.
+ *
+ * At 1.1 the body carried 1/1.1 = 0.91 waves, which is squarely anguilliform.
+ * At 1.75 it carries 0.57, which is the middle of the measured carangiform
+ * range. The tail-beat frequency is untouched: the gait is set by the wave
+ * *number*, not by how fast it runs.
+ */
+const WAVE_LENGTH = 1.75;
 const WAVE_K = (Math.PI * 2) / WAVE_LENGTH;
 
 /**
  * Lateral amplitude at the tail base, in body lengths.
  *
- * The envelope is `AMP * s^2` with `s` running 0 at the nose to 1 at the tail
- * base and ~1.19 at the caudal tips, so the tips sweep about 0.12 L either
- * side. Measured carangiform envelopes are close to quadratic and land at
- * 0.1 L at the peduncle; the quadratic is the cheap version of the same curve
- * and gets the important part right, which is that the head is almost still.
+ * The envelope is `AMP * s^3` with `s` running 0 at the nose to 1 at the tail
+ * base and ~1.19 at the caudal tips, so the tips sweep about 0.14 L either
+ * side. Measured carangiform envelopes land near 0.1 L at the peduncle and
+ * — the part that matters — are almost flat over the front half: a tuna's
+ * head yaws by under 2% of its length.
+ *
+ * Cubic rather than the quadratic this was. Both are "close to zero at the
+ * nose", but a quadratic still gives the mid-body a quarter of the tail's
+ * sweep, and a quarter of the sweep at mid-body is a visible second bend —
+ * which, with the wavelength that used to sit above, was the other half of the
+ * eel. The cubic halves it to an eighth and leaves the peduncle amplitude
+ * exactly where it was, so the tail beat is unchanged and only the front of the
+ * fish stiffens.
  */
 const WAVE_AMP = 0.085;
 
@@ -627,6 +679,43 @@ interface SchoolPath {
   scale: number;
 }
 
+/**
+ * Which of the two bodies a school's fish wear.
+ *
+ * The distinction is the one a diver actually makes. Anything crossing open
+ * water is seen at thirty metres through turbid water as a moving glint, and the
+ * procedural silhouette with its counter-shading is a better model of that than
+ * a texture would be — see `buildFishGeometry`. Anything holding station over
+ * structure is seen from three metres, and at three metres a grey sliver is the
+ * single most obvious piece of missing detail in the scene.
+ *
+ * So the residents get a real reef fish: `emperor_angelfish`, textured, rigged
+ * in the source and stripped of its rig by `scripts/optimize-assets.mjs`,
+ * animated here by the same travelling-wave vertex arithmetic as everything
+ * else. It stays one draw call for the whole species.
+ */
+type Species = 'pelagic' | 'reef';
+
+const SPECIES_OF_KIND: Readonly<Record<SchoolKind, Species>> = {
+  open: 'pelagic',
+  patrol: 'pelagic',
+  reef: 'reef',
+  island: 'reef',
+};
+
+/**
+ * A body imported from a glTF, already normalised into this module's frame.
+ *
+ * `geometry` must run nose at `+0.5x`, tail at `-0.5x`, up `+y`, lateral `+z`,
+ * one unit long — the same convention `buildFishGeometry` is authored in, so the
+ * wave and the school frame apply to it unchanged. `normaliseImportedBody` does
+ * the conversion; nothing else should have to know the source's axes.
+ */
+export interface FishSpecies {
+  geometry: THREE.BufferGeometry;
+  map: THREE.Texture | null;
+}
+
 export interface FishSchoolOptions {
   /** Overrides the seeded circuits and scatter; useful for A/B-ing a layout. */
   seed?: number;
@@ -643,10 +732,25 @@ export interface FishSchoolOptions {
 export class FishSchool {
   readonly object: THREE.Object3D;
 
-  private readonly geometry: THREE.BufferGeometry;
-  private readonly material: THREE.MeshBasicNodeMaterial;
-  private readonly mesh: THREE.InstancedMesh;
+  /**
+   * One draw per species, each drawing a prefix of its own instances.
+   *
+   * `indices` is the ascending list of global fish indices this draw owns, which
+   * is what lets `setCount` stay a pure function of the population: the tier
+   * asks for the first `n` fish of the whole school and each species draws
+   * however many of those belong to it. Fish `i` therefore keeps its school,
+   * its body, its size and its phase at every tier, exactly as before.
+   */
+  private readonly draws: {
+    species: Species;
+    geometry: THREE.BufferGeometry;
+    material: THREE.MeshBasicNodeMaterial;
+    mesh: THREE.InstancedMesh;
+    indices: Int32Array;
+  }[] = [];
+
   private readonly paths: SchoolPath[] = [];
+
 
   private count: number;
   private wantVisible = true;
@@ -690,10 +794,14 @@ export class FishSchool {
   private readonly after = new THREE.Vector3();
   private readonly forward = new THREE.Vector3();
 
+  /** Kept so a later `setSpecies` rebuilds instance data identically. */
+  private readonly seed: number;
+
   constructor(count: number, options: FishSchoolOptions = {}) {
     this.count = Math.max(0, Math.min(MAX_FISH, Math.floor(count)));
+    this.seed = options.seed ?? FISH_SEED;
 
-    const random = mulberry32(options.seed ?? FISH_SEED);
+    const random = mulberry32(this.seed);
     for (const path of buildSchools(random)) this.paths.push(path);
 
     for (const path of this.paths) {
@@ -702,39 +810,96 @@ export class FishSchool {
       this.uShapes.push(uniform(new THREE.Vector4(path.length, path.width, 0, 0)));
     }
 
-    this.geometry = buildFishGeometry();
-    attachInstanceAttributes(this.geometry, this.paths, options.seed ?? FISH_SEED);
+    this.object = new THREE.Object3D();
+    this.object.name = 'fish-schools';
+    // Published for the visual harness, which has to be able to *frame* a school
+    // to photograph one. Without it the only way to aim a shot at fish is to
+    // guess, and a shot aimed at empty water is indistinguishable from a reef
+    // with no fish in it — which is exactly the wrong conclusion this once
+    // supported. Read-only data, no behaviour.
+    this.object.userData.schoolCentres = this.paths.map((path) => ({
+      cx: Math.round(path.cx),
+      cz: Math.round(path.cz),
+      radius: Math.round(path.radius),
+    }));
+    this.object.frustumCulled = false;
+    this.object.matrixAutoUpdate = false;
+    this.object.updateMatrix();
 
-    this.material = this.buildMaterial();
+    this.buildDraw('pelagic', null);
+    this.buildDraw('reef', null);
 
-    this.mesh = new THREE.InstancedMesh(this.geometry, this.material, MAX_FISH);
-    this.mesh.name = 'fish';
-    this.mesh.count = this.count;
+    this.object.visible = this.count > 0;
+    this.refresh();
+  }
+
+  /**
+   * Swaps a species' body for an imported one, once the asset has arrived.
+   *
+   * Called from the async content load rather than the constructor, because the
+   * schools have to exist and be swimming from the first frame whether or not a
+   * 400 KB fish ever downloads. A 404 therefore costs the reef its markings and
+   * nothing else, which is the same failure mode every other piece of dressing
+   * in this project has.
+   */
+  setSpecies(species: Species, body: FishSpecies | null): void {
+    if (this.disposed) return;
+    const existing = this.draws.findIndex((draw) => draw.species === species);
+    if (existing < 0) return;
+
+    const previous = this.draws[existing];
+    this.object.remove(previous.mesh);
+    previous.mesh.dispose();
+    previous.geometry.dispose();
+    previous.material.dispose();
+    this.draws.splice(existing, 1);
+
+    this.buildDraw(species, body);
+    this.applyCounts();
+  }
+
+  /** Builds the instanced draw for one species. */
+  private buildDraw(species: Species, body: FishSpecies | null): void {
+    const indices = instancesForSpecies(species);
+    const geometry = body ? body.geometry.clone() : buildFishGeometry();
+    attachInstanceAttributes(geometry, this.paths, this.seed, indices);
+
+    const material = this.buildMaterial(body?.map ?? null);
+
+    const mesh = new THREE.InstancedMesh(geometry, material, Math.max(1, indices.length));
+    mesh.name = species === 'pelagic' ? 'fish' : 'fish-reef';
     // The vertex stage writes world positions, so the instance matrix is dead
     // code — but `InstancedMesh` allocates it zero-filled, and an identity fill
     // costs one loop at startup and removes a whole category of "why is
     // everything at the origin" from anyone who later reads the buffer.
-    identityInstanceMatrix(this.mesh.instanceMatrix);
+    identityInstanceMatrix(mesh.instanceMatrix, indices.length);
     // Shadows off deliberately: a 0.4 m fish under ten metres of water casts
     // nothing the eye can find, and it would double the vertex cost of the
     // whole population to render the depth pass.
-    this.mesh.castShadow = false;
-    this.mesh.receiveShadow = false;
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
     // The population spans a 500 m circle and moves; a bound derived from the
     // geometry would be meaningless, and there is only one draw call to save.
-    this.mesh.frustumCulled = false;
-    this.mesh.matrixAutoUpdate = false;
-    this.mesh.updateMatrix();
+    mesh.frustumCulled = false;
+    mesh.matrixAutoUpdate = false;
+    mesh.updateMatrix();
 
-    this.object = new THREE.Object3D();
-    this.object.name = 'fish-schools';
-    this.object.frustumCulled = false;
-    this.object.matrixAutoUpdate = false;
-    this.object.updateMatrix();
-    this.object.add(this.mesh);
-    this.object.visible = this.count > 0;
+    this.draws.push({ species, geometry, material, mesh, indices });
+    this.object.add(mesh);
+    this.applyCounts();
+  }
 
-    this.refresh();
+  /**
+   * Points each draw at its share of the first `count` fish.
+   *
+   * `indices` is ascending, so "how many of mine are below `count`" is a binary
+   * search rather than a scan, and the answer is the instance count directly —
+   * the buffers are already laid out in global-index order.
+   */
+  private applyCounts(): void {
+    for (const draw of this.draws) {
+      draw.mesh.count = countBelow(draw.indices, this.count);
+    }
   }
 
   getCount(): number {
@@ -755,7 +920,7 @@ export class FishSchool {
     const next = Math.max(0, Math.min(MAX_FISH, Math.floor(count)));
     if (next === this.count) return;
     this.count = next;
-    this.mesh.count = next;
+    this.applyCounts();
     this.object.visible = this.wantVisible && next > 0;
   }
 
@@ -799,11 +964,14 @@ export class FishSchool {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.object.remove(this.mesh);
+    for (const draw of this.draws) {
+      this.object.remove(draw.mesh);
+      draw.mesh.dispose();
+      draw.geometry.dispose();
+      draw.material.dispose();
+    }
+    this.draws.length = 0;
     this.object.removeFromParent();
-    this.mesh.dispose();
-    this.geometry.dispose();
-    this.material.dispose();
   }
 
   // ------------------------------------------------------------------ internals
@@ -853,9 +1021,18 @@ export class FishSchool {
     }
   }
 
-  private buildMaterial(): THREE.MeshBasicNodeMaterial {
+  /**
+   * The body shader, for either species.
+   *
+   * Everything above the colour — the school frame, the weave, the travelling
+   * body wave and the normal correction — is identical and deliberately shared:
+   * the two species differ in what they are made of, not in how they swim. Pass
+   * a `map` and the flank is textured; pass null and it is counter-shaded from
+   * the baked `fishFlank` coordinate.
+   */
+  private buildMaterial(map: THREE.Texture | null): THREE.MeshBasicNodeMaterial {
     const material = new THREE.MeshBasicNodeMaterial();
-    material.name = 'fish-body';
+    material.name = map ? 'fish-body-textured' : 'fish-body';
     // The fins are single-sided sheets in the body's midplane. Without
     // `DoubleSide` a fish's tail blinks out every time the beat carries it past
     // edge-on, which at 3.4 Hz is a strobe rather than a glitch.
@@ -864,7 +1041,11 @@ export class FishSchool {
 
     const seed: Node = attribute('fishSeed', 'vec4');
     const trait: Node = attribute('fishTrait', 'vec4');
-    const flank: Node = attribute('fishFlank', 'float');
+    // The imported body has no counter-shading coordinate — it does not need
+    // one, its pigment is in the texture — so the attribute is only read on the
+    // procedural path. Reading a missing attribute is a shader compile error on
+    // WebGPU, not a silent zero.
+    const flank: Node = map ? float(0) : attribute('fishFlank', 'float');
     const p: Node = positionGeometry;
     const n: Node = normalGeometry;
 
@@ -934,13 +1115,21 @@ export class FishSchool {
     // separate term for the fin.
     const s = float(0.5).sub(p.x);
     const beat = shape.w.add(seed.w.mul(Math.PI * 2)).sub(s.mul(WAVE_K));
-    const amp = s.mul(s).mul(WAVE_AMP);
+    const amp = s.mul(s).mul(s).mul(WAVE_AMP);
     const swing = sin(beat).mul(amp);
 
     // d(swing)/dx of `amp(s) sin(phi - k s)` with s = 0.5 - x. Both terms kept:
     // dropping the envelope's contribution leaves the tail's normal lagging its
     // own silhouette by a noticeable amount at the extremes of the beat.
-    const slope = amp.mul(WAVE_K).mul(cos(beat)).sub(s.mul(2 * WAVE_AMP).mul(sin(beat)));
+    //
+    // The envelope term follows the envelope: for `AMP s^3` its derivative is
+    // `3 AMP s^2`, where the quadratic envelope's was `2 AMP s`. Getting this
+    // wrong does not move the silhouette at all — it only mis-lights it, which
+    // is exactly the kind of error that survives review.
+    const slope = amp
+      .mul(WAVE_K)
+      .mul(cos(beat))
+      .sub(s.mul(s).mul(3 * WAVE_AMP).mul(sin(beat)));
 
     // Inverse transpose of the shear this displacement is: for `z += g(x)` the
     // normal maps as `(nx - g' nz, ny, nz)`. Two operations, and without it a
@@ -985,11 +1174,27 @@ export class FishSchool {
       // Driven by a baked body coordinate, not by the normal: the pigment
       // gradient runs over the flank, which on a laterally compressed fish is
       // almost entirely surface whose normal points sideways.
-      const t = flank.mul(0.5).add(0.5).toVar();
-      const base = mix(this.uBelly, this.uFlank, t.smoothstep(0.0, 0.45)).toVar();
-      base.assign(mix(base, this.uBack, t.smoothstep(0.52, 0.95)));
-      // A degree of per-fish tint, so a school is not one repeated animal.
-      base.mulAssign(mix(vec3(0.93, 0.99, 1.04), vec3(1.07, 1.0, 0.93), trait.w));
+      const base = (
+        map
+          ? // The imported body carries its own pigment, and it is the point of
+            // importing it. `texture()` in the colour node rather than
+            // `material.map`, because this is a `MeshBasicNodeMaterial` whose
+            // colour is entirely replaced below and would otherwise ignore it.
+            texture(map, uv()).rgb.toVar()
+          : (() => {
+              const t = flank.mul(0.5).add(0.5).toVar();
+              const shaded = mix(this.uBelly, this.uFlank, t.smoothstep(0.0, 0.45)).toVar();
+              shaded.assign(mix(shaded, this.uBack, t.smoothstep(0.52, 0.95)));
+              return shaded;
+            })()
+      ) as Node;
+      // A degree of per-fish tint, so a school is not one repeated animal. Held
+      // much tighter on the textured species: an emperor angelfish is a
+      // recognisable animal with recognisable colours, and tinting it by ±7%
+      // reads as a rendering fault rather than as variation.
+      const tintLow = map ? vec3(0.97, 0.99, 1.01) : vec3(0.93, 0.99, 1.04);
+      const tintHigh = map ? vec3(1.03, 1.0, 0.98) : vec3(1.07, 1.0, 0.93);
+      base.mulAssign(mix(tintLow, tintHigh, trait.w));
 
       const light = this.uAmbient
         .mul(sky.mul(0.65).add(0.35))
@@ -1042,9 +1247,7 @@ function buildSchools(random: () => number): SchoolPath[] {
         paths.push(buildOpenPath(open++, random));
         break;
       case 'reef':
-        paths.push(
-          buildResidentPath(random, findStation(random, REEF_STATION_BAND, reef++, REEF_SCHOOLS)),
-        );
+        paths.push(buildResidentPath(random, findReefStation(random, reef++)));
         break;
       case 'island':
         paths.push(
@@ -1190,6 +1393,42 @@ function buildPatrolPath(random: () => number, station: Station): SchoolPath {
 interface Station {
   x: number;
   z: number;
+}
+
+/**
+ * Puts a reef school over the reef.
+ *
+ * The old version of this sampled the plateau's annulus for anything of the
+ * right depth, which is how you place a school when there is nothing down there
+ * to place it *on*. There is now: `Seafloor.reefPatches` is where `Props` grows
+ * the coral and the rock, and a resident school's entire behaviour — holding
+ * station, following the bottom over an outcrop, never travelling anywhere — is
+ * about structure it can hold to. Stationing it anywhere else meant the two
+ * things a diver goes looking for were in different places, and finding either
+ * one told you nothing about where the other was.
+ *
+ * Patches are taken in order and wrapped, so with three reef schools over seven
+ * patches the schools land on three different ones rather than stacking. The
+ * offset is a short hop off the patch centre — enough that the school is not
+ * bolted to a coordinate, small against the 15 m patch — and the depth is still
+ * checked, because a patch is a place on the plateau and not a promise about it.
+ */
+function findReefStation(random: () => number, index: number): Station {
+  const patches = reefPatches();
+  if (patches.length === 0) return findStation(random, REEF_STATION_BAND, index, REEF_SCHOOLS);
+
+  const patch = patches[index % patches.length];
+  for (let attempt = 0; attempt < STATION_TRIES; attempt++) {
+    const bearing = random() * Math.PI * 2;
+    const offset = Math.sqrt(random()) * REEF_STATION_OFFSET;
+    const x = patch.x + Math.cos(bearing) * offset;
+    const z = patch.z + Math.sin(bearing) * offset;
+    const depth = -seafloorHeight(x, z);
+    if (depth >= REEF_STATION_BAND.minDepth && depth <= REEF_STATION_BAND.maxDepth) {
+      return { x, z };
+    }
+  }
+  return { x: patch.x, z: patch.z };
 }
 
 /**
@@ -1483,31 +1722,183 @@ function attachInstanceAttributes(
   geometry: THREE.BufferGeometry,
   paths: readonly SchoolPath[],
   seed: number,
+  indices: Int32Array,
 ): void {
   const random = mulberry32(seed ^ 0x9e3779b9);
-  const seeds = new Float32Array(MAX_FISH * 4);
-  const traits = new Float32Array(MAX_FISH * 4);
   const assignment = buildSchoolAssignment();
+
+  // Every fish's values are drawn in *global* index order whether or not this
+  // species keeps them, so splitting the population across two draws cannot
+  // change what any individual fish looks like. Skipping a draw would shift the
+  // whole stream and reshuffle both species.
+  const seeds = new Float32Array(indices.length * 4);
+  const traits = new Float32Array(indices.length * 4);
+  let slot = 0;
 
   for (let i = 0; i < MAX_FISH; i++) {
     const school = assignment[i];
 
-    seeds[i * 4 + 0] = random();
+    const s0 = random();
     // Lateral and vertical are pulled toward the middle of the envelope. A
     // uniform draw gives a school with a hard rectangular edge and a hollow
     // core; real shoals are densest in the centre and ragged at the margin.
-    seeds[i * 4 + 1] = centreWeighted(random());
-    seeds[i * 4 + 2] = centreWeighted(random());
-    seeds[i * 4 + 3] = random();
+    const s1 = centreWeighted(random());
+    const s2 = centreWeighted(random());
+    const s3 = random();
+    const size = FISH_LENGTH * (0.78 + random() * 0.5) * paths[school].scale;
+    const t2 = random();
+    const t3 = random();
 
-    traits[i * 4 + 0] = school;
-    traits[i * 4 + 1] = FISH_LENGTH * (0.78 + random() * 0.5) * paths[school].scale;
-    traits[i * 4 + 2] = random();
-    traits[i * 4 + 3] = random();
+    if (slot >= indices.length || indices[slot] !== i) continue;
+
+    seeds[slot * 4 + 0] = s0;
+    seeds[slot * 4 + 1] = s1;
+    seeds[slot * 4 + 2] = s2;
+    seeds[slot * 4 + 3] = s3;
+
+    traits[slot * 4 + 0] = school;
+    traits[slot * 4 + 1] = size;
+    traits[slot * 4 + 2] = t2;
+    traits[slot * 4 + 3] = t3;
+    slot += 1;
   }
 
   geometry.setAttribute('fishSeed', new THREE.InstancedBufferAttribute(seeds, 4));
   geometry.setAttribute('fishTrait', new THREE.InstancedBufferAttribute(traits, 4));
+}
+
+/**
+ * The global fish indices belonging to one species, ascending.
+ *
+ * A pure function of the index, like `buildSchoolAssignment` and for the same
+ * reason: the split has to be stable across tiers, reloads and a late
+ * `setSpecies` swap, or a baseline capture stops meaning anything.
+ */
+function instancesForSpecies(species: Species): Int32Array {
+  const assignment = buildSchoolAssignment();
+  const out: number[] = [];
+  for (let i = 0; i < MAX_FISH; i++) {
+    if (SPECIES_OF_KIND[SCHOOL_LAYOUT[assignment[i]]] === species) out.push(i);
+  }
+  return Int32Array.from(out);
+}
+
+/** Where the reef species lives, and which way it was authored. */
+const REEF_FISH_URL = '/models/dressing/emperor_angelfish.glb';
+const REEF_FISH_FORWARD = '+z' as const;
+
+/**
+ * Loads the reef species, or resolves null.
+ *
+ * Null on any failure, deliberately and quietly at `warn`: a missing 400 KB fish
+ * must cost the reef its markings and nothing else. The caller keeps the
+ * procedural body it was constructed with.
+ *
+ * The largest primitive wins when the file has several. `emperor_angelfish` is
+ * body plus fins, and merging them would need matching attribute sets across a
+ * material boundary for no gain — the fins are a fifth of the triangles and the
+ * body is what carries the animal.
+ */
+export async function loadReefFish(assets: AssetLoader): Promise<FishSpecies | null> {
+  try {
+    const root = await assets.load(REEF_FISH_URL);
+    let best: THREE.Mesh | null = null;
+    let bestCount = 0;
+    root.traverse((node) => {
+      const mesh = node as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const count = mesh.geometry.getAttribute('position')?.count ?? 0;
+      if (count > bestCount) {
+        bestCount = count;
+        best = mesh;
+      }
+    });
+    if (!best) return null;
+
+    const mesh = best as THREE.Mesh;
+    // The glTF node transform is part of the pose, so it has to be baked before
+    // the body is measured — otherwise a model authored under a scaled node is
+    // normalised against the wrong length.
+    mesh.updateWorldMatrix(true, false);
+    const posed = mesh.geometry.clone();
+    // Meshopt-quantised attributes cannot survive a baked transform — see
+    // `dequantiseGeometry`.
+    dequantiseGeometry(posed);
+    posed.applyMatrix4(mesh.matrixWorld);
+
+    const geometry = normaliseImportedBody(posed, REEF_FISH_FORWARD);
+    posed.dispose();
+    // Nothing survives of the source geometry's own bounds — every vertex is
+    // relocated by the vertex stage — and culling is off for the same reason it
+    // is off for the procedural body.
+    geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), Number.POSITIVE_INFINITY);
+
+    const material = (Array.isArray(mesh.material) ? mesh.material[0] : mesh.material) as
+      | THREE.MeshStandardMaterial
+      | undefined;
+    return { geometry, map: material?.map ?? null };
+  } catch (error) {
+    console.warn(`[ocean] reef fish unavailable: ${REEF_FISH_URL}`, error);
+    return null;
+  }
+}
+
+/** How many entries of an ascending array are strictly below `limit`. */
+function countBelow(sorted: Int32Array, limit: number): number {
+  let lo = 0;
+  let hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (sorted[mid] < limit) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/**
+ * Rewrites an imported body into this module's frame.
+ *
+ * The frame is not negotiable — the wave, the weave and the school's axes are
+ * all written against "nose at +0.5x, tail at -0.5x, up +y, lateral +z, one unit
+ * long" — so the conversion happens once, here, rather than as a special case
+ * scattered through the shader.
+ *
+ * `forwardAxis` names the source's own long axis and which end the nose is on.
+ * `emperor_angelfish` is authored nose-toward +z, which is why the default is a
+ * quarter turn about y.
+ */
+export function normaliseImportedBody(
+  source: THREE.BufferGeometry,
+  forwardAxis: '+z' | '-z' | '+x' | '-x' = '+z',
+): THREE.BufferGeometry {
+  const geometry = source.clone();
+
+  if (forwardAxis === '+z') geometry.rotateY(Math.PI / 2);
+  else if (forwardAxis === '-z') geometry.rotateY(-Math.PI / 2);
+  else if (forwardAxis === '-x') geometry.rotateY(Math.PI);
+
+  geometry.computeBoundingBox();
+  const box = geometry.boundingBox;
+  if (!box) return geometry;
+
+  const length = box.max.x - box.min.x;
+  if (!(length > 1e-6)) return geometry;
+
+  // Scale to unit length, then put the nose exactly on +0.5 so `s = 0.5 - x`
+  // starts at zero on the snout. The tail then lands on -0.5, a little short of
+  // the -0.69 the procedural caudal fin reaches — which is correct for this
+  // animal: an angelfish is a pectoral swimmer with a short, stiff tail, and it
+  // should beat less than the pelagic silhouette does.
+  const scale = 1 / length;
+  geometry.scale(scale, scale, scale);
+  geometry.translate(
+    0.5 - box.max.x * scale,
+    -((box.min.y + box.max.y) * 0.5) * scale,
+    -((box.min.z + box.max.z) * 0.5) * scale,
+  );
+
+  geometry.computeBoundingSphere();
+  return geometry;
 }
 
 /**
@@ -1555,9 +1946,9 @@ function centreWeighted(u: number): number {
   return (Math.sign(s) * Math.pow(Math.abs(s), 1.5)) * 0.5 + 0.5;
 }
 
-function identityInstanceMatrix(matrices: THREE.InstancedBufferAttribute): void {
+function identityInstanceMatrix(matrices: THREE.InstancedBufferAttribute, count: number): void {
   const array = matrices.array as Float32Array;
-  for (let i = 0; i < MAX_FISH; i++) {
+  for (let i = 0; i < count; i++) {
     const base = i * 16;
     array[base] = 1;
     array[base + 5] = 1;

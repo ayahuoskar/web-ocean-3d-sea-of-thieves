@@ -48,6 +48,14 @@ export interface QualitySettings {
    * allocation, and an individual keeps its own circuit across a tier change.
    * At 0 the renderer skips the draw entirely, which is why Low can have none
    * without a branch anywhere.
+   *
+   * The fish figure is a *total across ten schools*, which is what made the
+   * previous numbers misleading: 90 at High reads like a shoal and divides into
+   * nine fish per school, and nine fish spread over a 30 m station is not a
+   * school — it is a scatter of individuals a diver has to go looking for. The
+   * whole reef half of the scene was being judged on that. These are set so a
+   * reef school is thirty-odd strong, which is the smallest number that still
+   * reads as *a school* when one swims past.
    */
   birds: number;
   fish: number;
@@ -128,13 +136,27 @@ export interface QualitySettings {
    */
   kelp: number;
   /**
-   * Coconut palms on the island.
+   * Blades in the island's grass field.
    *
-   * Instanced and animated on the GPU like the kelp, so this is `instanceCount`.
-   * The island is 1.4 km from the play area, so at the lower tiers this is
-   * thinning a silhouette rather than removing anything a viewer is looking at.
+   * Instanced and placed on the GPU from the heightfield, so this is
+   * `instanceCount` and nothing else — see `src/scene/Meadow.ts`. The field
+   * follows the camera rather than covering the island, so this number is a
+   * *density* over a 150 m square rather than a total: halving it halves how
+   * thick the sward looks underfoot, wherever the viewer is standing.
    */
-  palms: number;
+  meadow: number;
+
+  /**
+   * Canopy billboards standing on the island — see `src/scene/Canopy.ts`.
+   *
+   * Unlike `meadow` this is a *total*, not a density: the cards are planted on
+   * the island rather than tiled around the camera, so the number is how much of
+   * the island's forest exists. Low keeps a quarter of it, because the thing it
+   * buys — the island having a canopy silhouette at all — is exactly what a low
+   * tier must not lose. It is also nearly free: one draw, two triangles a card,
+   * no texture and no shadow.
+   */
+  canopy: number;
 }
 
 export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
@@ -159,7 +181,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     wakeDisplacement: 0,
     propsDetail: 0.3,
     kelp: 0,
-    palms: 0,
+    meadow: 0,
+    canopy: 4000,
   },
   medium: {
     fftSize: 128,
@@ -171,7 +194,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     godRaySteps: 12,
     underwaterParticles: 1200,
     birds: 14,
-    fish: 40,
+    fish: 110,
     // Partial: the scene shows through, but the analytic body still carries most
     // of the colour, which hides the coarser depth resolution at this tier.
     refraction: 0.6,
@@ -182,7 +205,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     wakeDisplacement: 0.75,
     propsDetail: 0.5,
     kelp: 800,
-    palms: 16,
+    meadow: 18000,
+    canopy: 9000,
   },
   high: {
     fftSize: 256,
@@ -194,7 +218,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     godRaySteps: 24,
     underwaterParticles: 2400,
     birds: 26,
-    fish: 90,
+    fish: 240,
     refraction: 1,
     reflection: 0.85,
     reflectionScale: 0.5,
@@ -203,7 +227,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     wakeDisplacement: 1,
     propsDetail: 0.75,
     kelp: 1800,
-    palms: 30,
+    meadow: 38000,
+    canopy: 15000,
   },
   ultra: {
     fftSize: 256,
@@ -215,7 +240,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     godRaySteps: 40,
     underwaterParticles: 4000,
     birds: 40,
-    fish: 140,
+    fish: 380,
     refraction: 1,
     reflection: 1,
     reflectionScale: 0.6,
@@ -224,7 +249,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     wakeDisplacement: 1,
     propsDetail: 1,
     kelp: 2900,
-    palms: 48,
+    meadow: 62000,
+    canopy: 20000,
   },
   max: {
     fftSize: 512,
@@ -236,7 +262,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     godRaySteps: 56,
     underwaterParticles: 6000,
     birds: 64,
-    fish: 220,
+    fish: 560,
     refraction: 1,
     reflection: 1,
     reflectionScale: 0.75,
@@ -245,7 +271,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     wakeDisplacement: 1,
     propsDetail: 1,
     kelp: 4000,
-    palms: 72,
+    meadow: 90000,
+    canopy: 24000,
   },
 };
 

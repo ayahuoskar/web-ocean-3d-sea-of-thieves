@@ -126,14 +126,78 @@ export const PRESETS: Record<PresetId, Preset> = {
       roughness: 0.07,
       foamThreshold: 0.42,
     },
-    fog: { color: color(0xbfd8ee), density: 0.00016, volumetric: 0.00012 },
+    /**
+     * A correctness fix to the haze, and explicitly **not** a fix to the far
+     * sea — which is what it was attempted as.
+     *
+     * The far sea measures sRGB (123, 141, 154), a saturation of 0.20, while the
+     * near sea measures (7, 79, 108) at 0.94 and matches the reference almost
+     * exactly. A defect that grows with distance looks like a haze defect, and
+     * 0xbfd8ee is very nearly white, so the reasoning was that every kilometre of
+     * it drove the water toward grey. Moving the colour to the horizon band this
+     * preset actually renders and nearly halving the density moved the far sea
+     * by **three levels**, from 0.19 saturation to 0.20. The hypothesis was
+     * wrong, and it is the second one to be: weighting the haze by `1 - fresnel`
+     * was tried before it and moved the same sample by one level.
+     *
+     * What the two null results together say is that the pale far water is not
+     * the haze at all — it is grazing-angle reflection of a horizon sky, plus the
+     * absence of the shallow turquoise the reference carries in the same band.
+     * That is recorded as open rather than papered over.
+     *
+     * The change is kept on its own merits, which are real but smaller than they
+     * were hoped to be: aerial perspective is scattered *skylight*, so a neutral
+     * is the wrong colour for it whatever it happens to be washing out, and
+     * 0.00016/m is about 27% haze at two kilometres — a hazy day, not the clear
+     * one this preset is for.
+     */
+    fog: { color: color(0x7ea8cc), density: 0.00009, volumetric: 0.00012 },
+    /**
+     * Lifted when the surface grade came down.
+     *
+     * `toneMappingExposure` went from 1 to 0.42 to stop the above-water frame
+     * sitting on the ACES shoulder, and that cut lands on the underwater frame
+     * *as well as* the medium's own attenuation — so the dive, which was tuned
+     * against the old exposure, came out two and a half stops under. Measured on
+     * the tour's own reef leg, the coral fifteen metres away was within a few
+     * levels of the water behind it.
+     *
+     * Visibility from 45 m to 62 m and a brighter inscatter, rather than a
+     * larger `godRayStrength`: the shafts were never the problem. What was
+     * missing is the diffuse reach that separates a coral head from the blue
+     * behind it, and that is what the extinction length buys.
+     */
     underwater: {
-      color: color(0x1d6f96),
-      extinction: vec(0.28, 0.09, 0.055),
-      visibility: 45,
-      godRayStrength: 1,
+      color: color(0x2f8fb5),
+      extinction: vec(0.22, 0.072, 0.045),
+      visibility: 62,
+      godRayStrength: 1.1,
     },
-    toneMappingExposure: 1,
+    /**
+     * 0.42, and this is a correction rather than a look.
+     *
+     * The scene's key is 3.4, its hemisphere fill is 1, and on top of both sits
+     * a full sky-cube IBL — which together put a sunlit dielectric well up the
+     * ACES shoulder at an exposure of 1. That is not a small stylistic
+     * difference. Measured on the hero island frame against
+     * `docs/ref/tropical-island-sea-level-v2.png`: the open sea came out
+     * (39, 125, 158) against the reference's (10, 62, 95), the sky 15% down from
+     * the top came out (214, 221, 228) — white — against (105, 149, 190), and
+     * the vegetated slopes rendered at a saturation of 0.05 against 0.38.
+     *
+     * The saturation is the tell, and it is why the answer is exposure rather
+     * than albedo. ACES desaturates as it compresses: everything pushed onto the
+     * shoulder converges on white, so a scene rendered two and a half stops hot
+     * does not read as "bright" — it reads as *milky*, which is exactly what the
+     * brief lists as a failure mode. Darkening the albedos instead would have
+     * fixed one surface and left the sky, the sea and every prop where they
+     * were.
+     *
+     * Verified by isolation: with the terrain's albedo forced to black and its
+     * environment contribution to zero, the island renders black. There is no
+     * veil in the post chain. The frame was simply over-exposed.
+     */
+    toneMappingExposure: 0.42,
   },
 
   arctic: {

@@ -70,6 +70,21 @@ export class AssetLoader {
   private readonly materials = new Set<THREE.Material>();
   private readonly textures = new Set<THREE.Texture>();
 
+  /**
+   * Loaded material -> the node material standing in for it.
+   *
+   * One entry per *source* material, which is the whole point. `GLTFLoader`
+   * hands the same `Material` instance to every mesh that shares it in the
+   * file, and downstream code relies on that identity: `Props.bakeParts` groups
+   * geometry by material instance so that a multi-part asset merges into one
+   * draw per material. Converting per mesh would fork one glTF material into
+   * one node material per node — which is exactly what happened to
+   * `grass_bermuda_01`, a single-material file of twenty-one separate blades:
+   * every blade became its own material, so nothing merged and the tuft was
+   * scattered as twenty-one lonely sprigs instead of being stacked into one.
+   */
+  private readonly converted = new Map<THREE.Material, THREE.Material>();
+
   private draco: DRACOLoader | null = null;
   private dracoProbe: Promise<string | null> | null = null;
   private meshoptProbe: Promise<void> | null = null;
@@ -141,6 +156,7 @@ export class AssetLoader {
     this.geometries.clear();
     this.materials.clear();
     this.textures.clear();
+    this.converted.clear();
     this.cache.clear();
     this.draco?.dispose();
     this.draco = null;
@@ -181,6 +197,9 @@ export class AssetLoader {
    * material, and registers it (and its textures) for disposal.
    */
   private adoptMaterial(material: THREE.Material): THREE.Material {
+    const already = this.converted.get(material);
+    if (already) return already;
+
     const converted =
       this.convertMaterials && (material as THREE.MeshStandardMaterial).isMeshStandardMaterial
         ? toPhysicalNodeMaterial(material as THREE.MeshStandardMaterial)
@@ -188,8 +207,12 @@ export class AssetLoader {
 
     if (converted !== material) {
       // The original is dead the moment we swap it out; free it now rather than
-      // holding a reference to something nothing renders.
+      // holding a reference to something nothing renders. Keyed on it first, so
+      // the next mesh sharing it still finds the replacement.
+      this.converted.set(material, converted);
       material.dispose();
+    } else {
+      this.converted.set(material, converted);
     }
 
     this.materials.add(converted);
@@ -292,6 +315,44 @@ export function toPhysicalNodeMaterial(
   if (typeof extended.iridescence === 'number') target.iridescence = extended.iridescence;
 
   return target;
+}
+
+/**
+ * Rewrites every quantised vertex attribute of `geometry` as plain float32.
+ *
+ * Call this before baking a transform into loaded geometry. It is not an
+ * optimisation — it is a correctness fix, and the bug it prevents is silent and
+ * spectacular.
+ *
+ * `scripts/optimize-assets.mjs` Meshopt-encodes the scene dressing, and Meshopt
+ * encoding quantises: positions arrive as an `Int16Array` with
+ * `normalized = true`, holding values in [-1, 1], and the model's real size
+ * lives in the glTF node's scale. `BufferAttribute.applyMatrix4` reads through
+ * `getX/getY/getZ`, which de-normalise, and writes back through `setXYZ`, which
+ * does not — so baking a node scale of 4 into the geometry tries to store 4.2 in
+ * a buffer whose representable range stops at 1, and every vertex outside the
+ * unit cube is clamped onto its faces.
+ *
+ * A tree came out of that as a hollow box of ribbons standing where the tree
+ * should be — the exact silhouette of a mesh flattened onto a cube. Worth
+ * knowing as a failure mode, because nothing errors: the model loads, the draw
+ * succeeds, and only the shape is wrong.
+ *
+ * De-normalising also makes `mergeGeometries` work across an asset's parts,
+ * since it refuses inputs whose attributes disagree about normalisation.
+ */
+export function dequantiseGeometry(geometry: THREE.BufferGeometry): void {
+  for (const [name, attribute] of Object.entries(geometry.attributes)) {
+    const source = attribute as THREE.BufferAttribute;
+    if (!source.normalized && source.array instanceof Float32Array) continue;
+
+    const items = source.itemSize;
+    const values = new Float32Array(source.count * items);
+    for (let i = 0; i < source.count; i++) {
+      for (let c = 0; c < items; c++) values[i * items + c] = source.getComponent(i, c);
+    }
+    geometry.setAttribute(name, new THREE.BufferAttribute(values, items));
+  }
 }
 
 /** Adds every texture referenced by `material` to `into`. */

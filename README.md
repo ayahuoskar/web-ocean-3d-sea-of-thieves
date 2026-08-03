@@ -1,17 +1,22 @@
 # Web Ocean 3D
 
-A realtime spectral ocean rendered with **Three.js**, **WebGPU** and **TSL** — FFT wave
-synthesis, physically motivated water optics, foam, caustics, buoyancy, wakes, underwater
-transitions and a volumetric sky, with a graceful WebGL2 fallback from the same shader source.
+A realtime spectral ocean and tropical island rendered with **Three.js**, **WebGPU** and
+**TSL** — FFT wave synthesis, physically motivated water optics, a depth-driven shore break,
+foam, caustics, buoyancy, wakes, underwater transitions and a volumetric sky, with a graceful
+WebGL2 fallback from the same shader source.
 
-![Web Ocean 3D](docs/images/boat.png)
+![Web Ocean 3D](docs/images/island.png)
+
+<p align="center"><em>The island from 780 m off the beach — the deterministic approval frame.
+Every image in this README is regenerated from the current renderer by one command; none of
+them is hand-captured.</em></p>
 
 <p align="center">
   <img alt="Three.js r185" src="https://img.shields.io/badge/three.js-r185-000000?style=flat-square&logo=three.js&logoColor=white">
   <img alt="WebGPU" src="https://img.shields.io/badge/WebGPU-TSL-005a9c?style=flat-square">
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-3178C6?style=flat-square&logo=typescript&logoColor=white">
   <img alt="Vite" src="https://img.shields.io/badge/Vite-6-646CFF?style=flat-square&logo=vite&logoColor=white">
-  <img alt="Assets CC0" src="https://img.shields.io/badge/assets-CC0-4ade80?style=flat-square">
+  <img alt="Assets CC0 and CC-BY" src="https://img.shields.io/badge/assets-CC0%20%2B%20CC--BY-4ade80?style=flat-square">
 </p>
 
 ---
@@ -35,6 +40,32 @@ Assets are committed, but the set is reproducible from scratch:
 node scripts/fetch-assets.mjs             # idempotent
 node scripts/fetch-assets.mjs --force     # re-fetch everything
 node scripts/fetch-assets.mjs --verify    # offline integrity check
+node scripts/optimize-assets.mjs          # decimate + Meshopt what actually ships
+```
+
+Most of it is CC0 from [Poly Haven](https://polyhaven.com). Twelve assets come
+from Sketchfab instead, because Poly Haven publishes no marine life, no coconut
+palm, and — for the shoreline — nothing that can be dropped at an arbitrary angle
+without showing its back. Three of the twelve are CC0 Smithsonian coral scans;
+**nine are CC-BY**, whose credits are a licence condition and are recorded in
+[`ASSET_LICENSES.md`](ASSET_LICENSES.md#sketchfab-assets). Fetching those needs a
+Sketchfab API token in `SKETCHFAB_API_TOKEN` or a git-ignored `sketchfab-token`
+file; without one that step is skipped, which costs nothing unless you are
+re-running the optimiser.
+
+The raw downloads land in `assets/source/` rather than under `public/`, and that
+is not filing: Vite copies `public/` into `dist/` verbatim, so while they sat
+there the optimiser was being undone one directory up and the build shipped
+818 MB of film-quality scan data that no URL points at. It ships 99 MB now.
+
+`scripts/modelkit/` is the workbench for all of this — search and fetch Sketchfab
+under a hard CC0/CC-BY filter, then measure what arrived:
+
+```bash
+node scripts/modelkit/sketchfab.mjs search "coral reef" --animated
+node scripts/modelkit/inspect.mjs public/models/dressing   # triangles, alpha modes, texture slots
+node scripts/modelkit/shells.mjs  public/models/dressing   # can this be placed at any angle?
+node scripts/modelkit/plates.mjs  public/models/dressing   # is a scan's ground slab still attached?
 ```
 
 **Requirements** — Node 20+, and a browser with WebGPU for the full experience
@@ -62,6 +93,18 @@ and weather together — so switching reads as a different *place*, not a colour
 |---|---|
 | ![Sunset](docs/images/sunset.png) | ![Waves](docs/images/waves.png) |
 | Anisotropic glitter stretching down the sun's track | Whitecaps where the surface genuinely folds, at 15 m/s |
+
+![Island](docs/images/island.png)
+
+*The frame the terrain, the planting and the grade are tuned against, and the one the
+reference in [`docs/ref/`](docs/ref/) depicts. Bare coral sand to 3.5 m, canopy over the
+flanks carried by billboard impostors past the last mesh LOD, a pale rock crown on the 150 m
+summit, and closed shoreline rock that can be dropped at any angle.*
+
+| The shore break | Over the reef |
+|---|---|
+| ![Shore](docs/images/shore.png) | ![Reef](docs/images/reef.png) |
+| Depth-driven breaking foam: the surf line sits where the water shoals to about 1.3 wave heights, so it walks seaward as the sea gets up | Coral, reef rock and kelp on the inner plateau — the half of the underwater scene the up-looking dive shot cannot see |
 
 ![Interface](docs/images/interface.png)
 
@@ -92,8 +135,8 @@ would be meaningless.
 |---|---|
 | **1 / 2 / 3** | Orbit / Fly / Boat camera |
 | **Orbit** | LMB drag rotate · RMB drag pan · scroll zoom |
-| **Fly** | click to capture the mouse · WASD · Space/Ctrl up-down · Shift boost |
-| **Boat** | **W/S** throttle ahead and astern · **A/D** rudder · chase camera follows the hull |
+| **Fly** | click to capture the mouse · WASD · Space/Ctrl up-down · **scroll** speed (1.5–600 m/s) · Shift boost |
+| **Boat** | **W/S** throttle ahead and astern · **A/D** rudder · **drag** to orbit the chase camera · **scroll** to dolly · the hull is turned away from shoaling water rather than fenced by a radius |
 | **Touch** | Boat mode on a touch device gets an on-screen stick: forward for ahead, back for astern, left and right for rudder |
 
 Boat mode selects the ship, not just a camera. Leaving it releases ship input, so Orbit and
@@ -128,6 +171,9 @@ Drop the camera below the surface in any mode to trigger the underwater state.
 - Fresnel sky reflection, Beer–Lambert transmission, subsurface scattering on backlit
   crests, GGX sun specular
 - Shallow-water tint driven by real seafloor depth
+- **Depth-driven shore break.** Waves break where they run out of water, not where they steepen:
+  the surf line sits where the seabed shoals to about 1.3 wave heights, so it walks seaward as
+  the sea gets up, and arrives in sets with real lulls between them
 
 **World**
 - Steerable sailing ship: throttle and rudder resolved into forces the buoyancy solver
@@ -139,7 +185,20 @@ Drop the camera below the surface in any mode to trigger the underwater state.
 - Cloud shadows drift across the water, sampled from the same density field the clouds are
   drawn from
 - Buoys and barrels floating independently
-- Procedural seafloor with animated caustics; island silhouette
+- **Canopy impostors.** Past the last mesh LOD the island's forest becomes camera-facing cards,
+  placed straight off the heightfield node so they stop exactly where the terrain's green stops.
+  One draw, two triangles a card, no texture and no shadow — and it is what gives the island a
+  broken silhouette instead of a painted dome
+- The hull is turned away from shoaling water by the seabed gradient rather than by a fence,
+  so the same rule handles the beach, the reef and the spit without knowing about any of them
+- Procedural seafloor with animated caustics, and a 1 km island carved from the same
+  heightfield the buoyancy solver and the prop scatter query — bays, an offset crest, a
+  raised headland and a lagoon, so no two bearings show the same coastline
+- The island's biome lives in the terrain colour, not only in instances: 0.8 km² of ground
+  cannot be covered by trees at any triangle budget, so elevation drives bare sand into
+  scrub into closed canopy into summit rock, and the models are the hero layer standing in it
+- GPU grass that tiles around the camera rather than the world, placed from the heightfield
+  in the vertex stage, with per-instance LOD dealing for every scattered kind
 - Preetham-model sky with raymarched volumetric clouds, stars, moon, rain and snow
 
 **Underwater**
@@ -324,6 +383,22 @@ Full methodology, cost model and the honest list of what remains unmeasured:
   curvature, and neither is modelled.
 - **`refraction: 0` is a visual policy, not a cost saving.** The backdrop and depth reads are
   unconditional in the node graph; a tier that sets it to zero still pays for them.
+- **The far sea reflects an analytic stand-in, not the rendered sky.** The planar reflector is
+  faded out as the view goes grazing — it cannot be trusted there — so in the far band the water
+  reflects a single horizon colour derived from the hemisphere light. Reducing the whitening on
+  that colour from 42% to 14% recovered part of the saturation the reference has; a correct fix
+  is a directional sky evaluation or LUT sampled along the reflected ray, which is not done.
+  Two other explanations were tested first and disproved by measurement: weighting the aerial
+  perspective by `1 - fresnel` moved the sample one level, and correcting the haze colour and
+  halving its density moved it three.
+- **The water column ignores instantaneous wave height.** `Seafloor.depthNode()` returns depth
+  below *mean sea level*, so on a crest the analytic thickness is about a metre short, and the
+  shore break's criterion uses seabed depth rather than surface-minus-floor. Shelves therefore
+  do not appear and disappear under passing swell the way the brief asks.
+- **The island is outside the shadow cascade.** The sun's shadow camera covers ±260 m around the
+  viewer; from the approval camera the island is 780 m away, so none of it casts or receives
+  sun shadows and the hill is uniformly lit. The distant canopy impostors are unlit by cloud
+  shadow and terrain occlusion for the same reason.
 - **One machine.** Every performance figure comes from a single RTX 5090; nothing here
   establishes where the quality tiers stop working.
 - Playwright's bundled Chromium exposes no WebGPU adapter, so it renders through a software

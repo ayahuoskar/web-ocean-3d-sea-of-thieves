@@ -147,7 +147,41 @@ interface Beat {
 }
 
 /** World point the island beats aim at. Mirrors the landmass `Seafloor` builds. */
-const ISLAND_LOOK: readonly [number, number, number] = [ISLAND.x, 30, ISLAND.z];
+const ISLAND_LOOK: readonly [number, number, number] = [ISLAND.x, 70, ISLAND.z];
+
+/**
+ * The two landmarks the island leg is composed around, in world XZ.
+ *
+ * Derived here rather than imported because `Props` owns them as *bearings* and
+ * does not export the resolved points — but they are worth writing down, since
+ * a beat aimed at the island's centre flies past both of them without ever
+ * framing either. The cove sits on `COVE_BEARING` (0.7 rad) at the waterline;
+ * the fort on `FORT_BEARING` (1.35 rad) at `FORT_INSET` (0.34) of the radius
+ * inland from it.
+ */
+const COVE: readonly [number, number] = [
+  ISLAND.x + Math.cos(0.7) * ISLAND.radius,
+  ISLAND.z + Math.sin(0.7) * ISLAND.radius,
+];
+const FORT: readonly [number, number] = [
+  ISLAND.x + Math.cos(1.35) * ISLAND.radius * 0.66,
+  ISLAND.z + Math.sin(1.35) * ISLAND.radius * 0.66,
+];
+
+/**
+ * How far the tour's time of day swings, in hours either side of noon, and why
+ * it is a sine rather than a ramp.
+ *
+ * The loop is seamless, so anything driven from the clock has to be *periodic*
+ * in it. A dawn-to-dusk ramp is the obvious way to move the light through a tour
+ * and it puts an eight-hour cut at the loop point, which is the one edit this
+ * flight exists to avoid. A sine over the loop period is continuous in value and
+ * in derivative at the wrap, and still sweeps the sun from an elevation of 0.44
+ * to 1.31 radians — afternoon light on the island at the quarter point, morning
+ * light on the reef at the three-quarter.
+ */
+const TOUR_NOON_HOURS = 12.5;
+const TOUR_HOUR_SWING = 4.2;
 
 /**
  * The flight.
@@ -174,7 +208,7 @@ const BEATS: readonly Beat[] = [
     // letting the hull close on the lens. The wake is the subject as much as the
     // hull is, and it needs a few seconds at speed before it is worth showing.
     name: 'open-water',
-    duration: 16,
+    duration: 14,
     throttle: 1.0,
     keys: [
       { at: 0.0, eye: [180, 12, 80], look: 'ship' },
@@ -182,78 +216,96 @@ const BEATS: readonly Beat[] = [
     ],
   },
   {
-    // Crane astern and up, then let the ship run away from the lens until it and
-    // the island line up on the same bearing. The island is 1.7 km out from the
-    // last key and subtends about 17 degrees of an 85-degree frame — a landmass
-    // on the horizon, which is the role it is dressed for, with the ship at ~320 m
-    // sitting within four degrees of the same axis in the foreground.
-    name: 'island-pass',
-    duration: 26,
+    // Crane astern and up, then run for the island.
+    //
+    // The whole leg is 1.4 km in 20 s — about 70 m/s, which is fast for a camera
+    // move and is the price of the tour visiting the island at all. The distance
+    // is not negotiable: `ISLAND` is 1.39 km from the play area, and a 120 s loop
+    // that goes there and comes back spends nearly forty of those seconds in
+    // transit however it is cut. Framing it as a climb keeps the ship in shot for
+    // the first third and hands the frame to the landmass for the rest, so the
+    // speed reads as an establishing move rather than as a rush.
+    name: 'outbound',
+    duration: 20,
     throttle: 1.0,
     keys: [
       { at: 0.0, eye: [66, 22, 96], look: 'ship' },
-      { at: 0.42, eye: [330, 58, 20], look: 'ship' },
-      { at: 0.8, eye: [415, 88, -110], look: ISLAND_LOOK },
+      { at: 0.35, eye: [-180, 92, -40], look: ISLAND_LOOK },
+      { at: 0.72, eye: [-620, 150, -378], look: ISLAND_LOOK },
     ],
   },
   {
-    // Opens still on the island wide: the curve has eased to about 11 m/s across
-    // those two keys, the calmest stretch of the surface half of the loop, which
-    // is the hold the reveal needs before the shot moves again. Then straight
-    // down to the deck at close to 40. The last key sits at 5.5 m with a 3-4 m
-    // sea running, so crests pass the lens and the submersion ramp in
-    // `CameraDirector` cross-fades through them rather than cutting.
-    name: 'waterline',
-    duration: 16,
-    throttle: 0.8,
+    // The island's near shore, composed around its two landmarks rather than
+    // around its centre.
+    //
+    // This beat is the reason the tour was re-authored. Every key in the previous
+    // flight sat within 420 m of the origin: the island was never closer than
+    // 1.7 km and appeared only as a shape on the horizon in one wide, so the cove,
+    // the jetty, the beached pinnace and the fort — the whole of the scene's
+    // authored set dressing — were in a tour that never once looked at them.
+    //
+    // 55 to 75 m of altitude, which is under the 150 m summit: the shore reads
+    // as a coastline flown *along* rather than a map looked down at, and the
+    // crown stays above the lens where it belongs.
+    name: 'landfall',
+    duration: 26,
+    throttle: 0.85,
     keys: [
-      { at: 0.0, eye: [392, 80, -158], look: ISLAND_LOOK },
-      { at: 0.35, eye: [243, 33, -222], look: 'ship' },
-      { at: 0.72, eye: [92, 5.5, -272], look: 'ship' },
+      { at: 0.0, eye: [-640, 96, -300], look: [COVE[0] + 30, 18, COVE[1] + 10] },
+      { at: 0.36, eye: [-812, 58, -318], look: [COVE[0], 6, COVE[1] - 18] },
+      { at: 0.7, eye: [-1044, 72, -322], look: [FORT[0], 38, FORT[1]] },
     ],
   },
   {
-    // Through the surface. The entry key is still framing the hull from 66 m, so
-    // the dive starts as a shot of the ship and *becomes* a shot of the water
-    // column — going under while looking at nothing reads as a mistake.
-    name: 'descent',
-    duration: 12,
-    throttle: 0.55,
+    // Back out to the plateau and down onto the water. The last key is at 9 m
+    // with the lens already tilted toward where the dive is going, so the descent
+    // that follows starts as a continuation of this move rather than as a new one.
+    name: 'return',
+    duration: 18,
+    throttle: 0.9,
     keys: [
-      { at: 0.0, eye: [24, 3.4, -290], look: 'ship' },
-      { at: 0.42, eye: [-36, -2.8, -300], look: [-96, -9, -310] },
-      { at: 0.62, eye: [-84, -6.2, -300], look: [-152, -10, -286] },
+      { at: 0.0, eye: [-1218, 88, -300], look: ISLAND_LOOK },
+      { at: 0.42, eye: [-702, 44, -262], look: [-260, 6, -150] },
+      { at: 0.76, eye: [-338, 9, -206], look: [-150, -6, -128] },
     ],
   },
   {
-    // Along the reef, not across it: eye and look-at sit at nearly the same
-    // radius from the origin so the outcrops recede down the frame instead of
-    // passing the lens broadside. The slowest beat in the loop at 7-15 m/s,
-    // because underwater the water column itself is the thing being shown and
-    // moving fast through it destroys the parallax that makes it legible. The
-    // last key tilts up toward the surface to put the god rays in frame.
+    // Through the surface and along the reef, threading two of its schools.
+    //
+    // The route is not a shape chosen for the camera; it is a line drawn between
+    // the places the reef actually is. `reefPatches` puts patches at (-97, -102)
+    // and (33, 31), `findReefStation` gives reef schools 8 and 1 those two, and
+    // this beat passes within fifteen metres of both. The flight it replaces ran
+    // at a radius of 221 to 312 m from the origin — outside the 245 m the coral
+    // reaches and well outside the 190 m the fish station within — so the whole
+    // underwater leg was a two-minute pan across empty sand. Nothing was broken;
+    // it was simply pointed at the one part of the plateau with nothing on it.
+    //
+    // 12 m/s, against the 7-15 the previous leg ran at, and low: -9.5 m over a
+    // floor near -16.5 puts the lens seven metres above the coral and roughly
+    // level with the fish, which mill about three metres off the bottom.
     name: 'reef-run',
-    duration: 28,
+    duration: 26,
     throttle: 0.5,
     keys: [
-      { at: 0.0, eye: [-130, -7.5, -232], look: [-226, -11, -104] },
-      { at: 0.32, eye: [-196, -8.5, -136], look: [-238, -12, 0] },
-      { at: 0.64, eye: [-224, -7.0, -28], look: [-206, -2.5, 118] },
+      { at: 0.0, eye: [-206, -4.5, -142], look: [-130, -13, -118] },
+      { at: 0.34, eye: [-116, -10.5, -104], look: [-52, -15.5, -62] },
+      { at: 0.7, eye: [-12, -10.5, -18], look: [40, -15.5, 34] },
     ],
   },
   {
-    // Up through the surface and back around onto the opening mark, re-acquiring
-    // the hull on the way so the loop point arrives on a shot of the ship rather
-    // than on empty water. This beat exists to make the wrap *unwatchable* — the
+    // Up through the surface and back onto the opening mark, re-acquiring the
+    // hull on the way so the loop point arrives on a shot of the ship rather than
+    // on empty water. This beat exists to make the wrap *unwatchable* — the
     // spline guarantees the motion is continuous, but continuity through a
     // surprising composition still reads as an edit.
     name: 'ascent',
-    duration: 22,
+    duration: 16,
     throttle: 0.85,
     keys: [
-      { at: 0.0, eye: [-212, -7.5, 62], look: [-186, 3, 186] },
-      { at: 0.38, eye: [-155, 11, 148], look: 'ship' },
-      { at: 0.66, eye: [-10, 19, 150], look: 'ship' },
+      { at: 0.0, eye: [48, -6.5, 46], look: [92, -4, 96] },
+      { at: 0.42, eye: [104, 12, 124], look: 'ship' },
+      { at: 0.74, eye: [74, 21, 162], look: 'ship' },
     ],
   },
 ];
@@ -553,6 +605,23 @@ export class CinematicDirector {
   /** Name of the beat playing at the current clock. */
   get beatName(): string {
     return BEATS[beatAt(this.clock)].name;
+  }
+
+  /**
+   * Hour of the day the tour is currently lit at, 0..24.
+   *
+   * A pure function of the loop clock and nothing else, which is what keeps it
+   * inside the same guarantee the rest of this class carries: `resetClock(t)`
+   * followed by a capture reproduces the frame exactly, lighting included. An
+   * accumulator here — "advance the clock a little each frame" — would have been
+   * simpler to write and would have made every cinematic baseline depend on how
+   * many frames had been rendered before it.
+   *
+   * See `TOUR_HOUR_SWING` for why the shape is a sine.
+   */
+  get timeOfDayHours(): number {
+    const phase = (this.clock / CINEMATIC_LOOP_SECONDS) * Math.PI * 2;
+    return TOUR_NOON_HOURS + Math.sin(phase) * TOUR_HOUR_SWING;
   }
 
   /**

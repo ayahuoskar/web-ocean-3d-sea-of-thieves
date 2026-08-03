@@ -23,8 +23,22 @@ import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const PUBLIC_DIR = join(ROOT, 'public');
+/**
+ * Every `dir` in the manifests below is relative to the repository root, not to
+ * `public/`, and which root an entry names is a decision rather than a detail.
+ *
+ * Vite copies the whole of `public/` into `dist/` verbatim. While the raw
+ * downloads lived there, `scripts/optimize-assets.mjs` was being undone one
+ * directory up — the build shipped 818 MB, 784 MB of it film-quality scan
+ * geometry that no URL points at. So only what the runtime actually fetches
+ * goes to `public/`, and the sources the optimiser eats go to `assets/source/`,
+ * which nothing copies and `.gitignore` excludes.
+ */
+const DOWNLOAD_ROOT = ROOT;
+/** Roots a `--verify` run walks when it has no manifest to check against. */
+const VERIFY_ROOTS = ['public', 'assets/source'];
 const API = 'https://api.polyhaven.com';
+const SKETCHFAB_API = 'https://api.sketchfab.com/v3';
 
 const args = new Set(process.argv.slice(2));
 const FORCE = args.has('--force');
@@ -45,28 +59,22 @@ const MANIFEST = [
     kind: 'model',
     slug: 'dutch_ship_medium',
     res: '2k',
-    dir: 'models/dutch_ship_medium',
+    dir: 'public/models/dutch_ship_medium',
     note: 'Hero sailing ship',
   },
 
   // ---- Floating props -----------------------------------------------------
-  { kind: 'model', slug: 'ocean_buoy', res: '1k', dir: 'models/ocean_buoy', note: 'Floating marine buoy' },
-  { kind: 'model', slug: 'barrel_03', res: '1k', dir: 'models/barrel_03', note: 'Floating barrel' },
+  { kind: 'model', slug: 'ocean_buoy', res: '1k', dir: 'public/models/ocean_buoy', note: 'Floating marine buoy' },
+  { kind: 'model', slug: 'barrel_03', res: '1k', dir: 'public/models/barrel_03', note: 'Floating barrel' },
 
   // ---- Island silhouette --------------------------------------------------
-  { kind: 'model', slug: 'rock_07', res: '1k', dir: 'models/rock_07', note: 'Standalone rock' },
-  {
-    kind: 'model',
-    slug: 'namaqualand_cliff_01',
-    res: '1k',
-    dir: 'models/namaqualand_cliff_01',
-    note: 'Cliff face for island silhouette',
-  },
+  { kind: 'model', slug: 'rock_07', res: '1k', dir: 'assets/source/models/rock_07', note: 'Standalone rock' },
+
 
   // ---- Island and shore dressing -----------------------------------------
   //
   // These are the *source* downloads, not what ships. Poly Haven publishes film
-  // -quality geometry — `island_tree_01` is a 58 MB `.bin` for a background tree —
+  // -quality geometry — `jacaranda_tree` is a 199 MB `.bin` for a background tree —
   // so `scripts/optimize-assets.mjs` decimates and Meshopt-encodes them into
   // `public/models/dressing/*.glb`, and only those are committed. 177 MB of
   // source becomes 15 MB shipped.
@@ -83,22 +91,20 @@ const MANIFEST = [
   // shore rather than as a hill meeting water: they are authored as *edges*,
   // with a wave-cut platform and a back slope, so they sit along a contour
   // instead of being another rock standing on one.
-  { kind: 'model', slug: 'coast_line_01', res: '1k', dir: 'models/coast_line_01', note: 'Shoreline edge' },
-  { kind: 'model', slug: 'coast_line_02', res: '1k', dir: 'models/coast_line_02', note: 'Shoreline edge' },
-  { kind: 'model', slug: 'coast_land_rocks_03', res: '1k', dir: 'models/coast_land_rocks_03', note: 'Shore rock mass' },
-  // A second cliff form, because six copies of one silhouette standing in a row
-  // is what made the island's back read as a stage flat.
-  { kind: 'model', slug: 'coastal_cliff_04', res: '1k', dir: 'models/coastal_cliff_04', note: 'Island cliff face' },
-  { kind: 'model', slug: 'coast_rocks_01', res: '1k', dir: 'models/coast_rocks_01', note: 'Shore rock cluster' },
-  { kind: 'model', slug: 'coast_rocks_03', res: '1k', dir: 'models/coast_rocks_03', note: 'Shore rock cluster' },
-  { kind: 'model', slug: 'coastal_cliff_02', res: '1k', dir: 'models/coastal_cliff_02', note: 'Island cliff face' },
-  { kind: 'model', slug: 'sand_rocks_small_01', res: '1k', dir: 'models/sand_rocks_small_01', note: 'Small shore rocks' },
+  { kind: 'model', slug: 'coast_line_01', res: '1k', dir: 'assets/source/models/coast_line_01', note: 'Shoreline edge' },
+  { kind: 'model', slug: 'coast_line_02', res: '1k', dir: 'assets/source/models/coast_line_02', note: 'Shoreline edge' },
+  { kind: 'model', slug: 'coast_land_rocks_03', res: '1k', dir: 'assets/source/models/coast_land_rocks_03', note: 'Shore rock mass' },
+  { kind: 'model', slug: 'coast_rocks_01', res: '1k', dir: 'assets/source/models/coast_rocks_01', note: 'Shore rock cluster' },
+  { kind: 'model', slug: 'coast_rocks_03', res: '1k', dir: 'assets/source/models/coast_rocks_03', note: 'Shore rock cluster' },
+  //
+  // `coastal_cliff_02`, `coastal_cliff_04` and `sand_rocks_small_01` used to be
+  // here and are gone. All three are excellent scans that only read from one
+  // direction — see the `rock_slab_a` note in the Sketchfab manifest below for
+  // the measurement and the replacement.
 
-  { kind: 'model', slug: 'island_tree_01', res: '1k', dir: 'models/island_tree_01', note: 'Island tree' },
-  { kind: 'model', slug: 'pachira_aquatica_01', res: '1k', dir: 'models/pachira_aquatica_01', note: 'Tropical tree' },
-  { kind: 'model', slug: 'fern_02', res: '1k', dir: 'models/fern_02', note: 'Undergrowth' },
-  { kind: 'model', slug: 'shrub_sorrel_01', res: '1k', dir: 'models/shrub_sorrel_01', note: 'Undergrowth' },
-  { kind: 'model', slug: 'grass_bermuda_01', res: '1k', dir: 'models/grass_bermuda_01', note: 'Grass tuft' },
+  { kind: 'model', slug: 'pachira_aquatica_01', res: '1k', dir: 'assets/source/models/pachira_aquatica_01', note: 'Tropical tree' },
+  { kind: 'model', slug: 'fern_02', res: '1k', dir: 'assets/source/models/fern_02', note: 'Undergrowth' },
+  { kind: 'model', slug: 'shrub_sorrel_01', res: '1k', dir: 'assets/source/models/shrub_sorrel_01', note: 'Undergrowth' },
 
   // ---- Tropical planting ---------------------------------------------------
   //
@@ -107,51 +113,228 @@ const MANIFEST = [
   // the one silhouette everyone associates with it. `pachira_aquatica` above is
   // the closest tree they publish; these two are genuine tropical understorey
   // from the same cove collection.
-  { kind: 'model', slug: 'anthurium_botany_01', res: '1k', dir: 'models/anthurium_botany_01', note: 'Tropical broadleaf' },
-  { kind: 'model', slug: 'calathea_orbifolia_01', res: '1k', dir: 'models/calathea_orbifolia_01', note: 'Tropical broadleaf' },
+  { kind: 'model', slug: 'anthurium_botany_01', res: '1k', dir: 'assets/source/models/anthurium_botany_01', note: 'Tropical broadleaf' },
+  { kind: 'model', slug: 'calathea_orbifolia_01', res: '1k', dir: 'assets/source/models/calathea_orbifolia_01', note: 'Tropical broadleaf' },
   // Three more canopy forms. Nine copies of one tree is not a wood, however
   // many of them there are — the eye finds the repeat long before it runs out
   // of trees, and a grove needs different silhouettes more than it needs more
   // instances. `jacaranda` is the broadest crown Poly Haven publishes, which is
   // what a tropical canopy is mostly made of.
-  { kind: 'model', slug: 'island_tree_02', res: '1k', dir: 'models/island_tree_02', note: 'Island tree' },
-  { kind: 'model', slug: 'island_tree_03', res: '1k', dir: 'models/island_tree_03', note: 'Island tree' },
-  { kind: 'model', slug: 'jacaranda_tree', res: '1k', dir: 'models/jacaranda_tree', note: 'Broad canopy tree' },
+  { kind: 'model', slug: 'island_tree_02', res: '1k', dir: 'assets/source/models/island_tree_02', note: 'Island tree' },
+  { kind: 'model', slug: 'jacaranda_tree', res: '1k', dir: 'assets/source/models/jacaranda_tree', note: 'Broad canopy tree' },
 
   // ---- Pirate cove ---------------------------------------------------------
   //
   // All from `smugglers_cove`, which is what the collection is: the hero ship's
   // own set, so the pier, the cannon and the barrels share its scale, wood tone
   // and wear. That coherence is the whole reason to take dressing from one pack.
-  { kind: 'model', slug: 'ship_pinnace', res: '1k', dir: 'models/ship_pinnace', note: "Ship's boat, beached" },
-  { kind: 'model', slug: 'modular_wooden_pier', res: '1k', dir: 'models/modular_wooden_pier', note: 'Jetty on the island' },
-  { kind: 'model', slug: 'cannon_01', res: '1k', dir: 'models/cannon_01', note: 'Shore battery' },
-  { kind: 'model', slug: 'wooden_barrels_01', res: '1k', dir: 'models/wooden_barrels_01', note: 'Barrel stack' },
-  { kind: 'model', slug: 'wooden_lantern_01', res: '1k', dir: 'models/wooden_lantern_01', note: 'Lantern on the pier' },
-  { kind: 'model', slug: 'wooden_crate_02', res: '1k', dir: 'models/wooden_crate_02', note: 'Cargo crate' },
+  { kind: 'model', slug: 'ship_pinnace', res: '1k', dir: 'assets/source/models/ship_pinnace', note: "Ship's boat, beached" },
+  { kind: 'model', slug: 'modular_wooden_pier', res: '1k', dir: 'assets/source/models/modular_wooden_pier', note: 'Jetty on the island' },
+  { kind: 'model', slug: 'cannon_01', res: '1k', dir: 'assets/source/models/cannon_01', note: 'Shore battery' },
+  { kind: 'model', slug: 'wooden_barrels_01', res: '1k', dir: 'assets/source/models/wooden_barrels_01', note: 'Barrel stack' },
+  { kind: 'model', slug: 'wooden_lantern_01', res: '1k', dir: 'assets/source/models/wooden_lantern_01', note: 'Lantern on the pier' },
+  { kind: 'model', slug: 'wooden_crate_02', res: '1k', dir: 'assets/source/models/wooden_crate_02', note: 'Cargo crate' },
 
   // ---- Pirate remains ------------------------------------------------------
   //
   // A wreck site tells a story or it is litter, and the story needs objects a
   // person left behind rather than objects that washed up. Poly Haven has no
   // skeleton — that one is built procedurally, see `src/scene/Remains.ts`.
-  { kind: 'model', slug: 'antique_estoc', res: '1k', dir: 'models/antique_estoc', note: 'Sword, half-buried' },
-  { kind: 'model', slug: 'jug_01', res: '1k', dir: 'models/jug_01', note: 'Bottle / jug' },
-  { kind: 'model', slug: 'wooden_bucket_01', res: '1k', dir: 'models/wooden_bucket_01', note: 'Bucket' },
+  { kind: 'model', slug: 'antique_estoc', res: '1k', dir: 'assets/source/models/antique_estoc', note: 'Sword, half-buried' },
+  { kind: 'model', slug: 'jug_01', res: '1k', dir: 'assets/source/models/jug_01', note: 'Bottle / jug' },
+  { kind: 'model', slug: 'wooden_bucket_01', res: '1k', dir: 'assets/source/models/wooden_bucket_01', note: 'Bucket' },
   // A ruin gives the island a landmark and a reason for the cannon to be where
   // it is. Modular in the source; one section is enough.
-  { kind: 'model', slug: 'modular_fort_01', res: '1k', dir: 'models/modular_fort_01', note: 'Ruined shore fort' },
+  { kind: 'model', slug: 'modular_fort_01', res: '1k', dir: 'assets/source/models/modular_fort_01', note: 'Ruined shore fort' },
 
   // ---- Underwater find ----------------------------------------------------
-  { kind: 'model', slug: 'treasure_chest', res: '1k', dir: 'models/treasure_chest', note: 'Sunken treasure chest' },
-  { kind: 'model', slug: 'wooden_crate_01', res: '1k', dir: 'models/wooden_crate_01', note: 'Sunken crate' },
-  { kind: 'model', slug: 'lambis_shell', res: '1k', dir: 'models/lambis_shell', note: 'Shell on the seabed' },
+  { kind: 'model', slug: 'treasure_chest', res: '1k', dir: 'assets/source/models/treasure_chest', note: 'Sunken treasure chest' },
+  { kind: 'model', slug: 'wooden_crate_01', res: '1k', dir: 'assets/source/models/wooden_crate_01', note: 'Sunken crate' },
+  { kind: 'model', slug: 'lambis_shell', res: '1k', dir: 'assets/source/models/lambis_shell', note: 'Shell on the seabed' },
+
+  // ---- Ground cover -------------------------------------------------------
+  //
+  // Field grasses at a metre, which is what an island meadow is actually made
+  // of. `grass_bermuda_01` used to sit above them and is gone: it is a lawn
+  // grass 15 cm tall, and scaled up far enough to be visible on a hillside it
+  // stops being grass and becomes a bush made of knives. `IslandMeadow` owns
+  // close-in turf now, so there was nothing left for it to do.
+  { kind: 'model', slug: 'grass_medium_01', res: '1k', dir: 'assets/source/models/grass_medium_01', note: 'Meadow grass tuft' },
+  { kind: 'model', slug: 'grass_medium_02', res: '1k', dir: 'assets/source/models/grass_medium_02', note: 'Meadow grass tuft' },
 
   // ---- Environment maps (day / sunset / foggy / moonlit) ------------------
-  { kind: 'hdri', slug: 'kloofendal_43d_clear_puresky', res: '2k', dir: 'hdris', note: 'Preset: day' },
-  { kind: 'hdri', slug: 'industrial_sunset_puresky', res: '2k', dir: 'hdris', note: 'Preset: sunset' },
-  { kind: 'hdri', slug: 'kloofendal_misty_morning_puresky', res: '2k', dir: 'hdris', note: 'Preset: foggy / overcast' },
-  { kind: 'hdri', slug: 'satara_night_no_lamps', res: '2k', dir: 'hdris', note: 'Preset: moonlit night' },
+  { kind: 'hdri', slug: 'kloofendal_43d_clear_puresky', res: '2k', dir: 'public/hdris', note: 'Preset: day' },
+  { kind: 'hdri', slug: 'industrial_sunset_puresky', res: '2k', dir: 'public/hdris', note: 'Preset: sunset' },
+  { kind: 'hdri', slug: 'kloofendal_misty_morning_puresky', res: '2k', dir: 'public/hdris', note: 'Preset: foggy / overcast' },
+  { kind: 'hdri', slug: 'satara_night_no_lamps', res: '2k', dir: 'public/hdris', note: 'Preset: moonlit night' },
+];
+
+/**
+ * Sketchfab models, which exist here for one reason: **the reef.**
+ *
+ * Poly Haven publishes no coral, no sea fan, no sponge, no anemone and no fish —
+ * all 521 of their models were checked, and `lambis_shell` is the entire marine
+ * catalogue. ambientCG is materials and HDRIs. So every underwater living thing
+ * in this project was either procedural or absent, and "absent" is what the
+ * reef and the island shallows actually were: bare sand with a few kelp stipes
+ * on it.
+ *
+ * Sketchfab fills that gap and costs something for it. Its download API is
+ * authenticated — `GET /v3/models/<uid>/download` answers 401 without a token —
+ * so this section is **opt-in and skipped when no token is present**. That is
+ * not a degradation for anyone cloning the repository: the decimated outputs in
+ * `public/models/dressing/` are committed exactly as the Poly Haven ones are,
+ * and this step only needs to run when the optimiser does.
+ *
+ * To run it, put a token from <https://sketchfab.com/settings/password> into
+ * `SKETCHFAB_API_TOKEN` or into a `sketchfab-token` file at the repository root
+ * (git-ignored). It is a personal credential; it must not be committed.
+ *
+ * `licence` and `author` are not decoration. Half of these are CC-BY, which
+ * legally requires the credit — see the Sketchfab table in ASSET_LICENSES.md,
+ * which this manifest is the source of truth for.
+ */
+const SKETCHFAB = [
+  {
+    slug: 'soft_coral_set',
+    uid: '256355f15fcb4095af17b75ae572bff0',
+    note: 'Reef coral kit: 24 forms — table, barrel, brain, tube, encrusting',
+    licence: 'CC-BY-4.0',
+    author: 'Kanna-Nakajima',
+    page: 'https://sketchfab.com/3d-models/soft-coral-set-256355f15fcb4095af17b75ae572bff0',
+  },
+  {
+    slug: 'stylaster_coral',
+    uid: '4f1ddd8352944d16bf3b821b3e71b473',
+    note: 'Lace coral, photogrammetry (Stylaster sanguineus)',
+    licence: 'CC0-1.0',
+    author: 'The Smithsonian Institution',
+    page: 'https://sketchfab.com/3d-models/stylaster-sanguineus-4f1ddd8352944d16bf3b821b3e71b473',
+  },
+  {
+    slug: 'seriatopora_coral',
+    uid: 'b6be88ce19e14e5bb038918d111430d5',
+    note: 'Birdsnest coral, photogrammetry (Seriatopora hystrix)',
+    licence: 'CC0-1.0',
+    author: 'The Smithsonian Institution',
+    page: 'https://sketchfab.com/3d-models/seriatopora-hystrix-b6be88ce19e14e5bb038918d111430d5',
+  },
+  {
+    slug: 'goniastrea_coral',
+    uid: '526ede8a83f943ee868d6991a6d5a533',
+    note: 'Massive brain coral, photogrammetry (Goniastrea favulus)',
+    licence: 'CC0-1.0',
+    author: 'The Smithsonian Institution',
+    page: 'https://sketchfab.com/3d-models/goniastrea-favulus-526ede8a83f943ee868d6991a6d5a533',
+  },
+  {
+    // ---- Trees that look like trees --------------------------------------
+    //
+    // Poly Haven's `island_tree_01` and `_03` used to carry this island's
+    // half-bare coastal scrub. They scan beautifully and they are the wrong
+    // *plant*: on a tropical island they read as dead sticks, which is exactly
+    // how they read. These two are botanical models rather than scans — a royal
+    // poinciana in flower and a Hong Kong orchid tree — and between them they
+    // give the island a canopy and a colour it never had.
+    //
+    // Both arrive at six figures of triangles, which is what the LOD chain in
+    // `optimize-assets.mjs` is for.
+    slug: 'tree_poinciana',
+    uid: '066ca51810ad483aa34ef738c0b7ae6a',
+    note: 'Royal poinciana in flower (Delonix regia)',
+    licence: 'CC-BY-4.0',
+    author: 'PlantCatalog',
+    page: 'https://sketchfab.com/3d-models/realistic-hd-royal-poinciana-1740-066ca51810ad483aa34ef738c0b7ae6a',
+  },
+  {
+    slug: 'tree_orchid',
+    uid: '160de59f02b946b0aa51f1c0f34ecbdd',
+    note: 'Hong Kong orchid tree (Bauhinia blakeana)',
+    licence: 'CC-BY-4.0',
+    author: 'PlantCatalog',
+    page: 'https://sketchfab.com/3d-models/realistic-hd-hong-kong-orchid-tree-4040-160de59f02b946b0aa51f1c0f34ecbdd',
+  },
+  {
+    // ---- Rock that works from every side ---------------------------------
+    //
+    // Poly Haven's coastal set is authored for a *shore*, and it shows in the
+    // shapes: `coast_line_01` is a 55 x 2.6 x 43 m wave-cut plate, and
+    // `coastal_cliff_02` is a 41 m cliff face 8 m deep. Both are excellent at
+    // the one job they are for — lying flat on a beach, or being set into a
+    // hillside as a face — and both are wrong the moment the camera gets round
+    // the back of them, which on an island a viewer can fly over is often.
+    //
+    // These three are closed solids. The test is not a matter of opinion:
+    // counting edges used by a single triangle gives 0.0% for both `rock_slab`
+    // models and 2.3% for `rock_boulder`, against 5–22% for the scans that were
+    // rejected alongside them. A closed rock can be dropped at any angle, spun
+    // freely, and seen from below without showing a hollow.
+    slug: 'rock_slab_a',
+    uid: 'e7778771c06d4705a80cccb23a471d5c',
+    note: 'Layered sandstone outcrop, closed solid',
+    licence: 'CC-BY-4.0',
+    author: 'mohamedhussien',
+    page: 'https://sketchfab.com/3d-models/rock-17-e7778771c06d4705a80cccb23a471d5c',
+  },
+  {
+    slug: 'rock_slab_b',
+    uid: 'f4f983f89c6f4b10a54ebb0a30787e56',
+    note: 'Layered sandstone outcrop, closed solid',
+    licence: 'CC-BY-4.0',
+    author: 'mohamedhussien',
+    page: 'https://sketchfab.com/3d-models/rock-6-f4f983f89c6f4b10a54ebb0a30787e56',
+  },
+  {
+    slug: 'rock_boulder',
+    uid: 'd25c7784bc68468d88add544db970e3f',
+    note: 'Weathered boulder, photogrammetry, closed solid',
+    licence: 'CC-BY-4.0',
+    author: '3dhdscan',
+    page: 'https://sketchfab.com/3d-models/big-boulder-d25c7784bc68468d88add544db970e3f',
+  },
+  {
+    // The island's palms. Poly Haven has no coconut palm — `fetch-assets.mjs`
+    // has said so since the first revision, and `Remains.ts` grew a procedural
+    // one because of it. That palm was a good piece of engineering and a bad
+    // tree: its fronds rode on `emissiveNode` to fake transmission, which is not
+    // shadowed and not tone-mapped like the rest of the scene, so on a clear day
+    // the whole grove came out chrome blue.
+    //
+    // Two species rather than one. A grove of a single silhouette repeated
+    // forty-eight times reads as wallpaper from any distance, and these two are
+    // usefully different: a low double-trunk bearing fruit, and a tall slender
+    // single.
+    slug: 'palm_coconut',
+    uid: '26e787f2ff2e4c0fb004c3b0210805a3',
+    note: 'Coconut palm, double trunk with fruit',
+    licence: 'CC-BY-4.0',
+    author: 'evolveduk',
+    page: 'https://sketchfab.com/3d-models/coconut-palm-26e787f2ff2e4c0fb004c3b0210805a3',
+  },
+  {
+    slug: 'palm_tall',
+    uid: '08ccca74a0594fd999acaf4cfbd597e0',
+    note: 'Tall slender palm',
+    licence: 'CC-BY-4.0',
+    author: 'Šimon Ustal',
+    page: 'https://sketchfab.com/3d-models/tropical-palm-08ccca74a0594fd999acaf4cfbd597e0',
+  },
+  {
+    // The one imported *animal*. Everything that swims in this project is drawn
+    // by `src/scene/Fish.ts` from a procedural silhouette, which is the right
+    // call for a school of two hundred and the wrong one for the fish a diver
+    // actually looks at: a 0.2 m emperor angelfish with its real markings reads
+    // as a reef at a glance where a grey sliver reads as debris. The skin and
+    // its swim clip are stripped by the optimiser — see `src/scene/Fish.ts`,
+    // which drives this mesh from the same travelling-wave vertex shader as the
+    // rest of the population, and so still costs one draw call for the school.
+    slug: 'emperor_angelfish',
+    uid: '3dc2d360d98c485496899121792ebcce',
+    note: 'Reef fish, textured (Pomacanthus imperator)',
+    licence: 'CC-BY-4.0',
+    author: 'Mikhail Nesterov',
+    page: 'https://sketchfab.com/3d-models/emperor-angelfish-update-v2-3dc2d360d98c485496899121792ebcce',
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -170,11 +353,11 @@ const fail = (msg) => {
   console.error(`  ERROR  ${msg}`);
 };
 
-async function getJson(url, attempts = 3) {
+async function getJson(url, attempts = 3, headers = { 'user-agent': 'web-ocean-3d-asset-fetcher' }) {
   let lastErr;
   for (let i = 1; i <= attempts; i += 1) {
     try {
-      const res = await fetch(url, { headers: { 'user-agent': 'web-ocean-3d-asset-fetcher' } });
+      const res = await fetch(url, { headers });
       if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
       return await res.json();
     } catch (err) {
@@ -209,6 +392,91 @@ async function download(url, destPath, expected = {}, attempts = 3) {
     }
   }
   throw new Error(`download ${url} failed after ${attempts} attempts: ${lastErr.message}`);
+}
+
+/**
+ * The Sketchfab token, or null.
+ *
+ * Environment first so CI can supply it without a file existing, then the
+ * git-ignored file, which is what a human actually does.
+ */
+function sketchfabToken() {
+  const fromEnv = process.env.SKETCHFAB_API_TOKEN?.trim();
+  if (fromEnv) return fromEnv;
+  const file = join(ROOT, 'sketchfab-token');
+  if (!existsSync(file)) return null;
+  const fromFile = readFileSync(file, 'utf8').trim();
+  return fromFile.length > 0 ? fromFile : null;
+}
+
+/**
+ * Downloads the Sketchfab manifest, or explains why it did not.
+ *
+ * Never fails the run for a missing token: the outputs these feed are committed,
+ * so a contributor without a Sketchfab account can still build, test and render
+ * the project. It only fails when a token *is* present and a download then goes
+ * wrong, which is a real error rather than an absent optional step.
+ */
+async function fetchSketchfab() {
+  console.log('[sketchfab] reef corals and the reef fish');
+
+  const token = sketchfabToken();
+  if (!token) {
+    console.log('  skip     no SKETCHFAB_API_TOKEN and no ./sketchfab-token file.');
+    console.log('           These sources are only needed to re-run scripts/optimize-assets.mjs;');
+    console.log('           public/models/dressing/*.glb are committed. To enable, put a token');
+    console.log('           from https://sketchfab.com/settings/password in ./sketchfab-token.');
+    console.log('');
+    return [];
+  }
+
+  const headers = { Authorization: `Token ${token}`, 'user-agent': 'web-ocean-3d-asset-fetcher' };
+  const written = [];
+
+  for (const entry of SKETCHFAB) {
+    // Always a source download: everything here is decimated by the optimiser
+    // before anything loads it, so none of it belongs under `public/`.
+    const rel = `assets/source/models/${entry.slug}/${entry.slug}.glb`;
+    const abs = join(DOWNLOAD_ROOT, rel);
+
+    if (!FORCE && existsSync(abs) && statSync(abs).size > 0) {
+      written.push(rel);
+      console.log(`  skip     ${rel} (${bytes(statSync(abs).size)})`);
+      continue;
+    }
+
+    try {
+      // The metadata call is not ceremony: it is where the licence and the
+      // author come from, and asserting them here is what stops a model being
+      // silently relicensed under us between one fetch and the next.
+      const meta = await getJson(`${SKETCHFAB_API}/models/${entry.uid}`, 3, headers);
+      const label = meta?.license?.label ?? '(unknown)';
+      const author = meta?.user?.displayName ?? meta?.user?.username ?? '(unknown)';
+      const expected = entry.licence === 'CC0-1.0' ? 'CC0 Public Domain' : 'CC Attribution';
+      if (label !== expected) {
+        fail(`${entry.slug}: licence is now "${label}", manifest says ${entry.licence}`);
+        continue;
+      }
+      if (author !== entry.author) {
+        fail(`${entry.slug}: author is now "${author}", manifest says "${entry.author}"`);
+        continue;
+      }
+
+      const links = await getJson(`${SKETCHFAB_API}/models/${entry.uid}/download`, 3, headers);
+      // `glb` comes back as a bare .glb; `gltf` is a zip. Nothing here needs a
+      // zip reader, so the manifest is written against the format that avoids one.
+      if (!links?.glb?.url) throw new Error('no glb download link in the API response');
+
+      const size = await download(links.glb.url, abs);
+      written.push(rel);
+      console.log(`  get      ${rel} (${bytes(size)})  ${label} — ${author}`);
+    } catch (err) {
+      fail(`${entry.slug}: ${err.message}`);
+    }
+  }
+
+  console.log('');
+  return written;
 }
 
 /** Resolve one manifest entry into a flat list of { url, rel, size, md5 }. */
@@ -313,10 +581,10 @@ function verifyFile(absPath) {
 // ---------------------------------------------------------------------------
 
 async function main() {
-  mkdirSync(PUBLIC_DIR, { recursive: true });
+  for (const root of VERIFY_ROOTS) mkdirSync(join(DOWNLOAD_ROOT, root), { recursive: true });
 
   console.log(`web-ocean-3d asset fetcher`);
-  console.log(`  destination: ${PUBLIC_DIR}`);
+  console.log(`  destination: ${DOWNLOAD_ROOT} (${VERIFY_ROOTS.join(', ')})`);
   console.log(`  mode:        ${VERIFY_ONLY ? 'verify only' : FORCE ? 'force re-download' : 'incremental'}`);
   console.log('');
 
@@ -346,7 +614,7 @@ async function main() {
     if (!items) continue;
 
     for (const item of items) {
-      const abs = join(PUBLIC_DIR, item.rel);
+      const abs = join(DOWNLOAD_ROOT, item.rel);
       allRel.push(item.rel);
 
       // Idempotency: skip files already on disk. The API gives us an expected
@@ -374,13 +642,17 @@ async function main() {
     console.log('');
   }
 
+  if (!VERIFY_ONLY) allRel.push(...(await fetchSketchfab()));
+
   // -- verification pass ----------------------------------------------------
   console.log('Verifying files on disk...');
-  const toCheck = allRel.length ? allRel : listAllUnder(PUBLIC_DIR);
+  const toCheck = allRel.length
+    ? allRel
+    : VERIFY_ROOTS.flatMap((root) => listAllUnder(join(DOWNLOAD_ROOT, root), root));
   let okCount = 0;
   let totalBytes = 0;
   for (const rel of toCheck) {
-    const abs = join(PUBLIC_DIR, rel);
+    const abs = join(DOWNLOAD_ROOT, rel);
     const reason = verifyFile(abs);
     if (reason) {
       fail(`verify ${rel}: ${reason}`);

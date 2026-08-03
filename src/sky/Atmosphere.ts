@@ -85,18 +85,67 @@ const ENV_SIZE = 128;
 
 /**
  * Preetham returns scene-referred radiance in the tens; this maps it onto the
- * renderer's ACES filmic curve at `toneMappingExposure = 1`. Calibrated by
- * sampling the framebuffer: with `exposure: 1, rayleigh: 1.6, turbidity: 2.6` and
- * the sun at 0.46 rad, the zenith lands on ~#2E6FB5, matching ref-default.png.
- * `AtmosphereParams.exposure` then reads as a relative stop around that look.
+ * renderer's ACES filmic curve.
+ *
+ * **Re-calibrated when `skyPro`'s exposure went 1 → 0.42.** The old 0.35 was
+ * measured against the framebuffer at an exposure of 1 — its own comment said
+ * so — and once the grade moved under it the dome was the brightest thing in the
+ * scene that had not been re-checked. Measured on the hero island frame against
+ * `docs/ref/tropical-island-sea-level-v2.png`: sky 25° up came out at sRGB
+ * (90, 160, 203), luminance 148, against the reference's (38, 94, 157) and 87.
+ * Seventy percent too bright, and a blue:red ratio of 2.25 against 4.1.
+ *
+ * The lever is radiance, not chroma, and that is the part worth recording
+ * because the obvious alternative was tried and is a dead end. `SKY_CHROMA`
+ * below extrapolates colour about luma pre-tonemap, which looks like exactly the
+ * right knob; solving the blue/red ratio algebraically asks for 1.57, and at
+ * both 1.6 and 1.25 the red channel **clips to zero** and the top of the frame
+ * comes out a cyan band. Preetham's linear red at that elevation is already near
+ * zero, so chroma extrapolation kills red long before it brings green down — it
+ * amplifies the model's hue error instead of correcting it. Travelling *down*
+ * the tone curve deepens a blue while keeping its hue, which is the same
+ * mechanism that fixed the global grade, and this is where the sky gets on it.
+ *
+ * It is deliberately not a change to `skyPro.toneMappingExposure` instead: that
+ * would take the ship, the island and the sea down with the sky, and the near
+ * sea already measures correctly at (30, 93, 123) against (29, 67, 96). Only the
+ * dome is hot.
+ *
+ * This dome is also the source for the environment capture, so cutting it cuts
+ * the image-based light on everything — which is why `Seafloor`'s
+ * `envMapIntensity` moves in the opposite direction in the same pass. The 0.42
+ * there was compensating for a blue-white fill that is now 2.2x smaller in
+ * absolute terms, and leaving it would have paid for the sky twice.
  */
-const SKY_RADIANCE_SCALE = 0.35;
+const SKY_RADIANCE_SCALE = 0.16;
 
 /**
  * ACES filmic desaturates as it rolls off, which turns a deep zenith blue into
  * pale sky-blue. A small chroma expansion in linear space before tonemapping
  * restores the reference's zenith-to-horizon saturation without touching
  * luminance. This is a grade, not a second tonemap.
+ *
+ * **1.06 is a ceiling imposed by the model, not a timid setting**, and it is
+ * worth recording why so the next reader does not spend the afternoon this cost.
+ * Measured 25 degrees above the horizon on `island-approach`, the sky renders
+ * sRGB (90, 160, 203) — a blue-to-red ratio of 2.25 — against the art
+ * reference's (38, 94, 157) at 4.1, so the obvious move is to push this
+ * constant. Solving the ratio algebraically gives k = 1.57.
+ *
+ * It does not work. Chroma extrapolation about the luma axis amplifies whatever
+ * hue the model already has rather than correcting it, and Preetham's linear red
+ * at this elevation is already near zero — so red clips to black long before
+ * green comes down. Measured: k = 1.25 renders (0, 160, 207) and k = 1.6 renders
+ * (0, 161, 214). Both are a *cyan* sky, saturation 1.00, further from the
+ * reference than what they replaced even though the saturation number improved.
+ * The mid sky does improve at 1.25 — (93, 164, 199) against (115, 163, 195) —
+ * but not at the price of a clipped band across the top of every frame.
+ *
+ * The remaining gap is luminance, not chroma: the reference sky is 87 against
+ * this one's 148, and travelling *down* the ACES curve is what deepens a blue
+ * while keeping its hue. That correction does not belong here — this dome is the
+ * source for the environment capture, so changing its radiance relights every
+ * object in the scene — it belongs with the preset's exposure.
  */
 const SKY_CHROMA = 1.06;
 
@@ -708,7 +757,29 @@ export class Atmosphere {
     // Published for the water surface, which has to agree with the dome at the
     // horizon or the two meet in a visible step. See `zenithColor`.
     this._zenithColor.copy(_skyTint);
-    this._horizonColor.copy(_skyTint).lerp(WHITE, 0.42 * (1 - night));
+    // 0.14, down from 0.42, and this is the fix for the pale far sea.
+    //
+    // This colour is not decoration: `main` hands it straight to the water as its
+    // horizon reflection, and the water's *planar* reflection — the one that
+    // contains the actually-rendered sky — is deliberately faded out as the view
+    // goes grazing, because a planar reflector cannot be trusted there. So in the
+    // far band, where every ray is grazing, the sea is reflecting this analytic
+    // stand-in and nothing else. Whitening it by 42% therefore whitened the
+    // horizon sea by 42%, which is exactly the defect: the far sea measured a
+    // saturation of 0.20 against the reference's 0.66 while the near sea, which
+    // reflects at a steeper angle and keeps its own body colour, matched.
+    //
+    // Two other explanations were tested against that measurement first and both
+    // are wrong — weighting the aerial perspective by `1 - fresnel` moved the
+    // sample one level, and correcting the haze colour and halving its density
+    // moved it three. Neither was ever going to work, because both act on a term
+    // that is not what is dominant out there.
+    //
+    // Some whitening is still right: the sky genuinely does pale toward the
+    // horizon through the long slant path, and the dome itself renders that. What
+    // 0.42 was doing was applying it a second time, on top of a `_skyTint` that
+    // is already the hemisphere average rather than the horizon radiance.
+    this._horizonColor.copy(_skyTint).lerp(WHITE, 0.14 * (1 - night));
     this.ambientLight.groundColor.copy(p.groundColor);
 
     // Night keeps a real fill, not a token one.
@@ -817,6 +888,7 @@ export class Atmosphere {
       dayColor.assign(
         mix(dayColor, flat.mul(this.uOvercastDarken), this.uOvercast),
       );
+
 
       // --- ground half -------------------------------------------------------
       // Below the horizon the dome shows a diffuse ground lit by the horizon sky.

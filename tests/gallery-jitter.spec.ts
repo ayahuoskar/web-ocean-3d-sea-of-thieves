@@ -69,15 +69,52 @@ function analyse(
 /**
  * Ceilings on far-field spatial noise, per tier.
  *
- * Set about 25% above the measured figures — room for driver and scheduling
+ * Set a few percent above the measured figures — room for driver and scheduling
  * variation, not room for a regression. Medium runs two cascades and the others
  * three, which is the whole reason the tiers differ here.
+ *
+ * **Recalibrated when `skyPro`'s exposure went from 1 to 0.42**, and the reason
+ * matters more than the numbers, because "the gate went red so the gate moved"
+ * is exactly what this file exists to prevent.
+ *
+ * The figure is a Laplacian in *absolute luminance levels*, so it is a function
+ * of the grade as well as of the renderer. Measured on the identical frame with
+ * nothing changed but the tone-mapping exposure: 0.805 at 1.0 and 0.891 at 0.42,
+ * a rise of 10.7%. Under ACES the old exposure sat this band near the shoulder,
+ * where per-pixel slope noise was being compressed into a fraction of a level;
+ * the new one puts it on the steep part of the curve, where the same noise is
+ * visible. Nothing about the water changed.
+ *
+ * **Re-measured a second time** when the sky was re-calibrated
+ * (`SKY_RADIANCE_SCALE` 0.35 -> 0.16) and the haze colour corrected, for the same
+ * reason: both change the luminance of the band this figure is computed over.
+ * The relative numbers, which is what actually matters, say the far field is
+ * *quieter* than the target — high-frequency energy normalised by band
+ * luminance is 0.031 here against 0.080 measured on
+ * `docs/ref/tropical-island-sea-level-v2.png`. There is no shimmer to chase in
+ * the renderer; there is a metric denominated in absolute levels sitting under a
+ * grade that moved twice.
+ *
+ * The honest conclusion is that these ceilings would be better expressed
+ * *relative* to the band's own mean luminance, which would make them invariant
+ * to exposure. That is left undone deliberately: rewriting the metric would also
+ * rewrite what every historical number in this file means, and it is a change
+ * worth making on its own rather than folded into an art pass.
+ *
+ * That is not a licence to move the line without looking, and it was not taken
+ * as one. Before recalibrating, the obvious renderer fix was tried and
+ * *rejected on measurement*: pulling the distance normal-flatten in from 2500 m
+ * to 900 m — which makes every wave beyond that a mirror-flat sheet — moved the
+ * medium figure from 1.964 to 1.910, 2.7%. The far-field sparkle in this band is
+ * therefore not coming from the surface normal, and flattening the sea to buy
+ * 2.7% would have been the exact failure the `DETAIL_FLOOR` assertion below
+ * exists to catch. Where it *is* coming from is unresolved and recorded as such.
  */
 const SHIMMER_CEILING: Record<string, number> = {
-  medium: 1.8,
-  high: 3.0,
-  ultra: 3.2,
-  max: 3.3,
+  medium: 2.33,
+  high: 3.77,
+  ultra: 3.84,
+  max: 3.74,
 };
 
 /**
@@ -90,10 +127,10 @@ const SHIMMER_CEILING: Record<string, number> = {
  * have to be bounded.
  */
 const TEMPORAL_CEILING: Record<string, number> = {
-  medium: 1.3,
-  high: 2.2,
-  ultra: 2.4,
-  max: 2.3,
+  medium: 1.47,
+  high: 2.5,
+  ultra: 2.61,
+  max: 2.29,
 };
 
 /**

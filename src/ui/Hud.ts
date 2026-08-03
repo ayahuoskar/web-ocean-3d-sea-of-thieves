@@ -36,6 +36,7 @@ const HINTS: Record<CameraMode, readonly Hint[]> = {
   fly: [
     { action: 'Move', key: 'WASD' },
     { action: 'Look', key: 'Mouse' },
+    { action: 'Speed', key: 'Scroll' },
     { action: 'Boost', key: 'Shift' },
   ],
   // `Camera / Mouse` used to be listed here and was never implemented — the
@@ -45,7 +46,8 @@ const HINTS: Record<CameraMode, readonly Hint[]> = {
   boat: [
     { action: 'Throttle', key: 'W S' },
     { action: 'Steer', key: 'A D' },
-    { action: 'Reverse', key: 'S' },
+    { action: 'Look', key: 'Drag' },
+    { action: 'Zoom', key: 'Scroll' },
   ],
   // Nothing to drive — the flight holds the wheel. The hint names what the
   // viewer *can* do, which is leave, rather than listing controls that are

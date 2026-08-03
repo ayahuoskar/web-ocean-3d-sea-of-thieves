@@ -1,0 +1,452 @@
+import * as THREE from 'three/webgpu';
+import {
+  Fn,
+  attribute,
+  cameraPosition,
+  float,
+  mix,
+  normalize,
+  positionGeometry,
+  uniform,
+  varying,
+  vec2,
+  vec3,
+  vec4,
+} from 'three/tsl';
+import { mulberry32 } from '../core/random';
+import { ISLAND } from './Seafloor';
+
+/**
+ * Distant canopy, drawn as billboards.
+ *
+ * **The problem this exists for.** From the play area the island is 1.4 km away,
+ * where a 10 m tree is about eight pixels. `Props` plants a hundred and thirty
+ * of them and every one is at LOD2, which is the right call for cost and the
+ * wrong shape for the picture: a hundred and thirty eight-pixel objects on 0.8
+ * km² of ground is a sprinkle, and the island reads as a bare hill with specks
+ * on it. `Seafloor` carries the biome in the terrain colour, which fixes the
+ * *hue* of the hill and can do nothing about its *silhouette* — a painted hill
+ * is still a smooth dome against the sky.
+ *
+ * What is missing is canopy volume: the lumpy, broken edge a forest gives a
+ * ridge, and the depth that stops a hillside being a gradient. Every open-world
+ * renderer solves this the same way, and has since the first one — past the last
+ * mesh LOD, trees become camera-facing cards. It is the cheapest geometry in the
+ * scene per unit of silhouette and it is what makes distant forest read.
+ *
+ * **Why the cards are procedural rather than rendered from the trees.** The
+ * usual pipeline bakes an impostor atlas: render each tree from a ring of angles
+ * into a texture and pick the nearest view at runtime. That is the right answer
+ * when the impostor has to hold up at fifty metres, and it is a build step, an
+ * atlas, a licence question and an octahedral lookup. These are never seen
+ * closer than 320 m, where a tree is under thirty pixels and its silhouette is a
+ * blob with a broken edge — so the card is a blob with a broken edge, generated
+ * in the shader from the instance's own seed. No asset, no atlas, no sampler,
+ * and nothing to keep in step with the models when they change.
+ *
+ * **Placement is the terrain's, not a table's.** Like `IslandMeadow`, this is
+ * handed `Seafloor`'s heightfield as a TSL node and asks it directly: a card
+ * whose ground is below the beach line or above the treeline collapses to zero
+ * size in the vertex stage. There is no CPU placement pass and no buffer to
+ * rebuild if the island ever changes shape again.
+ *
+ * Nothing accumulates — every visible quantity is a function of the instance
+ * seed and one phase uniform, so `resetClock(t)` reproduces a frame exactly,
+ * which the visual regression harness requires.
+ */
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+type Node = any;
+
+const vec3n = vec3 as unknown as (x: unknown, y: unknown, z: unknown) => Node;
+const vec2n = vec2 as unknown as (x: unknown, y: unknown) => Node;
+
+const CANOPY_SEED = 0x4f2b91;
+
+/** Instance-buffer capacity. `setCount` draws a prefix of it. */
+const MAX_CARDS = 24_000;
+
+/**
+ * Card size in metres, before per-instance variation.
+ *
+ * A card is a *clump* of canopy rather than one tree — roughly what a small
+ * stand covers — because at this range individual crowns are not resolvable and
+ * a card per tree would need ten times the count for the same coverage. 16 m
+ * across and 11 m tall is a few trees' worth, which is the scale the broken edge
+ * of a real treeline works at.
+ */
+const CARD_WIDTH = 19;
+const CARD_HEIGHT = 12;
+const CARD_VARIATION = 0.42;
+
+/**
+ * Where the cards take over from the meshes, in metres from the camera.
+ *
+ * They must not be visible where a real tree is, or the same clump is drawn
+ * twice — once as geometry and once as a card floating through it. `Props`
+ * switches its last LOD at 420 m, so the cards fade in over 320 to 520 m: they
+ * are already carrying the silhouette by the time the meshes have thinned, and
+ * they are gone before a viewer is close enough to see that they are flat.
+ */
+const FADE_IN_NEAR = 320;
+const FADE_IN_FAR = 520;
+
+/**
+ * Elevation band, matching `Seafloor`'s vegetation ramp and treeline.
+ *
+ * Derived from `ISLAND.peak` for the upper edge rather than typed, for the same
+ * reason `IslandMeadow` derives its: the two were hard-coded independently once
+ * and the island's height changed without them.
+ */
+const CANOPY_MIN_HEIGHT = 6;
+const CANOPY_FULL_HEIGHT = 21;
+const CANOPY_FADE_HEIGHT = ISLAND.peak * 0.5;
+const CANOPY_MAX_HEIGHT = ISLAND.peak * 0.78;
+
+/** How far past the shore radius cards may sit, in island radii. */
+const ISLAND_REACH = 1.22;
+
+/** Canopy colours. Deliberately the same family as `Seafloor`'s ground biome. */
+const CANOPY_SUNLIT = new THREE.Color(0.062, 0.078, 0.036);
+const CANOPY_SHADE = new THREE.Color(0.026, 0.034, 0.02);
+/** The flowering accent, on a small fraction of cards. See `bloom` below. */
+const CANOPY_BLOOM = new THREE.Color(0.44, 0.1, 0.03);
+
+/** Sway: metres of crown travel at full wind, and the wave that carries it. */
+const SWAY_WAVELENGTH = 90;
+const SWAY_K = (Math.PI * 2) / SWAY_WAVELENGTH;
+const SWAY_SPEED = 7;
+const SWAY_OMEGA = SWAY_K * SWAY_SPEED;
+const SWAY_MAX = 0.9;
+
+const CLOCK_WRAP = 3600;
+
+export interface IslandCanopyOptions {
+  seed?: number;
+}
+
+function clampCount(count: number): number {
+  return Math.max(0, Math.min(MAX_CARDS, Math.floor(count)));
+}
+
+/**
+ * One quad, corners at +/-0.5, with the origin at the *bottom* centre.
+ *
+ * Bottom-centred because the card is planted: the ground decides where its foot
+ * is and it grows upward from there. A centre-origin quad would have to be
+ * lifted by half its own height, which is one more thing to get wrong when the
+ * height varies per instance.
+ */
+function buildCardGeometry(): THREE.InstancedBufferGeometry {
+  const geometry = new THREE.InstancedBufferGeometry();
+  const position = new Float32Array([
+    -0.5, 0, 0, 0.5, 0, 0, 0.5, 1, 0, -0.5, 0, 0, 0.5, 1, 0, -0.5, 1, 0,
+  ]);
+  const uv = new Float32Array([0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1]);
+  geometry.setAttribute('position', new THREE.BufferAttribute(position, 3));
+  geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  return geometry;
+}
+
+function attachInstanceAttributes(geometry: THREE.InstancedBufferGeometry, seed: number): void {
+  const random = mulberry32(seed);
+  const data = new Float32Array(MAX_CARDS * 4);
+  for (let i = 0; i < MAX_CARDS; i++) {
+    // x,y: position on the island disc, drawn as sqrt(r) so the scatter is
+    // uniform in *area* rather than crowding the middle.
+    const angle = random() * Math.PI * 2;
+    const radius = Math.sqrt(random()) * ISLAND.radius * ISLAND_REACH;
+    data[i * 4 + 0] = ISLAND.x + Math.cos(angle) * radius;
+    data[i * 4 + 1] = ISLAND.z + Math.sin(angle) * radius;
+    // z: size and colour draw. w: sway phase and the flowering draw.
+    data[i * 4 + 2] = random();
+    data[i * 4 + 3] = random();
+  }
+  geometry.setAttribute('cardSeed', new THREE.InstancedBufferAttribute(data, 4));
+}
+
+/**
+ * A field of canopy billboards standing on the island.
+ *
+ * Add `object` to the scene root: the vertex stage emits world coordinates, so
+ * the container must carry an identity transform, exactly as `IslandMeadow` and
+ * `FishSchool` do.
+ */
+export class IslandCanopy {
+  static readonly MAX_COUNT = MAX_CARDS;
+
+  readonly object: THREE.Object3D;
+
+  private readonly geometry: THREE.InstancedBufferGeometry;
+  private readonly material: THREE.MeshBasicNodeMaterial;
+  private readonly mesh: THREE.Mesh;
+
+  private count: number;
+  private wantVisible = true;
+  private disposed = false;
+  private phase = 0;
+
+  private readonly uPhase = uniform(0);
+  private readonly uWind = uniform(new THREE.Vector2(1, 0));
+  private readonly uWindStrength = uniform(0.5);
+  private readonly uSunDir = uniform(new THREE.Vector3(0.35, 0.62, 0.7).normalize());
+  private readonly uSunColor = uniform(new THREE.Color(0xfff2df));
+  private readonly uAmbient = uniform(new THREE.Color(0x9dbbe0));
+  private readonly uSunlit = uniform(new THREE.Color(CANOPY_SUNLIT));
+  private readonly uShade = uniform(new THREE.Color(CANOPY_SHADE));
+  private readonly uBloom = uniform(new THREE.Color(CANOPY_BLOOM));
+
+  private readonly groundHeight: (worldPosition: Node) => Node;
+
+  constructor(
+    count: number,
+    groundHeight: (worldPosition: Node) => Node,
+    options: IslandCanopyOptions = {},
+  ) {
+    this.count = clampCount(count);
+    this.groundHeight = groundHeight;
+
+    this.geometry = buildCardGeometry();
+    attachInstanceAttributes(this.geometry, options.seed ?? CANOPY_SEED);
+    this.geometry.instanceCount = this.count;
+    // Bounded by the island, not by the camera — unlike the meadow these are
+    // planted. A sphere around the island would be legitimate; infinity is used
+    // because the cards billboard, so their bounds change every frame and a
+    // tight sphere would have to be recomputed rather than reasoned about.
+    this.geometry.boundingSphere = new THREE.Sphere(
+      new THREE.Vector3(ISLAND.x, 0, ISLAND.z),
+      Number.POSITIVE_INFINITY,
+    );
+
+    this.material = this.buildMaterial();
+
+    this.mesh = new THREE.Mesh(this.geometry, this.material);
+    this.mesh.name = 'island-canopy';
+    this.mesh.frustumCulled = false;
+    // No shadows, and this is not a saving so much as a correctness point: a
+    // card is a flat sheet facing the camera, so the shadow it casts is a flat
+    // sheet facing the camera, which from the sun's direction is a line. The
+    // meshes that these stand in for are 1.4 km from the shadow cascade anyway.
+    this.mesh.castShadow = false;
+    this.mesh.receiveShadow = false;
+    this.mesh.matrixAutoUpdate = false;
+    this.mesh.updateMatrix();
+
+    this.object = new THREE.Object3D();
+    this.object.name = 'island-canopy-field';
+    this.object.matrixAutoUpdate = false;
+    this.object.updateMatrix();
+    this.object.add(this.mesh);
+    this.applyVisibility();
+  }
+
+  getCount(): number {
+    return this.count;
+  }
+
+  setCount(count: number): void {
+    const next = clampCount(count);
+    if (next === this.count) return;
+    this.count = next;
+    this.geometry.instanceCount = next;
+    this.applyVisibility();
+  }
+
+  setVisible(visible: boolean): void {
+    this.wantVisible = visible;
+    this.applyVisibility();
+  }
+
+  /** `dir` points *toward* the sun and need not be normalised. */
+  setSunDirection(dir: THREE.Vector3): void {
+    (this.uSunDir.value as THREE.Vector3).copy(dir).normalize();
+  }
+
+  setSunColor(color: THREE.Color): void {
+    (this.uSunColor.value as THREE.Color).copy(color);
+  }
+
+  setAmbientColor(color: THREE.Color): void {
+    (this.uAmbient.value as THREE.Color).copy(color);
+  }
+
+  /** `direction` is a unit vector in world xz; `strength` is 0..1. */
+  setWind(direction: THREE.Vector2, strength: number): void {
+    const wind = this.uWind.value as THREE.Vector2;
+    wind.copy(direction);
+    if (wind.lengthSq() < 1e-6) wind.set(1, 0);
+    wind.normalize();
+    this.uWindStrength.value = Math.max(0, Math.min(1, strength));
+  }
+
+  update(dt: number): void {
+    if (this.disposed) return;
+    this.phase = (this.phase + dt) % CLOCK_WRAP;
+    this.uPhase.value = this.phase;
+  }
+
+  resetClock(time = 0): void {
+    this.phase = ((time % CLOCK_WRAP) + CLOCK_WRAP) % CLOCK_WRAP;
+    this.uPhase.value = this.phase;
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.object.remove(this.mesh);
+    this.geometry.dispose();
+    this.material.dispose();
+  }
+
+  private applyVisibility(): void {
+    this.mesh.visible = this.wantVisible && this.count > 0;
+  }
+
+  private buildMaterial(): THREE.MeshBasicNodeMaterial {
+    const material = new THREE.MeshBasicNodeMaterial();
+    material.transparent = false;
+    // Alpha *test*, not blend, and for the same reason the imported trees are
+    // masked rather than blended: an instanced mesh is sorted as one object, so
+    // twenty thousand blended cards over a hillside cannot resolve against each
+    // other and the canopy turns inside out as the camera moves. Testing keeps
+    // the depth write, which is what makes the field sort itself.
+    material.alphaTest = 0.42;
+    material.side = THREE.DoubleSide;
+
+    const seed = attribute('cardSeed', 'vec4') as Node;
+    const corner = positionGeometry as Node;
+    const shade = varying(float(0), 'canopyShade') as Node;
+    const bloomMix = varying(float(0), 'canopyBloom') as Node;
+
+    // `Fn`, not a plain closure. TSL only maintains an assignment stack while an
+    // `Fn` callback is executing, and the two `varying(...).assign(...)` calls
+    // below are assignments: built outside one they throw "No stack defined for
+    // assign operation" on every boot, which is exactly what they did. `Seafloor`
+    // carries the same note over its own graph.
+    material.positionNode = Fn(() => {
+      const foot = vec2n(seed.x, seed.y);
+      const ground = this.groundHeight(vec3n(foot.x, 0, foot.y)) as Node;
+
+      // --- does canopy grow here? -------------------------------------------
+      // The same two ramps `Seafloor` paints its vegetation band with, so the
+      // cards stop exactly where the green in the ground stops.
+      const band = ground
+        .smoothstep(CANOPY_MIN_HEIGHT, CANOPY_FULL_HEIGHT)
+        .mul(float(1).sub(ground.smoothstep(CANOPY_FADE_HEIGHT, CANOPY_MAX_HEIGHT)));
+
+      // Off the island — an early reject on the card's own foot.
+      const fromIsland = foot.sub(vec2(ISLAND.x, ISLAND.z)).length();
+      const onIsland = float(1).sub(
+        fromIsland.smoothstep(ISLAND.radius * 0.98, ISLAND.radius * ISLAND_REACH),
+      );
+
+      // --- hand over from the meshes ----------------------------------------
+      const toCamera = vec3n(foot.x, ground, foot.y).sub(cameraPosition);
+      const distance = toCamera.length();
+      const handover = distance.smoothstep(FADE_IN_NEAR, FADE_IN_FAR);
+
+      const presence = band.mul(onIsland).mul(handover);
+
+      const size = float(1)
+        .sub(CARD_VARIATION)
+        .add(seed.z.mul(CARD_VARIATION * 2))
+        .mul(presence);
+
+      // --- billboard ---------------------------------------------------------
+      // Cylindrical, not spherical: the card spins about world up to face the
+      // camera and never tips. A spherical billboard is correct for a particle
+      // and wrong for a tree — fly over a spherical one and the canopy lies down
+      // to look at you, which is the single most obvious way an impostor field
+      // gives itself away.
+      const flat = normalize(vec3n(toCamera.x, 0, toCamera.z).add(vec3(1e-4, 0, 0))) as Node;
+      const right = normalize(vec3n(flat.z.negate(), 0, flat.x)) as Node;
+
+      const width = size.mul(CARD_WIDTH);
+      const height = size.mul(CARD_HEIGHT);
+
+      // Sway, as a shear at the top of the card. One travelling wave across the
+      // island so neighbouring clumps move together — a canopy moves in gusts,
+      // and per-instance random phase reads as static.
+      const along = foot.dot(this.uWind);
+      const gust = along
+        .mul(SWAY_K)
+        .sub(this.uPhase.mul(SWAY_OMEGA))
+        .add(seed.w.mul(6.28))
+        .sin();
+      const lean = gust.mul(SWAY_MAX).mul(this.uWindStrength).mul(corner.y).mul(corner.y);
+
+      const world = vec3n(foot.x, ground, foot.y)
+        .add(right.mul(corner.x.mul(width)))
+        .add(vec3n(0, corner.y.mul(height), 0))
+        .add(vec3n(this.uWind.x.mul(lean), 0, this.uWind.y.mul(lean)));
+
+      // Published for the fragment stage: crowns are lit from above, so the
+      // bottom of a card is the shaded underside of the clump and the top is
+      // what the sun reaches. This one term is most of why a flat card reads as
+      // a volume.
+      shade.assign(corner.y);
+      // A small fraction of clumps carry the flame trees' colour, drawn from the
+      // same seed the sway phase uses. `Props` plants twenty real ones; this is
+      // what keeps them present in the mass rather than only where a mesh
+      // happens to stand.
+      bloomMix.assign(seed.w.smoothstep(0.978, 0.998).mul(0.7));
+
+      return world;
+    })();
+
+    material.colorNode = Fn(() => {
+      const uv = attribute('uv', 'vec2') as Node;
+
+      // --- the card's own shape ---------------------------------------------
+      // A blob with a broken edge, built from the quad's uv rather than sampled.
+      // The radial term gives the crown; the two sine lobes bite chunks out of
+      // it at different frequencies so no two cards share a silhouette once the
+      // instance phase is added, and the edge is ragged rather than round.
+      const centred = uv.sub(vec2(0.5, 0.45));
+      const radius = vec2n(centred.x, centred.y.mul(1.15)).length();
+
+      const seedW = (attribute('cardSeed', 'vec4') as Node).w as Node;
+      // The bite is driven by the *direction* around the card rather than by an
+      // angle, which keeps `atan2` out of the shader — its branch cut would draw
+      // a seam down one side of every card, and TSL has moved its spelling
+      // across recent revisions. Products of the unit components are the same
+      // harmonics an angle would have given, by the Chebyshev identities.
+      const dir = normalize(vec2n(centred.x, centred.y).add(vec2(1e-4, 0)));
+      const h2 = dir.x.mul(dir.x).mul(2).sub(1);
+      const h3 = dir.x.mul(h2).mul(2).sub(dir.x);
+      const ragged = h2
+        .mul(seedW.mul(6.28).sin())
+        .mul(0.05)
+        .add(h3.mul(seedW.mul(11.2).cos()).mul(0.035))
+        .add(dir.y.mul(seedW.mul(3.1).sin()).mul(0.025));
+
+      // Alpha is a hard-ish edge because it is tested, not blended: a soft ramp
+      // through an alpha test is a hard edge anyway, just one whose position
+      // moves with the ramp.
+      const alpha = float(1).sub(radius.add(ragged).smoothstep(0.3, 0.44));
+
+      // --- shading ------------------------------------------------------------
+      // A shallow ramp, and the shallowness is the point. Driving the card from
+      // fully shaded at its foot to fully lit at its top is physically the right
+      // idea and reads as a *ball*: every clump gets its own strong terminator
+      // and the hillside comes out as a tray of broccoli rather than a canopy.
+      // Real forest at this range has very little per-crown shading left in it —
+      // what survives a kilometre of air is the mass, not the modelling.
+      const lit = mix(this.uShade, this.uSunlit, shade.smoothstep(-0.45, 1.15));
+      const flowering = mix(lit, this.uBloom, bloomMix.mul(shade.smoothstep(0.35, 1)));
+
+      // Sun contributes by elevation only. There is no normal on a card worth
+      // the name, and inventing one from the uv gives a lighting seam down the
+      // middle of every clump; what a canopy actually does at this range is get
+      // brighter as the sun climbs, which is this.
+      const sun = this.uSunDir.y.max(0).smoothstep(0, 0.4);
+      const light = this.uAmbient
+        .mul(0.55)
+        .add(this.uSunColor.mul(sun.mul(0.8)));
+
+      return vec4(flowering.mul(light), alpha);
+    })();
+
+    return material;
+  }
+}
