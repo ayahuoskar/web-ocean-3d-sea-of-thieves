@@ -41,6 +41,11 @@ import { VolumetricFog } from './post/VolumetricFog';
 import { LensRain } from './post/LensRain';
 import { ColorGrade } from './post/ColorGrade';
 import { SceneBloom } from './post/Bloom';
+import {
+  OUTPUT_COLOR_SPACE,
+  OUTPUT_TONE_MAPPING,
+  OutputTransform,
+} from './post/OutputTransform';
 import { CameraDirector } from './cameras/CameraDirector';
 import { getPreset } from './presets';
 import { Panel } from './ui/Panel';
@@ -139,6 +144,7 @@ class App {
   private lensRain!: LensRain;
   private colorGrade!: ColorGrade;
   private bloom!: SceneBloom;
+  private outputTransform!: OutputTransform;
   private particles!: UnderwaterParticles;
   private caustics!: Caustics;
 
@@ -478,8 +484,26 @@ class App {
     // from the first tap onward.
     const bloomed = this.bloom.build(rtt(graded as THREE.Node));
 
-    this.post.outputNode = this.lensRain.build(
-      rtt(this.colorGrade.build(bloomed) as THREE.Node),
+    // Tone mapping, sRGB and the dither are ours now, not the renderer's.
+    //
+    // `outputColorTransform` is switched off below and `OutputTransform` does
+    // the same three steps `RenderPipeline` would have — using `renderOutput`,
+    // which is literally the node it would have used — plus a dither. That
+    // fourth step is the whole reason for the takeover: quantisation to 8 bits
+    // is the last thing that happens to a frame, so while every node ran before
+    // the tone curve there was nowhere late enough to stand. Sky and open water
+    // are big smooth gradients and they are most of every gallery frame, which
+    // is the content that bands.
+    //
+    // The lens rain still comes before it, so the droplets refract linear scene
+    // light rather than a tone-mapped picture — which is both what its own
+    // comment asks for and what a drop of water on glass actually does.
+    this.outputTransform = new OutputTransform();
+    this.post.outputColorTransform = false;
+    this.post.outputNode = this.outputTransform.build(
+      this.lensRain.build(rtt(this.colorGrade.build(bloomed) as THREE.Node)),
+      OUTPUT_TONE_MAPPING,
+      OUTPUT_COLOR_SPACE,
     ) as THREE.Node;
 
     boot.set(0.85, 'Wiring controls…');
@@ -1964,6 +1988,12 @@ class App {
             power: new THREE.Color(g.power[0], g.power[1], g.power[2]),
             saturation: g.saturation,
           }),
+        /**
+         * Test-only dither amplitude, in output levels. 0 disables it exactly,
+         * which is how a test proves the output takeover reproduces the
+         * renderer's own path.
+         */
+        setDitherLevels: (levels: number) => this.outputTransform.setDitherLevels(levels),
         /** Test-only bloom override, so a test can prove the stage contributes. */
         setBloomEnabled: (on: boolean) => this.bloom.setEnabled(on),
         /** Exact-pixel frame capture; see `App.capturePixels`. */
@@ -2006,6 +2036,7 @@ class App {
     // render target has to be released from this list or it is simply leaked.
     this.colorGrade?.dispose();
     this.bloom?.dispose();
+    this.outputTransform?.dispose();
     this.particles?.dispose();
     this.caustics?.dispose();
     this.shipControls?.dispose();

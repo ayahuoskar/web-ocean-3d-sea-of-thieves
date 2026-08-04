@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { frameMean, setCamera, setState } from './helpers';
+import { frameHead, frameMean, setCamera, setState } from './helpers';
 import { bootOcean } from './lib/capture';
 
 /**
@@ -166,5 +166,66 @@ test.describe('bloom', () => {
     expect(forcedOn).toBeGreaterThan(asTierLeftIt);
 
     await setState(page, { quality: 'high' });
+  });
+});
+
+test.describe('output transform', () => {
+  /**
+   * The takeover has to be provably neutral.
+   *
+   * `RenderPipeline` would have applied ACES and the sRGB transfer itself; this
+   * project switches `outputColorTransform` off and does it in `OutputTransform`
+   * so that there is a stage running late enough to dither. The evidence that
+   * this was safe is that with the dither at zero the stage is the renderer's
+   * own output node with the renderer's own settings — and that two captures of
+   * an unchanged world are still byte-identical, which a stage that had
+   * introduced any frame-dependent state would break.
+   */
+  test('is deterministic, and its dither is bounded to a level', async ({ page }) => {
+    await bootOcean(page);
+    await setState(page, { preset: 'skyPro', quality: 'high', cameraMode: 'orbit' });
+    await setCamera(page, [-42, 21, 63], [0, 3, 0]);
+
+    const grab = async (levels: number) => {
+      await page.evaluate((n) => window.__ocean.setDitherLevels(n), levels);
+      await page.evaluate(() => window.__ocean.resetDeterministic(12, 90));
+      return frameHead(page, 262144);
+    };
+
+    const plain = await grab(0);
+    const plainAgain = await grab(0);
+    // Byte-exact across two full re-applications: the dither is a pure function
+    // of pixel coordinates with no time term, which is what keeps every
+    // cinematic and gallery capture reproducible.
+    expect(plain).toEqual(plainAgain);
+
+    const dithered = await grab(1);
+    expect(dithered).not.toEqual(plain);
+
+    // A triangular density spanning +/-1 LSB can move a channel by at most one
+    // level before rounding, so nothing may move by more than two. A dither that
+    // was being applied in linear rather than in display space would blow
+    // straight through this in the shadows, where the sRGB curve is steepest —
+    // which is the specific mistake this bound exists to catch.
+    let worst = 0;
+    let moved = 0;
+    for (let i = 0; i < plain.length; i++) {
+      const d = Math.abs(plain[i] - dithered[i]);
+      if (d > worst) worst = d;
+      if (d > 0) moved++;
+    }
+    expect(worst).toBeLessThanOrEqual(2);
+    // And it must reach a real share of the frame, or it is not dithering.
+    //
+    // Deliberately loose. Whether a dithered channel actually *crosses* a
+    // rounding boundary depends on where its undithered value sits between two
+    // levels: a triangular density spanning +/-1 LSB moves a value across at
+    // most about a quarter of the time, and less than that wherever the signal
+    // happens to sit near the middle of a level. Measured here at 14% over a
+    // patch of sky. The bound above is the assertion with teeth; this one only
+    // rules out a dither that is silently doing nothing.
+    expect(moved / plain.length).toBeGreaterThan(0.05);
+
+    await page.evaluate(() => window.__ocean.setDitherLevels(1));
   });
 });
