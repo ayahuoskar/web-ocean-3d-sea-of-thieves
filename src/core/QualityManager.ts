@@ -35,6 +35,21 @@ export interface QualitySettings {
    * cost worth taking to make tier changes unable to crash.
    */
   shadowMapSize: 512 | 1024 | 2048 | 4096;
+  /**
+   * March steps for the island's own shadow against the heightfield; 0 disables
+   * it.
+   *
+   * A separate lever from `shadowMapSize` because it shadows something the map
+   * structurally cannot: the sun's shadow camera is a +/-260 m box following the
+   * viewer, and the island is a kilometre across. This is what gives the hill a
+   * lit face and a shaded face at any range.
+   *
+   * Cheap despite being a raymarch, because it is gated on elevation — the sea
+   * and the seabed under it never enter the loop, so only the island's own
+   * pixels pay, and the step is the ray's clearance rather than a fixed
+   * interval, so open sky is crossed in a few strides.
+   */
+  terrainShadowSteps: number;
   /** Raymarch steps for the volumetric cloud layer; 0 disables volumetrics. */
   cloudSteps: number;
   /** Raymarch steps for underwater god rays; 0 disables them. */
@@ -203,6 +218,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     meshRings: 128,
     meshSegments: 192,
     shadowMapSize: 512,
+    terrainShadowSteps: 0,
     cloudSteps: 0,
     godRaySteps: 0,
     underwaterParticles: 400,
@@ -230,6 +246,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     meshRings: 192,
     meshSegments: 288,
     shadowMapSize: 1024,
+    terrainShadowSteps: 12,
     cloudSteps: 12,
     godRaySteps: 12,
     underwaterParticles: 1200,
@@ -257,6 +274,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     meshRings: 288,
     meshSegments: 448,
     shadowMapSize: 2048,
+    terrainShadowSteps: 24,
     cloudSteps: 24,
     godRaySteps: 24,
     underwaterParticles: 2400,
@@ -282,6 +300,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     meshRings: 384,
     meshSegments: 576,
     shadowMapSize: 2048,
+    terrainShadowSteps: 28,
     cloudSteps: 40,
     godRaySteps: 40,
     underwaterParticles: 4000,
@@ -307,6 +326,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     meshRings: 512,
     meshSegments: 768,
     shadowMapSize: 4096,
+    terrainShadowSteps: 32,
     cloudSteps: 64,
     godRaySteps: 56,
     underwaterParticles: 6000,

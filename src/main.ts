@@ -430,6 +430,10 @@ class App {
     // Rebuilds the sand shader once, so it happens here at setup and never in a
     // frame path.
     this.seafloor.setCaustics(this.caustics.intensityNode(positionWorld));
+    // The two occlusion terms the land had neither of: its own hillside, and the
+    // cloud deck overhead. Both rebuild the sand shader, so like the caustics
+    // they are wired here at setup and never from a frame path.
+    this.seafloor.setKeyLight(this.atmosphere.sunLight, this.clouds.shadowNode());
     // The volumetric march picks its caustics mip level from this, so it has to
     // be told after the field exists — see `uCausticsTexel`.
     this.underwater.setCausticsTexelSize(this.caustics.extent / this.caustics.resolution);
@@ -1054,6 +1058,8 @@ class App {
     // expresses "no shadows" as `castShadow = false`, which three handles on the
     // light rather than on the renderer.
     this.atmosphere.setShadowMapSize(quality.shadowMapSize);
+    // A uniform write, not a rebuild — the march reads its own bound.
+    this.seafloor.setShadowSteps(quality.terrainShadowSteps);
 
     // Particle budget is a live setting, not a construction-time one; `setCount`
     // rebuilds the instanced geometry against the new tier.
@@ -1514,6 +1520,9 @@ class App {
     this.atmosphere.setShadowFocus(this.camera.position.x, this.camera.position.z);
     this.atmosphere.update(dt);
     this.clouds.setSunDirection(this.atmosphere.sunDirection);
+    // The island shadows itself from whatever is currently the key light, which
+    // after sunset is the moon — `Atmosphere` retargets the same light.
+    this.seafloor.setKeyDirection(this.atmosphere.keyDirection);
 
     this.birds.setSunDirection(this.atmosphere.sunDirection);
     // The second colour is the light an *unlit* bird receives, not the sky's own

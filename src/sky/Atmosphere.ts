@@ -503,6 +503,22 @@ export class Atmosphere {
   }
 
   /**
+   * Direction toward whichever body is currently driving `sunLight`.
+   *
+   * `updateLights` retargets the one shadow-casting light to the moon once the
+   * sun is down, so anything computing its own occlusion against that light has
+   * to follow the same switch or it will shadow a night scene from a sun that is
+   * not there. Published rather than re-derived by each caller, because the
+   * threshold is the same `smoothstepScalar(-0.06, 0.1, sunY)` the light itself
+   * uses and two copies of it would drift.
+   */
+  get keyDirection(): THREE.Vector3 {
+    return smoothstepScalar(-0.06, 0.1, this._sunDirection.y) > 0.001
+      ? this._sunDirection
+      : this._moonDirection;
+  }
+
+  /**
    * Written out field by field rather than looping `Object.keys` so that an app
    * animating the sun every frame does not allocate a key array per call, and so
    * that the environment map is only invalidated when a value really moved.

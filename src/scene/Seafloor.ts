@@ -1,9 +1,16 @@
 import * as THREE from 'three/webgpu';
 import {
+  Break,
   Fn,
+  If,
+  Loop,
+  cameraPosition,
+  cameraViewMatrix,
+  clamp,
   float,
+  min,
   mix,
-  normalMap,
+  normalWorldGeometry,
   normalize,
   positionWorld,
   texture,
@@ -15,6 +22,7 @@ import {
 // Aliased because this module needs a CPU twin of the same ramp under the
 // unqualified name; see `smoothstepDown` below.
 import { smoothstepDown as smoothstepDownNode } from '../core/tslMath';
+import { occludeLight } from '../core/lightOcclusion';
 import { SEEDS, mulberry32 } from '../core/random';
 
 /**
@@ -128,6 +136,66 @@ function fbm(x: number, y: number): number {
     amplitude *= GAIN;
   }
   return sum / FBM_NORM;
+}
+
+// ------------------------------------------------- analytic octave derivatives
+
+/**
+ * Highest octave index any node in this module evaluates.
+ *
+ * The heightfield itself stops at `OCTAVES` and **that is not changing** — the
+ * mesh, the buoyancy solver, the prop placement and the water's depth term all
+ * read the same four octaves they always did. What the octaves past it are for is
+ * *shading*: a bump field the mesh has no way to carry, and a cavity term derived
+ * from the difference between a detailed and a smoothed evaluation of the same
+ * field. Both are things a viewer sees and nothing in the world queries.
+ */
+const MAX_GRAD_OCTAVES = 9;
+
+/**
+ * `dq_o / dp` for each octave, precomputed.
+ *
+ * The fbm chain is `q_{o+1} = L * R * q_o + c`, so the Jacobian of octave `o`'s
+ * sample point with respect to the original point is `(L * R)^o` — a compile-time
+ * constant, because both the lacunarity and the inter-octave rotation are. Which
+ * means the exact gradient of the sum costs a handful of multiplies and **no
+ * extra texture fetches at all**: `noised` already reads the four texels the
+ * bilinear value needs, and the derivative of that bilinear patch falls out of
+ * the same four numbers.
+ *
+ * That is the whole reason this is affordable per pixel. Finite-differencing the
+ * heightfield instead would have meant four more full evaluations — sixteen more
+ * fetches an octave — for a worse answer.
+ *
+ * Stored row-major as `[m00, m01, m10, m11]`, and applied transposed:
+ * `grad_p = M^T * grad_q`.
+ */
+const OCTAVE_JACOBIAN: readonly (readonly number[])[] = (() => {
+  const out: number[][] = [];
+  let m = [1, 0, 0, 1];
+  for (let o = 0; o < MAX_GRAD_OCTAVES; o++) {
+    out.push(m.slice());
+    const [r00, r01, r10, r11] = ROT;
+    m = [
+      LACUNARITY * (r00 * m[0] + r01 * m[2]),
+      LACUNARITY * (r00 * m[1] + r01 * m[3]),
+      LACUNARITY * (r10 * m[0] + r11 * m[2]),
+      LACUNARITY * (r10 * m[1] + r11 * m[3]),
+    ];
+  }
+  return out;
+})();
+
+/** Sum of `GAIN^o` over `[from, to)` — the normaliser for a partial octave run. */
+function amplitudeSum(from: number, to: number): number {
+  let sum = 0;
+  for (let o = from; o < to; o++) sum += Math.pow(GAIN, o);
+  return sum;
+}
+
+/** World metres per cell of octave `o` of the terrain field. */
+function octaveFeatureMetres(o: number): number {
+  return 1 / (FEATURE_SCALE * Math.pow(LACUNARITY, o));
 }
 
 // ------------------------------------------------------------- floor structure
@@ -573,6 +641,165 @@ export function reefPatches(): readonly { x: number; z: number }[] {
 const SAND_DETAIL_NEAR = 13;
 const SAND_DETAIL_FAR = 47;
 
+/** Tangent-space strength of the sand map, matching the scale it used to pass. */
+const SAND_NORMAL_SCALE = 0.75;
+
+/**
+ * How sharply the triplanar weights favour the dominant axis.
+ *
+ * Raising it narrows the band where two projections are both contributing. Too
+ * low and every surface is a blend of three blurred copies; too high and the
+ * transition becomes a visible seam along the 45-degree contour. Four is the
+ * usual working value and it looks right on this terrain's gradients.
+ */
+const TRIPLANAR_SHARPNESS = 4;
+
+// ------------------------------------------------------------ terrain shading
+
+/**
+ * Octave range of the shading bump, and how much slope it is worth.
+ *
+ * The island read as a smooth dome for a measurable reason: the finest octave of
+ * the heightfield is ~25 m across and the mesh puts a vertex every 15.6 m, so the
+ * surface is sampled at Nyquist and the normal cannot describe anything finer
+ * than about a thirty-metre slope. Everything a viewer would call *terrain
+ * texture* — the gullies, the scree, the broken ground — lives below that and had
+ * nowhere to exist.
+ *
+ * The published fix is not more triangles. It is to evaluate more octaves at
+ * shading rate and add their gradient to the normal, which is what iq's
+ * `Rainforest` does with an fbm bump gated on `1 - |n.y|`. Two properties make it
+ * the right trade here: the cost is per *pixel* rather than per vertex, so it
+ * does not scale with the 4 km quad; and it changes nothing the CPU heightfield
+ * has to agree with, so buoyancy, prop seating, the shoreline and the tour's
+ * authored surf keys are all untouched.
+ *
+ * The range starts at octave 2 — inside what the mesh already carries — on
+ * purpose. Those two octaves are where the visible faceting lives (53 m and 25 m
+ * against a 15.6 m grid), and re-stating them at shading rate is what dissolves
+ * the flat triangles into slope. It does mean the island reads as having rather
+ * more relief than it geometrically has, which is the intent: the gap analysis's
+ * complaint is that the dome is smooth, not that it is inaccurate.
+ */
+const BUMP_FROM = 2;
+const BUMP_TO = 8;
+const BUMP_NORM = amplitudeSum(BUMP_FROM, BUMP_TO);
+/**
+ * RMS slope the bump contributes on a fully-weighted surface.
+ *
+ * Converted to a gain below rather than used directly, because the gradient the
+ * octave sum produces is in noise units per world metre and its magnitude depends
+ * on the octave count. Expressing the constant as a slope means changing the
+ * range does not silently change how rough the island looks.
+ */
+const BUMP_SLOPE = 0.34;
+/** Measured RMS |grad| of the normalised octave sum over the range above. */
+const BUMP_GRADIENT_RMS = 2.55;
+const BUMP_GAIN = BUMP_SLOPE / BUMP_GRADIENT_RMS;
+/**
+ * How much of the bump survives on ground that faces straight up.
+ *
+ * iq's weight is `1 - |n.y|`, which is zero on the flat. That is right for a
+ * cliff-and-scree landscape and wrong for this one, where the flat ground is a
+ * beach and a lagoon floor that both have relief of their own. A third keeps the
+ * sand from going glassy without competing with the sand normal map that owns
+ * the metre scale down there.
+ */
+const BUMP_FLAT_WEIGHT = 0.33;
+
+/**
+ * Distance, in feature widths, over which an octave of the bump fades out.
+ *
+ * An octave is worth evaluating while its features are still wider than a couple
+ * of pixels; past that it is not detail, it is noise, and it will crawl. At this
+ * project's 1280 px and 55 degrees the angular size of a pixel is about 0.75
+ * mrad, so a feature of `w` metres stops being resolvable somewhere around
+ * `w / (2 * 0.00075)` metres away — roughly 660 feature widths. Fading between
+ * 500 and 900 puts the transition around that without pretending to be exact.
+ *
+ * Per octave rather than one fade over the whole bump, which is the difference
+ * between an island that keeps its ridges at a kilometre and one that goes smooth
+ * as soon as you back off it. At 1 km everything down to a 1.5 m feature is still
+ * resolvable and still drawn; only the last octave or two drop out.
+ */
+const BUMP_FADE_NEAR = 500;
+const BUMP_FADE_FAR = 900;
+
+/**
+ * Octave range of the cavity term, and how dark it is allowed to get.
+ *
+ * Ambient occlusion by octave difference: evaluate the field detailed and
+ * smoothed, and the residual is signed by whether the point sits in a hollow or
+ * on a bump. `MdGfzh` derives its mountain AO exactly this way, and it costs
+ * nothing here because the octaves are already being summed for the bump — the
+ * value falls out of the same accumulation as the gradient.
+ *
+ * `Seafloor` previously had no occlusion term at all and said so, substituting a
+ * flat `envMapIntensity`. That constant is what made every hollow on the island
+ * the same brightness as every ridge.
+ */
+const AO_FROM = 2;
+const AO_TO = 8;
+const AO_RESIDUAL_AMP = amplitudeSum(AO_FROM, AO_TO) / FBM_NORM;
+/** Ambient reaching the bottom of the deepest hollow the residual describes. */
+const AO_FLOOR = 0.52;
+
+/**
+ * The terrain's own shadow: parameters of the heightfield march.
+ *
+ * Nothing on land was shadowed at all, and the reason is structural rather than
+ * an oversight — the sun's shadow map is a +/-260 m box that follows the viewer,
+ * and the island is a kilometre across sitting 1.4 km from the origin. No
+ * cascade arrangement that also keeps the ship's contact shadow sharp will cover
+ * it. So the island's own shadow is marched against the heightfield instead,
+ * which is free of the box entirely and correct at any range.
+ *
+ * The accumulator is iq's published soft-shadow form — track `min(k * h / t)`
+ * along the ray, so a ray that passes close to the terrain without hitting it
+ * comes back partly shadowed and the penumbra widens with distance from the
+ * occluder. The step is the current height above the terrain, floored so a ray
+ * running parallel above a slope cannot stall, and the floor grows with distance
+ * so 24 steps still reach kilometres.
+ */
+const SHADOW_HARDNESS = 20;
+/** Start clear of the surface, or every lit pixel shadows itself. */
+const SHADOW_START = 3;
+/**
+ * How far the caster surface is sunk below the receiver, metres.
+ *
+ * Without it the summit crown came out with a hard dark band across it and
+ * angular blotches below — self-shadowing, from two independent sources that
+ * add. The march traces a two-octave field while the pixel being shaded sits on
+ * the four-octave one, and the renormalisation means the difference is not a
+ * one-sided truncation: it runs to about +/- 2.2 m either way. On top of that the
+ * *mesh* is a linear interpolation between vertices 15.6 m apart, so the true
+ * field bulges up to a metre above the triangle mid-span. Wherever both errors
+ * point the same way the caster is roughly three metres above the receiver, and
+ * at this preset's 24-degree sun the ray has only climbed a metre by the time it
+ * has travelled `SHADOW_START`.
+ *
+ * Sinking the caster is the standard depth-bias answer and it costs exactly what
+ * it says: terrain features under four metres tall cast nothing. On a 150 m
+ * island whose shadow work is the hillside shading its own flank, that is not a
+ * feature anyone was going to see.
+ */
+const SHADOW_CASTER_BIAS = 4;
+const SHADOW_MIN_STEP = 3;
+const SHADOW_STEP_GROWTH = 0.09;
+const SHADOW_MAX_STEP = 220;
+const SHADOW_MAX_DIST = 4200;
+/**
+ * Below this the march is skipped entirely.
+ *
+ * Almost the whole frame is sea, and the seabed under it is both hidden by the
+ * surface and lit through water rather than by the key light directly. Gating on
+ * elevation means only the island's own pixels ever pay for the march, which is
+ * what keeps a 24-step raymarch inside the budget.
+ */
+const SHADOW_MIN_Y = -2.5;
+/** Octaves the march's height function evaluates. */
+const SHADOW_OCTAVES = 2;
+
 // --------------------------------------------------------------- sand detail
 
 /**
@@ -660,8 +887,25 @@ export class Seafloor {
   /** TSL entry points; built once, reused by every consumer. */
   private readonly nodes: NoiseNodes;
 
+  /**
+   * The octave accumulation, as one node object shared by two graphs.
+   *
+   * `normalNode` wants its gradient and `aoNode` wants its value, and they are
+   * separate roots of the same fragment shader. Building the call once and
+   * referencing the same node from both is what makes them share the work:
+   * three's builder caches a node's generated snippet per build, so the twenty-
+   * four fetches happen once. Calling `nodes.detail(...)` twice would create two
+   * call nodes and pay for the octaves twice.
+   */
+  private readonly detailNode: Node;
+
   private readonly uCausticsStrength = uniform(1);
+  /** Direction toward whichever body is currently the key light. */
+  private readonly uKeyDir = uniform(new THREE.Vector3(0, 1, 0));
+  /** March steps for the terrain's own shadow; 0 leaves the island unshadowed. */
+  private readonly uShadowSteps: Node = uniform(24, 'int');
   private causticsNode: Node = null;
+  private occlusionAttached = false;
   private disposed = false;
 
   constructor(extent: number, options: SeafloorOptions = {}) {
@@ -676,6 +920,10 @@ export class Seafloor {
     void detailTiling;
 
     this.nodes = buildNoiseNodes(this.noiseTexture);
+    this.detailNode = this.nodes.detail(
+      vec2(positionWorld.x, positionWorld.z),
+      positionWorld.distance(cameraPosition),
+    );
 
     this.geometry = new THREE.PlaneGeometry(extent, extent, segments, segments);
     // Bake the flip into the attributes so the position attribute's y really is
@@ -745,21 +993,84 @@ export class Seafloor {
      * bump fields average toward flat — and the result was a seabed that tiled
      * correctly and had no relief left. Whiteout keeps the slope of each.
      */
-    const detail = (metres: number): Node =>
-      texture(this.sandNormal, vec2(positionWorld.x, positionWorld.z).mul(1 / metres)).xyz
-        .mul(2)
-        .sub(1);
+    const sample = (uv: Node, metres: number): Node =>
+      texture(this.sandNormal, uv.mul(1 / metres)).xyz.mul(2).sub(1);
 
-    this.material.normalNode = Fn(() => {
-      const near = detail(SAND_DETAIL_NEAR).toVar();
-      const far = detail(SAND_DETAIL_FAR).toVar();
+    /** Both scales, whiteout-blended, for one projection plane. */
+    const plane = (uv: Node): Node => {
+      const near = sample(uv, SAND_DETAIL_NEAR).toVar();
+      const far = sample(uv, SAND_DETAIL_FAR).toVar();
       const blended = normalize(
         vec3(near.x.add(far.x), near.y.add(far.y), near.z.mul(far.z)),
       ).toVar();
-      // Re-encoded to [0,1] because `normalMap` decodes: it is the tangent-space
-      // entry point and expects a sampled texel, not a decoded normal.
-      return normalMap(vec4(blended.mul(0.5).add(0.5), 1), vec2(0.75, 0.75));
+      // The 0.75 the `normalMap` call this replaced passed as its scale.
+      return vec3(blended.x.mul(SAND_NORMAL_SCALE), blended.y.mul(SAND_NORMAL_SCALE), blended.z);
+    };
+
+    /**
+     * The terrain normal, built in world space and handed over in view space.
+     *
+     * Two defects come out of this, and they had one cause between them: the
+     * detail map was projected planar on world XZ, which stretches by `1/cos θ`
+     * on any slope and degenerates entirely on steep ground — that is the
+     * horizontal smearing across the sloped beach — and there was no relief at
+     * all below the mesh's 15.6 m vertex spacing, which is the visible
+     * triangulation. Neither can be fixed in the tangent frame the geometry
+     * supplies, so the whole normal is assembled in world space instead and
+     * transformed at the end. That also retires the dependency on the plane's
+     * generated tangents.
+     *
+     * Order matters: the procedural relief goes on first, and the triplanar
+     * blend weights are taken from the *relieved* normal. A cliff face that only
+     * exists in the bump would otherwise still be sampled as if it were flat
+     * ground, which is the same projection error one level down.
+     */
+    this.material.normalNode = Fn(() => {
+      const wp = positionWorld.toVar();
+      const geo = normalize(normalWorldGeometry).toVar();
+
+      const d = this.detailNode.toVar();
+      const bumpWeight = mix(BUMP_FLAT_WEIGHT, 1, geo.y.abs().oneMinus()).toVar();
+      // A heightfield's normal is `(-dh/dx, 1, -dh/dz)`, so added relief
+      // subtracts its gradient from the horizontal components.
+      const n = normalize(
+        vec3(geo.x.sub(d.y.mul(bumpWeight)), geo.y, geo.z.sub(d.z.mul(bumpWeight))),
+      ).toVar();
+
+      // Whiteout triplanar blend (Ben Golus, "Normal Mapping for a Triplanar
+      // Shader"): perturb each projection's tangent normal by the surface
+      // normal's in-plane components, swizzle each into world orientation, and
+      // weight by how much the surface faces that axis. Cheaper than building
+      // three tangent frames and it keeps the slope of every projection instead
+      // of averaging them toward flat.
+      const w = n.abs().pow(TRIPLANAR_SHARPNESS).toVar();
+      w.divAssign(w.x.add(w.y).add(w.z).max(1e-4));
+
+      const tx = plane(vec2(wp.z, wp.y)).toVar();
+      const ty = plane(vec2(wp.x, wp.z)).toVar();
+      const tz = plane(vec2(wp.x, wp.y)).toVar();
+
+      const cx = vec3(tx.z.abs().mul(n.x), tx.y.add(n.y), tx.x.add(n.z));
+      const cy = vec3(ty.x.add(n.x), ty.z.abs().mul(n.y), ty.y.add(n.z));
+      const cz = vec3(tz.x.add(n.x), tz.y.add(n.y), tz.z.abs().mul(n.z));
+
+      const world = normalize(cx.mul(w.x).add(cy.mul(w.y)).add(cz.mul(w.z)));
+      return world.transformNormalByViewMatrix(cameraViewMatrix);
     })();
+
+    /**
+     * Cavity occlusion, applied where occlusion belongs: to the indirect term.
+     *
+     * `envMapIntensity` above is a constant standing in for "the fraction of sky
+     * an averagely-enclosed patch of ground sees", and its own comment admits it
+     * is a substitute for the occlusion this surface had no way to compute. It
+     * now can, so the constant describes the average and this describes the
+     * variation about it — which is what puts a hollow in shade and a spur in
+     * light instead of grading the whole dome evenly.
+     */
+    this.material.aoNode = Fn(() =>
+      mix(AO_FLOOR, 1, this.detailNode.x.smoothstep(-0.7, 0.45)),
+    )();
 
     this.mesh = new THREE.Mesh(this.geometry, this.material);
     this.mesh.name = 'seafloor';
@@ -807,6 +1118,56 @@ export class Seafloor {
   /** Scales the injected caustics without a rebuild. */
   setCausticsStrength(value: number): void {
     this.uCausticsStrength.value = value;
+  }
+
+  /**
+   * Wires the two occlusion terms the island's key light needs.
+   *
+   * Both are analytic functions of world position rather than rasterised maps,
+   * and both are unavailable to the shadow map for structural reasons: the
+   * island is four times wider than the sun's +/-260 m shadow box, and the cloud
+   * deck is a procedural field with no geometry to render. See
+   * `core/lightOcclusion` for how they reach the direct term.
+   *
+   * Idempotent — a second call replaces nothing and wraps nothing twice, so a
+   * tier change cannot stack occlusion factors.
+   *
+   * @param light The key light. `Atmosphere` retargets the same light to the
+   *   moon after sunset, which is why the direction is a separate uniform rather
+   *   than being read off the light.
+   * @param cloudShadow `Clouds.shadowNode()`, or null to leave the land in
+   *   permanent sun.
+   */
+  setKeyLight(light: THREE.DirectionalLight, cloudShadow: ((wp: Node) => Node) | null): void {
+    if (this.occlusionAttached) return;
+    this.occlusionAttached = true;
+
+    const factor = Fn(() => {
+      const wp = positionWorld.toVar();
+      const terrain = this.nodes
+        .sunShadow(wp, this.uKeyDir, this.uShadowSteps)
+        .toVar('terrainKeyShadow');
+      if (cloudShadow === null) return terrain;
+      // Multiplied rather than taken as a minimum: a hillside in its own shadow
+      // under a cloud is darker than either alone, because the two occluders are
+      // independent.
+      return terrain.mul(cloudShadow(wp));
+    })();
+
+    occludeLight(this.material, light, factor);
+  }
+
+  /** Direction toward the key light, world space. Cheap; call it per frame. */
+  setKeyDirection(dir: THREE.Vector3): void {
+    this.uKeyDir.value.copy(dir);
+  }
+
+  /**
+   * March steps for the terrain shadow. 0 disables it without a rebuild — the
+   * loop simply does not run and the factor stays at 1.
+   */
+  setShadowSteps(steps: number): void {
+    this.uShadowSteps.value = Math.max(0, Math.round(steps));
   }
 
   dispose(): void {
@@ -978,6 +1339,23 @@ interface NoiseNodes {
   fbm: (p: Node) => Node;
   /** World xz (vec2) -> floor elevation in metres. */
   height: (p: Node) => Node;
+  /**
+   * World xz plus view distance -> `vec3(cavity, slopeX, slopeZ)`.
+   *
+   * One accumulation serving two consumers: `cavity` is the signed octave
+   * residual the ambient occlusion is read off, and `slopeXZ` is the shading
+   * bump's gradient with each octave already faded by whether this pixel can
+   * resolve it. Kept as one call because the two want the same texture fetches
+   * and separating them would double the cost of the more expensive half.
+   */
+  detail: (p: Node, viewDistance: Node) => Node;
+  /**
+   * World position and key-light direction -> sunlight reaching it, 0..1.
+   *
+   * A soft march against the heightfield, so it shadows the whole island at any
+   * range rather than only what fits inside the sun's shadow box.
+   */
+  sunShadow: (worldPosition: Node, lightDir: Node, steps: Node) => Node;
 }
 
 /**
@@ -1012,24 +1390,83 @@ function buildNoiseNodes(map: THREE.Texture): NoiseNodes {
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
   });
 
-  const fbmFn = Fn(([p]: [Node]) => {
-    const q = p.toVar();
-    const sum = float(0).toVar();
-    let amplitude = 1;
-    for (let o = 0; o < OCTAVES; o++) {
-      sum.addAssign(valueNoise(q).mul(amplitude));
-      const rx = q.x.mul(ROT[0]).add(q.y.mul(ROT[1])).toVar();
-      const ry = q.x.mul(ROT[2]).add(q.y.mul(ROT[3])).toVar();
-      q.assign(
-        vec2(
-          rx.mul(LACUNARITY).add(OCTAVE_OFFSET[0]),
-          ry.mul(LACUNARITY).add(OCTAVE_OFFSET[1]),
-        ),
-      );
-      amplitude *= GAIN;
-    }
-    return sum.mul(1 / FBM_NORM);
+  /**
+   * The same bilinear patch, returning its analytic gradient alongside its value.
+   *
+   * `vec3(n, dn/dpx, dn/dpy)`, with the derivative taken with respect to the
+   * *noise-space* coordinate. Written out as the expanded bilinear polynomial
+   * rather than as nested `mix`es because the derivative is then obvious:
+   *
+   *   n  = a + k0 u.x + k1 u.y + k2 u.x u.y
+   *   du = 6 f (1 - f)                        the Hermite's own derivative
+   *
+   * and the four corner reads are shared between value and gradient. That
+   * sharing is the entire economic argument for doing it this way — the gradient
+   * is arithmetic on numbers the sampler has already fetched.
+   */
+  const noised = Fn(([p]: [Node]) => {
+    const i = p.floor().toVar();
+    const f = p.sub(i).toVar();
+    const u = f.mul(f).mul(f.mul(-2).add(3)).toVar();
+    const du = f.mul(f.oneMinus()).mul(6).toVar();
+
+    const base = i.add(0.5).div(NOISE_SIZE).toVar();
+    const step = float(1 / NOISE_SIZE);
+
+    // Typed loosely for the same reason the rest of this module is: the chained
+    // arithmetic below mixes these with `any`-typed swizzles of `u`, and TSL's
+    // declarations resolve that to the widest overload rather than to `float`.
+    const a: Node = texture(map, base, 0).r.toVar();
+    const b: Node = texture(map, base.add(vec2(step, 0)), 0).r.toVar();
+    const c: Node = texture(map, base.add(vec2(0, step)), 0).r.toVar();
+    const d: Node = texture(map, base.add(vec2(step, step)), 0).r.toVar();
+
+    const k0 = b.sub(a).toVar();
+    const k1 = c.sub(a).toVar();
+    const k2 = a.sub(b).sub(c).add(d).toVar();
+
+    return vec3(
+      a.add(k0.mul(u.x)).add(k1.mul(u.y)).add(k2.mul(u.x).mul(u.y)),
+      du.x.mul(k0.add(k2.mul(u.y))),
+      du.y.mul(k1.add(k2.mul(u.x))),
+    );
   });
+
+  /**
+   * fbm over octaves `[from, to)`, **unnormalised**, value only.
+   *
+   * The normaliser is the caller's business because the two uses want different
+   * ones: the heightfield divides by the full four-octave sum so its relief keeps
+   * the amplitude it always had, while a partial run used as a residual has to be
+   * measured against its own amplitude to mean anything.
+   *
+   * Octaves below `from` still advance the chain — the rotation and the offset
+   * are what decorrelate the sum — but skip the fetch, so a residual costs only
+   * the octaves it actually contains.
+   */
+  const makeFbm = (from: number, to: number) =>
+    Fn(([p]: [Node]) => {
+      const q = p.toVar();
+      const sum = float(0).toVar();
+      let amplitude = 1;
+      for (let o = 0; o < to; o++) {
+        if (o >= from) sum.addAssign(valueNoise(q).mul(amplitude));
+        const rx = q.x.mul(ROT[0]).add(q.y.mul(ROT[1])).toVar();
+        const ry = q.x.mul(ROT[2]).add(q.y.mul(ROT[3])).toVar();
+        q.assign(
+          vec2(
+            rx.mul(LACUNARITY).add(OCTAVE_OFFSET[0]),
+            ry.mul(LACUNARITY).add(OCTAVE_OFFSET[1]),
+          ),
+        );
+        amplitude *= GAIN;
+      }
+      return sum;
+    });
+
+  const fbmFn = Fn(([p]: [Node]) => makeFbm(0, OCTAVES)(p).mul(1 / FBM_NORM));
+  const fbmCoarse = makeFbm(0, SHADOW_OCTAVES);
+  const COARSE_NORM = amplitudeSum(0, SHADOW_OCTAVES);
 
   /**
    * `sectorMask()` above, node for node. A plain arrow rather than an `Fn`
@@ -1064,62 +1501,184 @@ function buildNoiseNodes(map: THREE.Texture): NoiseNodes {
    * other is not a cosmetic bug — it is props buried in sand and fish inside
    * rock.
    */
-  const height = Fn(([p]: [Node]) => {
-    const xz = p.toVar();
-    const n = fbmFn(xz.mul(FEATURE_SCALE)).toVar();
+  /**
+   * @param noiseFn Unnormalised fbm over whichever octaves this instance wants.
+   * @param norm Its amplitude sum, so the relief stays centred on zero whatever
+   *   the octave count. Only the four-octave instance is the mirror of
+   *   `seafloorHeight`; the coarse one exists solely to be marched against, and
+   *   differs from the real surface by the couple of metres its missing octaves
+   *   are worth.
+   */
+  const makeHeight = (noiseFn: Node, norm: number) =>
+    Fn(([p]: [Node]) => {
+      const xz = p.toVar();
+      const n = noiseFn(xz.mul(FEATURE_SCALE)).mul(1 / norm).toVar();
 
-    const rOrigin = xz.length().toVar();
+      const rOrigin = xz.length().toVar();
 
-    // `dv` is (dx, dz); its `.y` is the world z offset throughout.
-    const dv = xz.sub(vec2(ISLAND.x, ISLAND.z)).toVar();
-    const dIsland = dv.length().toVar();
-    const inv = float(1).div(dIsland.max(1)).toVar();
-    const u = dv.mul(inv).toVar();
+      // `dv` is (dx, dz); its `.y` is the world z offset throughout.
+      const dv = xz.sub(vec2(ISLAND.x, ISLAND.z)).toVar();
+      const dIsland = dv.length().toVar();
+      const inv = float(1).div(dIsland.max(1)).toVar();
+      const u = dv.mul(inv).toVar();
 
-    const shore = shoreFractionNode(u).mul(ISLAND.radius).toVar();
-    const t = dIsland.div(shore).toVar();
+      const shore = shoreFractionNode(u).mul(ISLAND.radius).toVar();
+      const t = dIsland.div(shore).toVar();
 
-    const sv = dv.sub(vec2(SUMMIT_OFFSET.x, SUMMIT_OFFSET.z)).toVar();
-    const tCrest = sv.length().div(shore.mul(CREST_SPAN)).toVar();
+      const sv = dv.sub(vec2(SUMMIT_OFFSET.x, SUMMIT_OFFSET.z)).toVar();
+      const tCrest = sv.length().div(shore.mul(CREST_SPAN)).toVar();
 
-    const along = dv.dot(vec2(SPIT.x, SPIT.z)).toVar();
-    const across = dv.y.mul(SPIT.x).sub(dv.x.mul(SPIT.z)).toVar();
-    const offset = across.sub(along.mul(along).mul(SPIT_CURVE)).abs().toVar();
-    const run = along
-      .smoothstep(SPIT_ROOT, SPIT_ROOT + SPIT_RISE)
-      .mul(smoothstepDownNode(along, SPIT_TIP - SPIT_TAPER, SPIT_TIP))
-      .toVar();
-    const shoal = run.mul(smoothstepDownNode(offset, SPIT_SHOAL_CORE, SPIT_SHOAL_EDGE)).toVar();
-    const crest = run.mul(smoothstepDownNode(offset, SPIT_CORE, SPIT_EDGE)).toVar();
+      const along = dv.dot(vec2(SPIT.x, SPIT.z)).toVar();
+      const across = dv.y.mul(SPIT.x).sub(dv.x.mul(SPIT.z)).toVar();
+      const offset = across.sub(along.mul(along).mul(SPIT_CURVE)).abs().toVar();
+      const run = along
+        .smoothstep(SPIT_ROOT, SPIT_ROOT + SPIT_RISE)
+        .mul(smoothstepDownNode(along, SPIT_TIP - SPIT_TAPER, SPIT_TIP))
+        .toVar();
+      const shoal = run.mul(smoothstepDownNode(offset, SPIT_SHOAL_CORE, SPIT_SHOAL_EDGE)).toVar();
+      const crest = run.mul(smoothstepDownNode(offset, SPIT_CORE, SPIT_EDGE)).toVar();
 
-    const shallowOrigin = smoothstepDownNode(rOrigin, PLATEAU_RADIUS, SHELF_RADIUS).toVar();
-    const shallowIsland = smoothstepDownNode(t, SKIRT_IN, SKIRT_OUT).toVar();
-    const shallowness = shallowOrigin.max(shallowIsland).max(shoal).toVar();
+      const shallowOrigin = smoothstepDownNode(rOrigin, PLATEAU_RADIUS, SHELF_RADIUS).toVar();
+      const shallowIsland = smoothstepDownNode(t, SKIRT_IN, SKIRT_OUT).toVar();
+      const shallowness = shallowOrigin.max(shallowIsland).max(shoal).toVar();
 
-    const y = float(DEEP_Y).add(float(PLATEAU_Y - DEEP_Y).mul(shallowness)).toVar();
-    y.addAssign(n.sub(0.5).mul(RELIEF).mul(shallowness.mul(0.65).add(0.35)));
-    y.addAssign(smoothstepDownNode(t, APRON_IN, APRON_OUT).mul(SHORE_LIFT));
-    y.addAssign(smoothstepDownNode(tCrest, CREST_IN, CREST_OUT).mul(CREST_LIFT));
-    y.addAssign(
-      sectorMaskNode(u, HEADLAND)
-        .mul(t.smoothstep(HEADLAND_TOE, HEADLAND_CROWN))
-        .mul(smoothstepDownNode(t, HEADLAND_BROW, HEADLAND_FALL))
-        .mul(HEADLAND_LIFT),
-    );
-    y.addAssign(crest.mul(SPIT_LIFT));
+      const y = float(DEEP_Y).add(float(PLATEAU_Y - DEEP_Y).mul(shallowness)).toVar();
+      y.addAssign(n.sub(0.5).mul(RELIEF).mul(shallowness.mul(0.65).add(0.35)));
+      y.addAssign(smoothstepDownNode(t, APRON_IN, APRON_OUT).mul(SHORE_LIFT));
+      y.addAssign(smoothstepDownNode(tCrest, CREST_IN, CREST_OUT).mul(CREST_LIFT));
+      y.addAssign(
+        sectorMaskNode(u, HEADLAND)
+          .mul(t.smoothstep(HEADLAND_TOE, HEADLAND_CROWN))
+          .mul(smoothstepDownNode(t, HEADLAND_BROW, HEADLAND_FALL))
+          .mul(HEADLAND_LIFT),
+      );
+      y.addAssign(crest.mul(SPIT_LIFT));
 
-    const lagoon = sectorMaskNode(u, LAGOON)
-      .mul(t.smoothstep(LAGOON_IN, LAGOON_FULL))
-      .mul(smoothstepDownNode(t, LAGOON_EDGE, LAGOON_OUT))
-      .toVar();
-    const fill = float(LAGOON_Y).sub(y).max(0).toVar();
-    y.addAssign(lagoon.mul(fill));
-    return y;
+      const lagoon = sectorMaskNode(u, LAGOON)
+        .mul(t.smoothstep(LAGOON_IN, LAGOON_FULL))
+        .mul(smoothstepDownNode(t, LAGOON_EDGE, LAGOON_OUT))
+        .toVar();
+      const fill = float(LAGOON_Y).sub(y).max(0).toVar();
+      y.addAssign(lagoon.mul(fill));
+      return y;
+    });
+
+  const height = makeHeight(makeFbm(0, OCTAVES), FBM_NORM);
+  /**
+   * The same surface at two octaves, for the shadow march to trace against.
+   *
+   * Four octaves times twenty-four steps is ninety-six fetches a pixel purely to
+   * decide whether the sun is blocked, and the answer does not depend on the
+   * metre-scale detail: what shadows the island is the island. Two octaves keep
+   * the shore, the crest, the headland and the fifty-metre undulation, and cost
+   * half as much. The residual disagreement with the real surface is the +/- 2.2 m
+   * the missing octaves carry, which `SHADOW_START` already stands clear of.
+   */
+  const heightCoarse = makeHeight(fbmCoarse, COARSE_NORM);
+
+  /**
+   * Shading bump gradient and cavity residual, from one octave accumulation.
+   *
+   * Each octave is faded by whether this pixel can resolve it — see
+   * `BUMP_FADE_NEAR`. The fade is applied to the *gradient* only: the cavity
+   * value is a low-frequency quantity that stays meaningful at any range, and
+   * fading it would make distant hollows fill in with light.
+   */
+  const detail = Fn(([p, viewDistance]: [Node, Node]) => {
+    const q = p.mul(FEATURE_SCALE).toVar();
+    const cavity = float(0).toVar();
+    const slope = vec2(0, 0).toVar();
+    let amplitude = 1;
+
+    for (let o = 0; o < BUMP_TO; o++) {
+      if (o >= Math.min(AO_FROM, BUMP_FROM)) {
+        const n = noised(q).toVar();
+        if (o >= AO_FROM && o < AO_TO) cavity.addAssign(n.x.mul(amplitude));
+        if (o >= BUMP_FROM) {
+          const j = OCTAVE_JACOBIAN[o];
+          // grad_p = J^T * grad_q, with J constant per octave.
+          const fade = smoothstepDownNode(
+            viewDistance,
+            octaveFeatureMetres(o) * BUMP_FADE_NEAR,
+            octaveFeatureMetres(o) * BUMP_FADE_FAR,
+          );
+          slope.addAssign(
+            vec2(
+              n.y.mul(j[0]).add(n.z.mul(j[2])),
+              n.y.mul(j[1]).add(n.z.mul(j[3])),
+            ).mul(amplitude * (1 / BUMP_NORM)).mul(fade),
+          );
+        }
+      }
+      const rx = q.x.mul(ROT[0]).add(q.y.mul(ROT[1])).toVar();
+      const ry = q.x.mul(ROT[2]).add(q.y.mul(ROT[3])).toVar();
+      q.assign(
+        vec2(
+          rx.mul(LACUNARITY).add(OCTAVE_OFFSET[0]),
+          ry.mul(LACUNARITY).add(OCTAVE_OFFSET[1]),
+        ),
+      );
+      amplitude *= GAIN;
+    }
+
+    // Signed and normalised to roughly [-1, 1]: negative in a hollow, positive on
+    // a rise. The raw sum is a positive quantity centred on half its amplitude.
+    const signedCavity = cavity
+      .mul(1 / FBM_NORM)
+      .div(AO_RESIDUAL_AMP)
+      .mul(2)
+      .sub(1);
+
+    return vec3(signedCavity, slope.mul(BUMP_GAIN));
+  });
+
+  const sunShadow = Fn(([worldPosition, lightDir, steps]: [Node, Node, Node]) => {
+    const p = vec3(worldPosition).toVar('terrainShadowP');
+    const res = float(1).toVar('terrainShadowRes');
+
+    // Two gates, and between them they are what makes this affordable. Almost
+    // every pixel of a typical frame is sea, and the seabed under it is lit
+    // through water rather than by the key light — so only the island's own
+    // pixels ever enter the loop. The second gate retires the march when the key
+    // light is at or below the horizon, where it contributes nothing to shade.
+    If(p.y.greaterThan(SHADOW_MIN_Y).and(lightDir.y.greaterThan(0.02)), () => {
+      const t = float(SHADOW_START).toVar('terrainShadowT');
+
+      Loop(steps, () => {
+        const s = p.add(lightDir.mul(t)).toVar('terrainShadowS');
+        const h = s.y
+          .sub(heightCoarse(vec2(s.x, s.z)).sub(SHADOW_CASTER_BIAS))
+          .toVar('terrainShadowH');
+
+        // iq's soft-shadow accumulator: the closest approach, measured as an
+        // angle, is the penumbra. A ray that clears a ridge by little comes back
+        // partly shadowed, and the softness grows with distance to the occluder
+        // for free because `t` is in the denominator.
+        res.assign(min(res, h.mul(SHADOW_HARDNESS).div(t)));
+
+        // Step by the clearance, so open sky is crossed in a few strides and the
+        // ray only slows where it is close to the ground. Floored so a ray
+        // running parallel just above a slope cannot stall, and the floor grows
+        // with distance so the fixed step count still reaches kilometres.
+        t.addAssign(
+          clamp(h, float(SHADOW_MIN_STEP).add(t.mul(SHADOW_STEP_GROWTH)), SHADOW_MAX_STEP),
+        );
+
+        If(res.lessThan(0.02).or(t.greaterThan(SHADOW_MAX_DIST)), () => {
+          Break();
+        });
+      });
+    });
+
+    return res.clamp(0, 1);
   });
 
   return {
     valueNoise: (p: Node) => valueNoise(p),
     fbm: (p: Node) => fbmFn(p),
     height: (p: Node) => height(p),
+    detail: (p: Node, viewDistance: Node) => detail(p, viewDistance),
+    sunShadow: (worldPosition: Node, lightDir: Node, steps: Node) =>
+      sunShadow(worldPosition, lightDir, steps),
   };
 }
