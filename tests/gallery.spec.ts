@@ -105,7 +105,15 @@ test.describe('gallery', () => {
   test.skip(process.env.CAPTURE_GALLERY !== '1', 'set CAPTURE_GALLERY=1 to regenerate docs/images');
 
   test('captures the README gallery', async ({ page }) => {
-    test.setTimeout(900_000);
+    // Twenty-five minutes, up from fifteen. Not a symptom being papered over:
+    // a gallery shot is a boot, a preset change, ninety settle steps and a
+    // warm-up capture at 1600x900, and the renderer this suite photographs now
+    // carries a volumetric cloud layer that reaches the horizon, an aerial
+    // perspective on every material and a heightfield shadow on the island. The
+    // *frame* budget is measured by `npm run bench` and passes with margin; this
+    // number is about how long sixteen full boots take, which is a different
+    // quantity and has never been a gate.
+    test.setTimeout(1_500_000);
     await page.setViewportSize(GALLERY_VIEWPORT);
     await bootOcean(page);
 

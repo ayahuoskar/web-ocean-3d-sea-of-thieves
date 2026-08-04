@@ -188,6 +188,15 @@ const AMBIENT_COLOR = new THREE.Color(0.36, 0.44, 0.5);
 
 export interface IslandMeadowOptions {
   seed?: number;
+  /**
+   * How much key light reaches a world point, 0..1 — the island's own shadow
+   * times the cloud deck's. Sampled once per blade in the vertex stage.
+   *
+   * Without it the sward stayed fully lit across a hillside whose terrain now
+   * has a lit face and a shaded one, which reads worse than the flat lighting
+   * it replaced: grass glowing on ground that is in shadow.
+   */
+  sunOcclusion?: (worldPosition: unknown) => unknown;
 }
 
 /**
@@ -230,6 +239,7 @@ export class IslandMeadow {
    * floor mesh is displaced by and the CPU samples for placement.
    */
   private readonly groundHeight: (worldPosition: Node) => Node;
+  private readonly sunOcclusion: ((worldPosition: Node) => Node) | null;
 
   constructor(
     count: number,
@@ -238,6 +248,7 @@ export class IslandMeadow {
   ) {
     this.count = clampCount(count);
     this.groundHeight = groundHeight;
+    this.sunOcclusion = (options.sunOcclusion as ((p: Node) => Node) | undefined) ?? null;
 
     this.geometry = buildBladeGeometry();
     attachInstanceAttributes(this.geometry, options.seed ?? MEADOW_SEED);
@@ -472,6 +483,12 @@ export class IslandMeadow {
     const vNormal: Node = varying(worldNormal, 'meadowNormal');
     const vBlade: Node = varying(s, 'meadowBlade');
     const vTint: Node = varying(seed.z, 'meadowTint');
+    const vKey: Node = varying(
+      this.sunOcclusion === null
+        ? (float(1) as Node)
+        : this.sunOcclusion(vec3n(world.x, ground, world.y)),
+      'meadowKey',
+    );
 
     material.colorNode = Fn(() => {
       const normal = vNormal.normalize().mul(faceDirection).toVar();
@@ -492,7 +509,7 @@ export class IslandMeadow {
 
       const light = this.uAmbient
         .mul(sky.mul(0.6).add(0.4))
-        .add(this.uSunColor.mul(key).mul(0.9));
+        .add(this.uSunColor.mul(key).mul(0.9).mul(vKey));
 
       return vec4(base.mul(light), 1);
     })();

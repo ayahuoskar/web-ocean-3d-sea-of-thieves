@@ -67,6 +67,14 @@ export interface LensRainParams {
   fog: number;
   /** Radius of the mist blur, in screen heights. */
   fogRadius: number;
+  /**
+   * How far the wet glass defocuses the world *outside* the droplets, 0..1.
+   *
+   * The droplets themselves stay sharp — see the glass block in the node graph.
+   * Without this the beads are perfectly resolved objects sitting on a perfectly
+   * resolved scene, which reads as decals rather than as lenses.
+   */
+  backdropBlur: number;
   /** Chromatic spread of the lens read, as a fraction of its own displacement. */
   dispersion: number;
   /** Specular strength on the droplet caps. */
@@ -94,6 +102,7 @@ export const DEFAULT_LENS_RAIN_PARAMS: LensRainParams = {
   lensDepth: 6.5,
   fog: 0.32,
   fogRadius: 0.012,
+  backdropBlur: 0.7,
   dispersion: 0.05,
   glint: 0.55,
   glintPower: 26,
@@ -221,6 +230,7 @@ export class LensRain {
   // --- glass ----------------------------------------------------------------
   private readonly uFog = uniform(0);
   private readonly uFogRadius = uniform(DEFAULT_LENS_RAIN_PARAMS.fogRadius);
+  private readonly uBackdropBlur = uniform(0);
   private readonly uDispersion = uniform(0);
 
   // --- highlight ------------------------------------------------------------
@@ -538,26 +548,6 @@ export class LensRain {
 
         // --- the glass --------------------------------------------------------
         //
-        // A four-tap ring rather than a real blur. It is only ever mixed in at low
-        // weight, as the haze of condensation and micro-spray between the drops,
-        // and it doubles as the softening that hides the undersampling at a
-        // droplet's rim — where the lens compresses a wide angle into a couple of
-        // pixels and a single tap would sparkle.
-        const soft = vec3(src.rgb).toVar('lrSoft');
-        If(this.uFog.greaterThan(0.0001), () => {
-          const r = vec2(this.uFogRadius.div(aspect), this.uFogRadius).toVar();
-          const tap = (dx: number, dy: number): any =>
-            colorNode.sample(suv.add(r.mul(vec2(dx, dy))).clamp(UV_INSET, 1 - UV_INSET)).rgb;
-          soft.assign(
-            src.rgb
-              .add(tap(0.707, 0.707))
-              .add(tap(-0.707, 0.707))
-              .add(tap(0.707, -0.707))
-              .add(tap(-0.707, -0.707))
-              .mul(0.2),
-          );
-        });
-
         // Weighted by the same clumping field the droplets use, and taken to
         // zero in its low half rather than merely dimmed: a haze applied to
         // every pixel of the frame is a lens filter, not weather, and it is the
@@ -570,7 +560,57 @@ export class LensRain {
           .mul(cover.oneMinus())
           .clamp(0, 1)
           .toVar('lrMist');
-        const glass = mix(src.rgb, soft, mist).toVar('lrGlass');
+
+        // **The world outside the drops goes soft, and the world inside them
+        // stays sharp.** That inversion is the effect, and without it the
+        // droplets were decals: perfectly resolved beads sitting on a perfectly
+        // resolved scene, which is not what a wet lens looks like and is exactly
+        // how `storm.png` read.
+        //
+        // The physics is ordinary. A drop on the front element is far inside the
+        // near focus distance, so the lens cannot resolve *it* — what it resolves
+        // is the tiny inverted image the drop projects, which is why a raindrop
+        // on glass shows a sharp little world in it while the film of water
+        // around it defocuses everything behind. The bead is a lens with its own
+        // very short focal length; the wet glass between beads is a diffuser.
+        //
+        // Driven by the rain amount rather than by `fog`, because the two are
+        // different weather: `fog` is condensation and micro-spray, present in a
+        // squall and absent in clean rain, while this is a property of there
+        // being water on the element at all.
+        const backdrop = this.uBackdropBlur
+          .mul(this.uAmount)
+          .mul(cover.oneMinus())
+          .clamp(0, 1)
+          .toVar('lrBackdrop');
+
+        const softWeight = mist.max(backdrop).toVar('lrSoftW');
+
+        // Two rings rather than one. The single four-tap ring this replaces was
+        // sized for a haze mixed in at low weight; carrying a real defocus it
+        // reads as four ghosts of the image rather than as a blur, because four
+        // samples on a circle *are* four ghosts once the weight is high enough to
+        // see them. The second ring at 0.45 of the radius fills the middle of the
+        // kernel, which is what turns it into something with a peak.
+        const soft = vec3(src.rgb).toVar('lrSoft');
+        If(softWeight.greaterThan(0.002), () => {
+          const r = vec2(this.uFogRadius.div(aspect), this.uFogRadius).toVar();
+          const tap = (dx: number, dy: number): any =>
+            colorNode.sample(suv.add(r.mul(vec2(dx, dy))).clamp(UV_INSET, 1 - UV_INSET)).rgb;
+          const outer = tap(0.924, 0.383)
+            .add(tap(-0.383, 0.924))
+            .add(tap(-0.924, -0.383))
+            .add(tap(0.383, -0.924));
+          const inner = tap(0.318, 0.318)
+            .add(tap(-0.318, 0.318))
+            .add(tap(0.318, -0.318))
+            .add(tap(-0.318, -0.318));
+          // Centre weighted double, so the kernel has a peak instead of being a
+          // flat disc — a box blur of a bright highlight is a bright disc.
+          soft.assign(src.rgb.mul(2).add(inner.mul(1.4)).add(outer).div(7.6));
+        });
+
+        const glass = mix(src.rgb, soft, softWeight).toVar('lrGlass');
 
         // --- the lens ---------------------------------------------------------
         const lensUv = suv.add(offsetUv).clamp(UV_INSET, 1 - UV_INSET).toVar('lrLensUv');
@@ -677,6 +717,7 @@ export class LensRain {
     if (params.lensDepth !== undefined) p.lensDepth = params.lensDepth;
     if (params.fog !== undefined) p.fog = params.fog;
     if (params.fogRadius !== undefined) p.fogRadius = params.fogRadius;
+    if (params.backdropBlur !== undefined) p.backdropBlur = params.backdropBlur;
     if (params.dispersion !== undefined) p.dispersion = params.dispersion;
     if (params.glint !== undefined) p.glint = params.glint;
     if (params.glintPower !== undefined) p.glintPower = params.glintPower;
@@ -833,6 +874,10 @@ export class LensRain {
     // held back for the tiers that asked for them rather than being faded down
     // and still paid for.
     this.uFog.value = tier >= 2 ? p.fog * (tier >= 3 ? 1 : 0.6) : 0;
+    // Same gate as the misting, and for the same reason: the gather is eight
+    // reads, so it belongs to the tiers that asked for it rather than being
+    // faded to nothing and still paid for.
+    this.uBackdropBlur.value = tier >= 2 ? Math.max(0, p.backdropBlur) : 0;
     this.uDispersion.value = tier >= 3 ? Math.max(0, p.dispersion) : 0;
 
     // Tier gates the master uniform too, and a tier change must land on the very

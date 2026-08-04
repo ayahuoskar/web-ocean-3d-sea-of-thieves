@@ -1,5 +1,17 @@
 import * as THREE from 'three/webgpu';
-import { Fn, float, mix, positionWorld, vec3 } from 'three/tsl';
+import {
+  Fn,
+  cameraPosition,
+  float,
+  materialColor,
+  mix,
+  positionGeometry,
+  positionLocal,
+  positionWorld,
+  uniform,
+  vec2,
+  vec3,
+} from 'three/tsl';
 import { occludeLight } from '../core/lightOcclusion';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -44,6 +56,144 @@ export interface GroundShadingInputs {
   caustics: (worldPosition: Node) => Node;
   /** `(worldPosition) => metres` — seafloor elevation, for the contact term. */
   groundHeight: (worldPosition: Node) => Node;
+  /**
+   * Wind for the planting, and the test that decides what counts as planting.
+   *
+   * Omitted leaves every mesh static, which is what the scene did before.
+   */
+  foliage?: {
+    wind: FoliageWind;
+    /** Given a mesh name, is this foliage? */
+    test: (meshName: string) => boolean;
+    /** Direction toward the key light, world space, as a node. */
+    sunDirection: Node;
+    /** Its colour and strength, as a node. */
+    sunColor: Node;
+  };
+}
+
+/**
+ * Exponent and strength of the leaf back-scatter.
+ *
+ * A leaf is a thin translucent sheet, so a good deal of the light that reaches
+ * its back comes out of its front, and a canopy with the sun behind it glows.
+ * `Props` records that the old procedural palm faked this through `emissiveNode`
+ * and that it was removed for being "neither shadowed nor tone-mapped" — the
+ * right call, and the wrong conclusion, because both objections are about *how*
+ * it was wired rather than about the term.
+ *
+ * This one is shadowed: it carries the same cloud shade the direct light does,
+ * so a frond under a cloud stops glowing. It is tone-mapped for free, because
+ * emissive is added to the outgoing radiance before the output transform rather
+ * than after it. And it is weighted by the material's own albedo, so it is the
+ * leaf's colour coming through rather than a wash.
+ *
+ * The lobe is the standard forward-scatter form — `dot(V, -L)` raised to a
+ * power, which peaks when the viewer is looking straight down the sun's own
+ * direction through the leaf. Deliberately narrow and weak: this is the last
+ * fraction of a stop on a canopy, and a translucency term that reads at any
+ * angle is not translucency, it is emission.
+ */
+const TRANSLUCENCY_POWER = 4;
+const TRANSLUCENCY_GAIN = 0.55;
+
+/**
+ * Sway shared by the near trees and the distant canopy cards.
+ *
+ * Only the billboards moved. `Canopy`'s model is the right one — shear by the
+ * square of the height so the trunk stays planted and the crown carries the
+ * travel, and *one travelling gust* across the island rather than a per-instance
+ * random phase, because a canopy moves in gusts and neighbours that move
+ * independently read as static noise. It just was not applied to the meshes, so
+ * a viewer walking up the beach watched the far forest breathe and the palms in
+ * front of them stand perfectly still.
+ *
+ * The constants below are `Canopy`'s, deliberately: the two systems hand over to
+ * each other between 320 and 520 m, and a card that swayed on a different phase
+ * from the tree it replaces would make the handover visible.
+ */
+const SWAY_WAVELENGTH = 90;
+const SWAY_K = (Math.PI * 2) / SWAY_WAVELENGTH;
+const SWAY_SPEED = 7;
+const SWAY_OMEGA = SWAY_K * SWAY_SPEED;
+/** Metres of crown travel at full wind. */
+const SWAY_MAX = 0.55;
+/**
+ * Model height over which the shear reaches full strength, in model units.
+ *
+ * Model units rather than metres, because the value available in the vertex
+ * stage before instancing is the raw attribute — and that is the right choice
+ * anyway: it makes the lean a fraction of the *tree's own* height, so a scaled
+ * instance bends over its own length rather than over an absolute distance.
+ */
+const SWAY_HEIGHT = 9;
+
+const CLOCK_WRAP = 3600;
+
+export class FoliageWind {
+  private readonly uWind: any = uniform(new THREE.Vector2(1, 0));
+  private readonly uStrength = uniform(0.5);
+  private readonly uPhase = uniform(0);
+  private phase = 0;
+
+  /** `direction` is a unit vector in world xz; `strength` is 0..1. */
+  setWind(direction: THREE.Vector2, strength: number): void {
+    const wind = this.uWind.value as THREE.Vector2;
+    wind.copy(direction);
+    if (wind.lengthSq() < 1e-6) wind.set(1, 0);
+    wind.normalize();
+    this.uStrength.value = Math.max(0, Math.min(1, strength));
+  }
+
+  update(dt: number): void {
+    this.phase = (this.phase + dt) % CLOCK_WRAP;
+    this.uPhase.value = this.phase;
+  }
+
+  /** Rewinds the gust, for reproducible captures. */
+  resetClock(time = 0): void {
+    this.phase = ((time % CLOCK_WRAP) + CLOCK_WRAP) % CLOCK_WRAP;
+    this.uPhase.value = this.phase;
+  }
+
+  /**
+   * Installs the shear on one material's vertex stage.
+   *
+   * `positionLocal` inside `positionNode` has **already been through the
+   * instance matrix** — `NodeMaterial.setupPosition` applies instancing before
+   * it reads `positionNode` — so it is world space for anything parented at the
+   * scene root, which is what the gust's travelling term needs. The raw
+   * `positionGeometry` is still the un-instanced attribute, which is what the
+   * lean's height fraction needs. Both are available and they are different
+   * things; using one where the other belongs gives either a forest that all
+   * leans in lockstep or a forest that shears about the world origin.
+   */
+  applyTo(material: THREE.NodeMaterial): void {
+    const existing = material.positionNode as Node;
+    material.positionNode = Fn(() => {
+      const p = (existing === null ? positionLocal : vec3(existing)).toVar('fwP');
+      const lean = positionGeometry.y
+        .max(0)
+        .div(SWAY_HEIGHT)
+        .clamp(0, 1)
+        .toVar('fwLean');
+      const along = vec2(p.x, p.z).dot(this.uWind).toVar('fwAlong');
+      const gust = along.mul(SWAY_K).sub(this.uPhase.mul(SWAY_OMEGA)).sin().toVar('fwGust');
+      // Squared, so the trunk is planted and the travel is all in the crown.
+      const shear = gust
+        .mul(lean)
+        .mul(lean)
+        .mul(SWAY_MAX)
+        .mul(this.uStrength)
+        .toVar('fwShear');
+      return vec3(
+        p.x.add(this.uWind.x.mul(shear)),
+        p.y,
+        p.z.add(this.uWind.y.mul(shear)),
+      );
+    })();
+    material.needsUpdate = true;
+  }
 }
 
 /**
@@ -67,19 +217,29 @@ const WATERLINE_BAND = 1.2;
 /**
  * Applies the treatment to one material.
  *
- * `aoNode` carries the contact term because three applies it to indirect light
- * only, which is where a contact shadow belongs: a coral in contact with the
- * sand has lost sky, not sun. The caustics multiply the albedo instead, because
- * they *are* the sun — a pattern in the direct light — and there is no hook that
- * modulates one light directionally per material without replacing its whole
- * lighting model.
+ * **Nothing here touches `colorNode`**, and that is load-bearing rather than
+ * tidy. `NodeMaterial.setupDiffuseColor` reads `this.colorNode ?? materialColor`,
+ * and `materialColor` is where the diffuse *map* is folded in — so a wrapper that
+ * set `colorNode` would silently untexture every prop in the scene. It would have
+ * looked like it worked, too, because the models are close enough to their
+ * average colour at a distance.
+ *
+ * So the two terms go where they belong instead:
+ *
+ * - The contact shadow is `aoNode`, which three applies to indirect light only.
+ *   That is exactly right: a coral in contact with the sand has lost sky, not
+ *   sun.
+ * - The caustics ride the *key light* through the same hook the shadows use.
+ *   Also exactly right, and arguably more so than multiplying albedo would have
+ *   been: a caustic is not a property of the surface, it is the sun arriving
+ *   focused by the water above it. Folding it into the light means it scales
+ *   with the sun, disappears at night, and cannot brighten a surface the sun
+ *   never reached.
  */
 export function applyGroundShading(
   material: THREE.NodeMaterial,
   inputs: GroundShadingInputs,
 ): void {
-  const existingColor = material.colorNode as Node;
-
   const contact = Fn(() => {
     const wp = positionWorld.toVar('gsWorld');
     const above = wp.y.sub(inputs.groundHeight(wp)).max(0).toVar('gsAbove');
@@ -89,9 +249,8 @@ export function applyGroundShading(
   material.aoNode =
     material.aoNode === null ? contact : (material.aoNode as Node).mul(contact);
 
-  material.colorNode = Fn(() => {
-    const wp = positionWorld.toVar('gsWorldC');
-    const base = existingColor === null ? vec3(1, 1, 1) : vec3(existingColor);
+  const keyFactor = Fn(() => {
+    const wp = positionWorld.toVar('gsWorldK');
 
     // Underwater only, and fading with depth for the same reason the seafloor's
     // does: past a few tens of metres the surface pattern has diverged into
@@ -103,11 +262,11 @@ export function applyGroundShading(
       .mul(submerged)
       .toVar('gsReach');
 
-    const lit = mix(float(1), inputs.caustics(wp), reach).toVar('gsLit');
-    return base.mul(lit);
+    const caustic = mix(float(1), inputs.caustics(wp), reach).toVar('gsCaustic');
+    return inputs.keyShadow(wp).mul(caustic);
   })();
 
-  occludeLight(material, inputs.light, Fn(() => inputs.keyShadow(positionWorld))());
+  occludeLight(material, inputs.light, keyFactor);
   material.needsUpdate = true;
 }
 
@@ -123,19 +282,86 @@ export function applyGroundShadingTo(
   root: THREE.Object3D,
   inputs: GroundShadingInputs,
 ): void {
-  const seen = new Set<THREE.Material>();
+  /**
+   * Gathered before anything is applied, because the wind is a property of a
+   * *material* and foliage is a property of a *mesh*.
+   *
+   * A material reached through both a palm and a rock must not sway, so the
+   * question is "is every mesh using this material foliage", which cannot be
+   * answered until the whole tree has been walked. The loader keys its node
+   * materials on the source glTF material, so in practice a shared one would
+   * mean two kinds authored in the same file — but "in practice" is not a
+   * guarantee, and a swaying rock is a memorable bug.
+   */
+  const users = new Map<THREE.Material, { all: boolean; any: boolean }>();
+
   root.traverse((node) => {
     const mesh = node as THREE.Mesh;
     if (!mesh.isMesh) return;
+    const foliage = inputs.foliage?.test(mesh.name) ?? false;
     const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
     for (const material of materials) {
-      if (!material || seen.has(material)) continue;
-      seen.add(material);
-      // Node materials only — the treatment is a node graph. Everything the
-      // asset loader produces is one; anything else is left alone rather than
-      // silently skipped in a way that looks like it worked.
-      if ((material as THREE.NodeMaterial).isNodeMaterial !== true) continue;
-      applyGroundShading(material as THREE.NodeMaterial, inputs);
+      if (!material) continue;
+      const entry = users.get(material);
+      if (entry === undefined) users.set(material, { all: foliage, any: foliage });
+      else {
+        entry.all = entry.all && foliage;
+        entry.any = entry.any || foliage;
+      }
     }
   });
+
+  for (const [material, use] of users) {
+    // Node materials only — the treatment is a node graph. Everything the asset
+    // loader produces is one; anything else is left alone rather than silently
+    // skipped in a way that looks like it worked.
+    if ((material as THREE.NodeMaterial).isNodeMaterial !== true) continue;
+    const node = material as THREE.NodeMaterial;
+    applyGroundShading(node, inputs);
+    if (use.all && inputs.foliage) {
+      inputs.foliage.wind.applyTo(node);
+      applyLeafTranslucency(node, inputs);
+    }
+  }
+}
+
+/**
+ * Adds the back-scatter through a leaf. See `TRANSLUCENCY_POWER`.
+ *
+ * Multiplied by the same cloud shade the key light carries, which is the whole
+ * difference between this and the term it replaces: an emissive that ignores
+ * what is between the leaf and the sun goes on glowing under a cloud, at night,
+ * and inside the hill's own shadow.
+ */
+function applyLeafTranslucency(
+  material: THREE.NodeMaterial,
+  inputs: GroundShadingInputs,
+): void {
+  const foliage = inputs.foliage;
+  if (!foliage) return;
+
+  // Loosely typed: `emissiveNode` is declared on the concrete standard/physical
+  // node materials rather than on the `NodeMaterial` base, and this walks a tree
+  // of whatever the asset loader produced.
+  const target = material as unknown as { emissiveNode: Node };
+  const existing = target.emissiveNode ?? null;
+  const glow = Fn(() => {
+    const wp = positionWorld.toVar('ltWorld');
+    // Surface toward the eye.
+    const toEye = cameraPosition.sub(wp).normalize().toVar('ltView');
+    // Peaks when the eye is looking down the sun's own travel direction, which
+    // is exactly when a leaf between the two is lit from behind.
+    const back = toEye
+      .dot(vec3(foliage.sunDirection).negate())
+      .clamp(0, 1)
+      .pow(TRANSLUCENCY_POWER)
+      .toVar('ltBack');
+    return vec3(materialColor)
+      .mul(vec3(foliage.sunColor))
+      .mul(back.mul(TRANSLUCENCY_GAIN))
+      .mul(inputs.keyShadow(wp));
+  })();
+
+  target.emissiveNode = existing === null ? glow : vec3(existing).add(glow);
+  material.needsUpdate = true;
 }

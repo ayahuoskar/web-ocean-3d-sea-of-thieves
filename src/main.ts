@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { pass, positionWorld, rtt } from 'three/tsl';
+import { pass, positionWorld, rtt, uniform } from 'three/tsl';
 import { createRenderer, clampPixelRatio, type Backend } from './core/Renderer';
 import { Caustics, UnderwaterParticles, UnderwaterPass } from './underwater';
 import {
@@ -17,6 +17,7 @@ import {
   ISLAND,
   Ship,
   SurfaceWetness,
+  FoliageWind,
   applyGroundShadingTo,
 } from './scene';
 import { AudioSystem, DEFAULT_AUDIO_SCENE_PARAMS } from './audio';
@@ -81,6 +82,21 @@ const _drawingBuffer = new THREE.Vector2();
  * a lap — a few milliseconds each, spread out, and never two in a row.
  */
 const TOUR_ENV_ELEVATION_STEP = 0.035;
+
+/**
+ * Which of the dressing's scatters sway in the wind.
+ *
+ * Matched on the mesh name because that is where `Props` records what a scatter
+ * *is* — `buildScatter` names every mesh after the scatter that placed it. The
+ * alternative would be a flag threaded through the placement tables, which is
+ * more code for the same information and one more thing to forget when a kind is
+ * added.
+ *
+ * Trunks and fronds only. A rock that swayed would be memorable for the wrong
+ * reason, and the fort, the jetty and the wreck are all structures.
+ */
+const FOLIAGE_MESHES = /^island-(palms|palms-tall|flame-trees|ferns)/;
+
 /** Scratch for the nominal-hull test hook. */
 const _shipProbe = new THREE.Vector2();
 
@@ -132,6 +148,22 @@ class App {
 
   private atmosphere!: Atmosphere;
   private aerial!: AerialPerspective;
+  /**
+   * The gust the island's planting sways on — the near meshes and the distant
+   * canopy cards share it, so the handover between them at 320-520 m is not a
+   * change of phase.
+   */
+  private readonly foliageWind = new FoliageWind();
+  /**
+   * The key light as nodes, for graphs that need it and are not lit by three's
+   * own lighting pipeline — the leaf back-scatter in `groundShading`.
+   *
+   * Written from the same `sunLight` every frame, after `Atmosphere` has decided
+   * whether the sun or the moon is driving it, so a night frond glows by
+   * moonlight or not at all rather than by a sun that has set.
+   */
+  private readonly uKeyDirection: any = uniform(new THREE.Vector3(0, 1, 0));
+  private readonly uKeyColor: any = uniform(new THREE.Color(1, 1, 1));
   private clouds!: Clouds;
   private weather!: Weather;
   /** Gulls over the play area. Owns no simulation state — see `Birds`. */
@@ -398,8 +430,12 @@ class App {
     // Grass, placed on the GPU from the seafloor's own heightfield node rather
     // than scattered as instances — the island is 0.8 km2 and a scatter dense
     // enough to read as a sward is a million draws. See `src/scene/Meadow.ts`.
-    this.meadow = new IslandMeadow(quality.meadow, (worldPosition) =>
-      this.seafloor.heightNode(worldPosition),
+    this.meadow = new IslandMeadow(
+      quality.meadow,
+      (worldPosition) => this.seafloor.heightNode(worldPosition),
+      {
+        sunOcclusion: (worldPosition) => this.seafloor.keyShadowNode(worldPosition),
+      },
     );
     this.scene.add(this.meadow.object);
 
@@ -485,11 +521,11 @@ class App {
     // occlusion term; this is it, and the deck casting it is the same field the
     // clouds are drawn from, so a shaft lands under the cloud that made it.
     //
-    // The cheapest variant on offer — one sample, base field only. This is
-    // evaluated once per march cell and Max marches 56 of them, so the
-    // three-sample surface variant would be a hundred and sixty-eight noise
-    // evaluations a pixel for a feature that is by nature low-frequency.
-    this.fog.setSunOcclusion(this.clouds.shadowNode({ samples: 1, coarse: true }));
+    // One sample rather than three. This is evaluated once per march cell and
+    // Max marches 56 of them, so the surface variant would be a hundred and
+    // sixty-eight noise evaluations a pixel for a feature that is by nature
+    // low-frequency and integrated along the ray anyway.
+    this.fog.setSunOcclusion(this.clouds.shadowNode({ samples: 1 }));
 
     // Fog wraps the underwater pass, not the other way round.
     //
@@ -801,6 +837,18 @@ class App {
       loaded.push(ship.object);
       this.scene.add(ship.object);
       this.wetness.adopt(ship.object);
+      // The hull gets the same treatment the dressing does, and the part of it
+      // that matters here is the caustics: `underwater.png` shows the submerged
+      // hull as a flat black cutout, because the one thing lighting a shape down
+      // there — the pattern the surface focuses onto everything below it — was
+      // wired to the seafloor and to nothing else. `Caustics.intensityNode`'s own
+      // header names "a hull material" as an intended consumer.
+      applyGroundShadingTo(ship.object, {
+        light: this.atmosphere.sunLight,
+        keyShadow: (worldPosition) => this.seafloor.cloudShadowNode(worldPosition),
+        caustics: (worldPosition) => this.caustics.intensityNode(worldPosition),
+        groundHeight: (worldPosition) => this.seafloor.heightNode(worldPosition),
+      });
 
       this.shipBody = new BuoyantBody({
         object: ship.object,
@@ -857,9 +905,28 @@ class App {
       // distinct material.
       applyGroundShadingTo(props.object, {
         light: this.atmosphere.sunLight,
-        keyShadow: (worldPosition) => this.seafloor.keyShadowNode(worldPosition),
+        // Cloud shade only, **not** the island's own heightfield march, and the
+        // reason is compile time rather than frame time.
+        //
+        // The dressing bakes to roughly twenty distinct materials, and a
+        // twenty-four-step raymarch compiled into every one of them took the
+        // first frame from seconds to minutes on the FXC path the test harness
+        // forces. It is also nearly redundant: the sun's shadow map is a
+        // +/-260 m box that follows the viewer, so a prop close enough for its
+        // own shadow to read is inside it, and past that range the canopy cards
+        // — which do carry the march, in their vertex stage, at four samples a
+        // card — are what the viewer is actually looking at.
+        keyShadow: (worldPosition) => this.seafloor.cloudShadowNode(worldPosition),
         caustics: (worldPosition) => this.caustics.intensityNode(worldPosition),
         groundHeight: (worldPosition) => this.seafloor.heightNode(worldPosition),
+        foliage: {
+          wind: this.foliageWind,
+          test: (name) => FOLIAGE_MESHES.test(name),
+          // Uniform nodes rather than values: the sun moves every frame and
+          // these are inside a compiled graph.
+          sunDirection: this.uKeyDirection,
+          sunColor: this.uKeyColor,
+        },
       });
 
       for (const floater of props.floaters) {
@@ -1622,6 +1689,11 @@ class App {
     this.canopy.setAmbientColor(_meadowAmbient);
     this.canopy.setWind(_meadowWind, Math.min(1, this.state.windSpeed / 14));
     this.canopy.update(dt);
+    // The planted meshes sway on the same gust the cards do — same wavelength,
+    // same speed, same phase — so a tree crossing the 320-520 m handover does
+    // not change how it is moving as it becomes a billboard.
+    this.foliageWind.setWind(_meadowWind, Math.min(1, this.state.windSpeed / 14));
+    this.foliageWind.update(dt);
 
     this.remains.setSun(this.atmosphere.sunDirection, this.atmosphere.sunColor);
 
@@ -1641,6 +1713,10 @@ class App {
     // 3.4 is the sun's full-daylight intensity in `Atmosphere`, so this is
     // "how close to full daylight is it" rather than an arbitrary scale.
     this.water.setSun(_keyDirection, key.color, key.intensity * 1.8, key.intensity / 3.4);
+    (this.uKeyDirection.value as THREE.Vector3).copy(_keyDirection);
+    // Scaled by the light's own intensity so the term follows the sun down: at
+    // dusk a backlit frond should stop glowing along with everything else.
+    (this.uKeyColor.value as THREE.Color).copy(key.color).multiplyScalar(key.intensity / 3.4);
     // The sun moves and the sky follows it, so these have to be refreshed every
     // frame rather than only when a preset is applied.
     //
@@ -2165,6 +2241,7 @@ class App {
           this.meadow.resetClock(start);
           this.stormQuote.reset();
           this.canopy.resetClock(start);
+          this.foliageWind.resetClock(start);
           this.audio.resetClock(start);
           // `resetCinematic` is deliberately *not* here any more — it now runs
           // before the weather seeds above, because those seeds are read from the

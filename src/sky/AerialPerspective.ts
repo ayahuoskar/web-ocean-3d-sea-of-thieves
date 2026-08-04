@@ -204,8 +204,12 @@ export class AerialPerspective {
    * extinction already owns that path and would be charged for twice.
    */
   private airFraction(worldPosition: Node): Node {
+    // The camera's band straddles zero rather than sitting above it, because the
+    // waterline shot puts the eye eight centimetres *under* the surface with half
+    // the frame still in air. A band that only opened above sea level would take
+    // the haze off the sky in exactly the shot that photographs the boundary.
     return smoothstep(-1.5, 1.5, worldPosition.y).mul(
-      smoothstep(-0.5, 1.5, cameraPosition.y),
+      smoothstep(-1.5, 0.6, cameraPosition.y),
     );
   }
 

@@ -1153,6 +1153,21 @@ export class Seafloor {
   }
 
   /**
+   * The cloud deck's shade alone, without the heightfield march.
+   *
+   * For consumers where the march is not worth its compile time. The dressing
+   * bakes to about twenty distinct materials and a raymarch in each of them
+   * takes the first frame from seconds to minutes on a slow shader compiler; the
+   * props are also the case where it matters least, because anything close
+   * enough for its own cast shadow to read is inside the sun's shadow box
+   * already.
+   */
+  cloudShadowNode(worldPosition: unknown): Node {
+    const wp = vec3(worldPosition as Node);
+    return this.cloudShadow === null ? float(1) : this.cloudShadow(wp);
+  }
+
+  /**
    * Routes `keyShadowNode` into this material's own direct lighting. See
    * `core/lightOcclusion` for why that is not the same as multiplying albedo.
    *

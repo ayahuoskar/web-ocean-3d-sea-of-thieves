@@ -89,3 +89,34 @@ once per phase, not once per commit.
 **Headroom is the governing fact.** High costs 3.09 ms of a 16.7 ms budget, so
 there is 13.6 ms to spend. The gaps are worth spending it on; the tier gates are
 what keep Low honest.
+
+---
+
+## What was found that the analysis did not say
+
+Three things, all discovered by rendering rather than by reading.
+
+**Gap 3's dominant term is not the specular.** The analysis attributes the hard
+white blobs to a scalar specular filter plus a crest-foam mask, and both are real
+— but the blobs' *edges* are stair-stepped along bilinear texture patches, which
+is the signature of a steep threshold on a **mip-filtered** field. The
+screen-space derivative cannot see that, because after mip filtering the value
+really is smooth between neighbouring pixels; the sub-footprint second moment
+(`lostSlopeVariance`, already computed for the specular) can. The foam
+band-limit is driven by the larger of the two.
+
+**Shader compile time is a first-class constraint here.** Compiling a
+three-sample cloud shadow into every material that shades ground took the first
+frame of the scene from seconds to minutes on the FXC path this project's
+Playwright configuration forces (`--disable-dawn-features=use_dxc`, which the
+repository documents as necessary on this machine). `mx_fractal_noise_float`
+expands to a large amount of code and a JavaScript `for` loop inlines it once per
+iteration; a TSL `Loop` emits the body once. The dressing's twenty-odd materials
+take the cloud shade only, not the heightfield march.
+
+**Two hooks were nearly wrong in ways that would have looked right.** Wrapping
+`colorNode` to add caustics would have dropped every prop's diffuse *map*
+(`setupDiffuseColor` reads `colorNode ?? materialColor`, and the map lives in the
+second); and the terrain shadow's two-octave caster sits up to three metres above
+the four-octave surface the mesh is built from, which put a hard band of
+self-shadow across the summit until the caster was sunk below it.

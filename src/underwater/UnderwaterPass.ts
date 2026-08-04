@@ -122,6 +122,15 @@ const MAX_GODRAY_STEPS = 64;
 /** ln(10): the extinction that leaves 10% of the contrast at `visibility`. */
 const LN10 = 2.302585092994046;
 
+/**
+ * Fraction of each preset's authored chromatic absorption that is applied.
+ *
+ * Applied here rather than by editing nine presets, because it is one
+ * observation about the medium rather than nine independent look decisions —
+ * see `applyParams`, where the reasoning and the measured ranges are.
+ */
+const ABSORPTION_REACH = 0.5;
+
 /** Clock wrap, seconds. */
 const CLOCK_WRAP = 3600;
 
@@ -734,11 +743,31 @@ export class UnderwaterPass {
     // `extinction` is the per-channel colour of the absorption; `visibility` is
     // the achromatic scattering floor that sets the overall range. Adding them
     // keeps both controls meaningful instead of one overriding the other.
+    //
+    // The absorption is scaled by `ABSORPTION_REACH`, and that constant is the
+    // fix for the reef frame reading as one flat teal value. The ordering was
+    // diagnostic: a medium that is too *dense* loses the far field first and
+    // keeps its foreground, and ours was losing local contrast on the near sand
+    // while still resolving shapes forty metres out. That is the signature of
+    // extinction that is too high at short range.
+    //
+    // The arithmetic bears it out. `skyPro` authors 62 m of visibility and a red
+    // absorption of 0.22/m, which with the floor put 92% of the red gone at ten
+    // metres — so a coral head an arm's length away was already the same colour
+    // as the water behind it, and everything the reef has to offer was being
+    // integrated out before it reached the lens. Green was delivering 21 m of
+    // usable range against the 62 the preset claims.
+    //
+    // Halving the chromatic part keeps the hue behaviour that makes water read
+    // as water — red still goes first, by the same ratio — while moving red's
+    // range from 9 m to 16 m and green's from 21 to 32, which is much closer to
+    // what the preset says it wants. The far field is unaffected: past a couple
+    // of visibility lengths the achromatic floor was always what closed it.
     const floorSigma = LN10 / Math.max(1, p.visibility);
     this.uSigma.value.set(
-      Math.max(0, p.extinction.x) + floorSigma,
-      Math.max(0, p.extinction.y) + floorSigma,
-      Math.max(0, p.extinction.z) + floorSigma,
+      Math.max(0, p.extinction.x) * ABSORPTION_REACH + floorSigma,
+      Math.max(0, p.extinction.y) * ABSORPTION_REACH + floorSigma,
+      Math.max(0, p.extinction.z) * ABSORPTION_REACH + floorSigma,
     );
 
     const depth = Math.max(0, p.cameraDepth);

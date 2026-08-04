@@ -239,7 +239,16 @@ const SPECULAR_AA_VARIANCE_CEIL = 0.004;
  * partially foamed, which is what the widened ramp already returns.
  */
 const FOAM_FOOTPRINT_GAIN = 1.6;
-const FOAM_FOOTPRINT_CEIL = 0.3;
+const FOAM_FOOTPRINT_CEIL = 0.44;
+/**
+ * Weight on the RMS sub-footprint slope when it is the wider of the two signals.
+ *
+ * Above 1 because the fold field is a *derived* quantity — the Jacobian of a
+ * displacement — so its own sub-footprint spread is larger than the slope's, and
+ * the ramp has to cover both sides of the threshold. Tuned on the mid-field of
+ * `clear-day.png`, which is the frame this exists for.
+ */
+const FOAM_VARIANCE_GAIN = 1.5;
 
 /**
  * Where the refracted backdrop starts and finishes yielding to the body colour,
@@ -259,6 +268,17 @@ const FOAM_FOOTPRINT_CEIL = 0.3;
  */
 const REFRACTION_FADE_NEAR = 140;
 const REFRACTION_FADE_FAR = 460;
+
+/**
+ * Baseline over which the seabed gradient is measured for the surf's bearing,
+ * metres.
+ *
+ * Twelve, and both bounds are real. Narrower and the difference is dominated by
+ * the heightfield's own metre-scale relief rather than by the beach's slope, so
+ * the surf line would wander; wider and it stops resolving a headland, so the
+ * sets would run at the same bearing round a corner they should be turning.
+ */
+const SHORE_GRADIENT_EPSILON = 12;
 
 /**
  * Water thickness a backlit crest and a wave body present to the sun, metres.
@@ -1459,8 +1479,27 @@ export class OceanMaterial {
       // wherever the field stops being resolved, and changes nothing up close
       // where it is. Same argument the specular filter makes, one term along.
       const foamArg = biased.add(perturb.mul(0.45)).toVar();
+      // **Two signals, and only one of them can see the problem.**
+      //
+      // `fwidth` measures how much the argument changes between neighbouring
+      // pixels, which is the textbook band-limit and is the right term for the
+      // sub-metre breakup noise. It is blind to the failure that actually
+      // produces the blobs: the Jacobian fold arrives through a *mip-filtered*
+      // texture, so by the time it is read it is already smooth between adjacent
+      // pixels and its derivative is small — while the field it stands for has
+      // been undersampled by a factor of ten. A steep threshold on a
+      // bilinearly-interpolated patch then traces the patch structure, which is
+      // exactly the stair-stepped edges the mid-field shows.
+      //
+      // `lostSlopeVariance` is the complement and is measured for precisely this
+      // — the second moment the footprint averaged away, recovered from the
+      // derivative pass's own alpha channel. Its square root is an RMS slope, so
+      // widening the ramp by it softens the mask exactly where the fold field
+      // has stopped being resolved and leaves it alone where it has not. Same
+      // argument, and the same pair of terms, the specular filter above makes.
       const foamFootprint = abs(dFdx(foamArg))
         .add(abs(dFdy(foamArg)))
+        .max(lostSlopeVariance.sqrt().mul(FOAM_VARIANCE_GAIN))
         .mul(FOAM_FOOTPRINT_GAIN)
         .clamp(0, FOAM_FOOTPRINT_CEIL)
         .toVar();
@@ -1583,10 +1622,59 @@ export class OceanMaterial {
         // exactly how this one read.
         const swash = smoothstepDownClamped(seabed, 0, swell.mul(0.42)).toVar();
 
-        // Sets, travelling shoreward along the wind axis. Two harmonics at
-        // incommensurate wavelengths so the pattern does not visibly repeat, and
-        // a low floor so the lulls are real gaps rather than a dimming.
-        const along = worldPos.xz.dot(this.uWindAxis).toVar();
+        // Sets, travelling **shoreward** — along the local shore normal, not
+        // along the wind.
+        //
+        // This is the readable half of wave refraction. Swell entering shallow
+        // water slows, and the part of a crest that reaches the shallows first
+        // slows first, so the crest swings until it is running square at the
+        // beach: surf arrives parallel to the shore whatever direction the wind
+        // is blowing from. Ours arrived on the wind bearing, so on a curved
+        // coast the sets crossed the beach at an angle on one side and ran along
+        // it on the other, which reads as a moving texture rather than as surf.
+        //
+        // The full fix is to refract the *field*, which would mean warping the
+        // domain the FFT cascades are sampled in — and that field is also what
+        // the buoyancy solver reads on the CPU, so a warp there is a change to
+        // the physics as well as to the picture. It is also the one item in the
+        // gap analysis that no reference shader attempts. What is done instead is
+        // to give the surf its own bearing: the sets are the part a viewer reads
+        // as "the swell is coming in", and inside the surf zone the resolved wave
+        // geometry is centimetres anyway.
+        //
+        // The gradient of *depth* points out to sea, so its negation points up
+        // the beach. Two forward differences over twelve metres: wide enough to
+        // average out the heightfield's own metre-scale relief, narrow enough to
+        // follow a coastline that turns. Behind the same depth test the whole
+        // block is, so only the shoreline strip pays for it.
+        const shoreBearing = vec2(this.uWindAxis.x, this.uWindAxis.y).toVar();
+        {
+          const e = SHORE_GRADIENT_EPSILON;
+          const dDepthX = floorDepth(worldPos.add(vec3(e, 0, 0)))
+            .max(0)
+            .sub(seabed)
+            .toVar();
+          const dDepthZ = floorDepth(worldPos.add(vec3(0, 0, e)))
+            .max(0)
+            .sub(seabed)
+            .toVar();
+          const gradient = vec2(dDepthX, dDepthZ).toVar();
+          // Degenerate on a flat bottom, where there is no shore to point at and
+          // the wind bearing is the honest answer.
+          const slope = gradient.length().toVar();
+          shoreBearing.assign(
+            mix(
+              shoreBearing,
+              gradient.negate().div(slope.max(1e-4)),
+              slope.smoothstep(0.02, 0.12),
+            ),
+          );
+        }
+
+        // Two harmonics at incommensurate wavelengths so the pattern does not
+        // visibly repeat, and a low floor so the lulls are real gaps rather than
+        // a dimming.
+        const along = worldPos.xz.dot(shoreBearing).toVar();
         const setA = sin(along.mul(0.026).sub(this.uSurfPhase.mul(0.62))).toVar();
         const setB = sin(along.mul(0.0111).sub(this.uSurfPhase.mul(0.34))).toVar();
         const sets = setA.mul(0.4).add(setB.mul(0.3)).add(0.44).clamp(0, 1).toVar();

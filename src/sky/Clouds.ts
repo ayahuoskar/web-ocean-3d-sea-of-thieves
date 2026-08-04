@@ -197,6 +197,18 @@ const COVERAGE_QUANTILES: ReadonlyArray<readonly [number, number]> = [
   [1.0, -0.06],
 ];
 
+/**
+ * Octaves the coarse density evaluation keeps.
+ *
+ * Two, against the four the drawn layer uses. The consumers are the ground
+ * shadow and the god-ray march, and both are asking "is there cloud here" rather
+ * than "what shape is it" — the shadow is a low-frequency feature by nature and
+ * the shaft is an integral along a ray. Halving it halves the largest single
+ * arithmetic cost in the fog march, which evaluates this once per cell for every
+ * pixel on the screen.
+ */
+const COARSE_OCTAVES = 2;
+
 /** Softness of the cloud edge in noise units. Crisper = puffier cumulus. */
 const EDGE_WIDTH = 0.1;
 
@@ -477,17 +489,20 @@ export class Clouds {
   /**
    * @param options.samples Points sampled through the layer. Three for a
    *   surface, where the shadow is evaluated once per pixel. One for a consumer
-   *   calling this from inside its own raymarch, where the whole cost is
-   *   multiplied by that march's step count.
-   * @param options.coarse Base field only — no erosion octave, no weather
-   *   lookup. Same reasoning: a shaft is a low-frequency feature and the
-   *   silhouette detail would be integrated away along the ray regardless.
+   *   whose own cost is already multiplied — the fog march calls this per cell,
+   *   and the dressing compiles it into twenty separate materials.
+   *
+   * **The loop is a `Loop`, not a JavaScript `for`, and that is a compile-time
+   * decision rather than a style one.** `densityAt` expands to a four-octave 3D
+   * fractal noise, which is a large amount of code; unrolling three of them into
+   * every consumer took the first frame of the whole scene from seconds to
+   * minutes on the FXC path this project's test harness forces. A dynamic loop
+   * emits the body once. The trade is that the sample count can no longer be a
+   * compile-time constant, which costs nothing here because it never varies
+   * within a build.
    */
-  shadowNode(
-    options: { samples?: number; coarse?: boolean } = {},
-  ): (worldPosition: any) => any {
+  shadowNode(options: { samples?: number } = {}): (worldPosition: any) => any {
     const shadowSamples = Math.max(1, Math.round(options.samples ?? 3));
-    const coarse = options.coarse ?? false;
 
     return (worldPosition: any) => {
       const p = vec3(worldPosition).toVar('cloudShadowP');
@@ -512,16 +527,24 @@ export class Clouds {
       // local question about one point.
       const invSunY = float(1).div(this.uSunDir.y.max(0.06)).toVar('cloudShadowInvY');
 
-      for (let i = 0; i < shadowSamples; i++) {
-        const fraction = (i + 0.5) / shadowSamples;
+      // Sampled once for the whole walk rather than per sample. The samples span
+      // the layer's own thickness, which is a kilometre and a half at most, and
+      // the weather field's features are twenty-two — so the three of them are
+      // inside the same weather by three orders of magnitude, and asking again
+      // would be two more octaves of noise for an identical answer.
+      const weather = this.weatherAt(p).toVar('cloudShadowWeather');
+
+      Loop(shadowSamples, ({ i }: any) => {
+        const fraction = float(i).add(0.5).mul(1 / shadowSamples);
         const level = this.uAltitude.add(this.uThickness.mul(fraction));
         const t = level.sub(p.y).mul(invSunY).max(0);
         const hit = p.add(this.uSunDir.mul(t));
-        // `softness` 1: the shadow is a low-frequency feature by nature and the
-        // detail octave would only alias across the sea surface.
-        const weather = coarse ? float(0.5) : this.weatherAt(hit);
-        acc.addAssign(this.densityAt(hit, float(1), weather, coarse));
-      }
+        // `softness` 1 and `coarse`: the shadow is a low-frequency feature by
+        // nature, and at full softness the erosion octave's *contribution* is
+        // already multiplied by zero — so skipping the call is free in the image
+        // and saves a three-octave 3D noise in every material that shades ground.
+        acc.addAssign(this.densityAt(hit, float(1), weather, true));
+      });
 
       // Beer-Lambert along the *sun path* through the layer, not down its
       // vertical thickness. With the sun low the ray crosses far more cloud than
@@ -607,11 +630,16 @@ export class Clouds {
   }
 
   /**
-   * @param coarse Skips the erosion octave and evaluates only the base field.
-   *   `softness` already fades the octave's *contribution* to zero, but the
-   *   noise call still happens — and for a consumer that is sampling this from
+   * @param coarse Skips the erosion octave and evaluates the base field at
+   *   `COARSE_OCTAVES` instead of four.
+   *
+   *   `softness` already fades the erosion octave's *contribution* to zero, but
+   *   the noise call still happens — and for a consumer sampling this from
    *   inside another raymarch, the call is the entire cost. A build-time flag is
-   *   the only way to actually not pay it.
+   *   the only way to actually not pay it. The base field is cut for the same
+   *   reason and with the same argument: what a shadow or a shaft needs is where
+   *   the cloud is, which is the first two octaves; the rest is silhouette
+   *   detail that is integrated along the ray before anyone sees it.
    */
   private densityAt(p: any, softness: any, weather: any, coarse = false): any {
     const h = this.heightFraction(p);
@@ -623,7 +651,9 @@ export class Clouds {
     const profile = smoothstep(0.0, 0.12, h).mul(smoothstepDown(h, 0.42, 1.0));
 
     const q = p.sub(this.uWindOffset).mul(NOISE_SCALE);
-    const base = mx_fractal_noise_float(q, 4, 2.0, 0.5, 1.0).mul(0.5).add(0.5);
+    const base = mx_fractal_noise_float(q, coarse ? COARSE_OCTAVES : 4, 2.0, 0.5, 1.0)
+      .mul(0.5)
+      .add(0.5);
 
     // A second, higher-frequency field erodes the billow edges so the silhouette
     // is not a smooth blob. Centred on zero so it breaks edges up without
