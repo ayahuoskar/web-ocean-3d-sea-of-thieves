@@ -178,13 +178,28 @@ export class AerialPerspective {
     sunDir: THREE.Vector3,
     sunColor: THREE.Color,
   ): void {
-    // Normalised to unit mean, so the per-channel split redistributes the
-    // preset's density between the channels rather than changing how much haze
-    // there is in total. A preset tuned for a look keeps that look and gains a
-    // hue gradient it did not have.
+    // Normalised so the **luminance-weighted** mean is 1, not the arithmetic
+    // mean, and the difference is measurable rather than pedantic.
+    //
+    // The point of normalising at all is that the per-channel split should
+    // redistribute the preset's density between the channels without changing
+    // how much haze a viewer sees — a preset tuned for a look keeps that look
+    // and gains a hue gradient it did not have. But "how much haze a viewer
+    // sees" is a *luminance* quantity, and luminance is 72% green. Dividing by
+    // the arithmetic mean put green at 0.82, so the far field was extinguished
+    // 18% less than by the scalar fog this replaced — and `gallery-jitter`
+    // caught it: high-frequency energy in the band under the horizon rose 10.7%
+    // with the band's mean luminance essentially unchanged, which is the
+    // signature of *less crushing* rather than of more noise. The distant sea
+    // was showing more of its own sampling error because less haze was sitting
+    // on top of it.
+    //
+    // Weighting by Rec. 709 puts green back at ~1.03 — the rate the presets were
+    // calibrated against — while red at 0.44 and blue at 2.30 keep the hue shift
+    // that is the whole reason for doing this per channel.
     this.beta.copy(betaR).add(betaM);
-    const mean = (this.beta.x + this.beta.y + this.beta.z) / 3;
-    if (mean > 0) this.beta.multiplyScalar(1 / mean);
+    const weighted = 0.2126 * this.beta.x + 0.7152 * this.beta.y + 0.0722 * this.beta.z;
+    if (weighted > 0) this.beta.multiplyScalar(1 / weighted);
     else this.beta.set(1, 1, 1);
     this.uBeta.value.copy(this.beta);
 

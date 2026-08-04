@@ -2,7 +2,6 @@ import * as THREE from 'three/webgpu';
 import {
   Fn,
   If,
-  abs,
   cameraPosition,
   float,
   linearDepth,
@@ -222,35 +221,6 @@ const SPECULAR_AA_SCREEN_SPACE_VARIANCE = 0.5;
 const SPECULAR_AA_VARIANCE_CEIL = 0.004;
 
 /**
- * How far the crest-foam ramp is widened per unit of its own screen footprint,
- * and how wide it may get.
- *
- * The mask is a `smoothstep` over a Jacobian fold, and a threshold on an
- * undersampled field has no gradient at its boundary: it is fully on in one
- * pixel and fully off in the next. That is what makes the mid-field whitecaps in
- * `clear-day.png` read as torn paper — hard-edged white blobs and dark holes
- * rather than foam.
- *
- * The gain is above 1 because the ramp has to cover the footprint on *both*
- * sides of the threshold and `fwidth` reports the total change across one pixel;
- * 1.6 leaves a little margin for the fold field's own curvature inside the
- * footprint. The ceiling stops a pixel straddling a whole wave from dissolving
- * the mask entirely — past that the correct answer is that the pixel is
- * partially foamed, which is what the widened ramp already returns.
- */
-const FOAM_FOOTPRINT_GAIN = 1.6;
-const FOAM_FOOTPRINT_CEIL = 0.44;
-/**
- * Weight on the RMS sub-footprint slope when it is the wider of the two signals.
- *
- * Above 1 because the fold field is a *derived* quantity — the Jacobian of a
- * displacement — so its own sub-footprint spread is larger than the slope's, and
- * the ramp has to cover both sides of the threshold. Tuned on the mid-field of
- * `clear-day.png`, which is the frame this exists for.
- */
-const FOAM_VARIANCE_GAIN = 1.5;
-
-/**
  * Where the refracted backdrop starts and finishes yielding to the body colour,
  * metres.
  *
@@ -278,6 +248,17 @@ const REFRACTION_FADE_FAR = 460;
  * the surf line would wander; wider and it stops resolving a headland, so the
  * sets would run at the same bearing round a corner they should be turning.
  */
+/**
+ * Where the foam's sub-metre breakup noise fades out, metres.
+ *
+ * Its octaves run from 0.7 m down to about 8 cm. At 400 m a pixel covers roughly
+ * a third of a metre along the view and far more across it, so the whole field
+ * is below the sampling rate; what it adds past there is high-frequency energy
+ * with no feature behind it.
+ */
+const FOAM_BREAKUP_NEAR = 180;
+const FOAM_BREAKUP_FAR = 520;
+
 const SHORE_GRADIENT_EPSILON = 12;
 
 /**
@@ -1469,7 +1450,16 @@ export class OceanMaterial {
       }
       // Centre the noise on zero so it perturbs the mask both ways instead of
       // only ever eating into it.
-      const perturb = breakup.sub(0.5).toVar();
+      //
+      // Faded out with distance, which *is* band-limiting the field rather than
+      // the edge. Its finest octave is a sub-metre feature; past a few hundred
+      // metres that is well under a pixel, so what it contributes there is not
+      // texture, it is noise with no scale — the same argument the wave cascades'
+      // shading fade and the rain rings both make. Up close nothing changes.
+      const perturb = breakup
+        .sub(0.5)
+        .mul(smoothstepDownClamped(viewDistance, FOAM_BREAKUP_NEAR, FOAM_BREAKUP_FAR))
+        .toVar();
 
       // A wide smoothstep keeps the boundary soft; the noise decides *where* that
       // boundary falls, which reads as texture rather than as a fading blob.
@@ -1488,34 +1478,37 @@ export class OceanMaterial {
       // wherever the field stops being resolved, and changes nothing up close
       // where it is. Same argument the specular filter makes, one term along.
       const foamArg = biased.add(perturb.mul(0.45)).toVar();
-      // **Two signals, and only one of them can see the problem.**
+      // **The ramp is not widened at all, and that is a result rather than an
+      // omission.**
       //
-      // `fwidth` measures how much the argument changes between neighbouring
-      // pixels, which is the textbook band-limit and is the right term for the
-      // sub-metre breakup noise. It is blind to the failure that actually
-      // produces the blobs: the Jacobian fold arrives through a *mip-filtered*
-      // texture, so by the time it is read it is already smooth between adjacent
-      // pixels and its derivative is small — while the field it stands for has
-      // been undersampled by a factor of ten. A steep threshold on a
-      // bilinearly-interpolated patch then traces the patch structure, which is
-      // exactly the stair-stepped edges the mid-field shows.
+      // Widening a threshold by the footprint of its own argument is the textbook
+      // band-limit, it is what the specular filter above legitimately does, and it
+      // was implemented here twice — once driven by `lostSlopeVariance` and once
+      // by `fwidth`. Both were rejected on measurement. `gallery-jitter` puts
+      // far-field high-frequency energy at Medium at 2.09 for the mask as it
+      // stands, 2.56 with the `fwidth` widening and 2.94 with the variance one,
+      // against a 2.33 ceiling.
       //
-      // `lostSlopeVariance` is the complement and is measured for precisely this
-      // — the second moment the footprint averaged away, recovered from the
-      // derivative pass's own alpha channel. Its square root is an RMS slope, so
-      // widening the ramp by it softens the mask exactly where the fold field
-      // has stopped being resolved and leaves it alone where it has not. Same
-      // argument, and the same pair of terms, the specular filter above makes.
-      const foamFootprint = abs(dFdx(foamArg))
-        .add(abs(dFdy(foamArg)))
-        .max(lostSlopeVariance.sqrt().mul(FOAM_VARIANCE_GAIN))
-        .mul(FOAM_FOOTPRINT_GAIN)
-        .clamp(0, FOAM_FOOTPRINT_CEIL)
-        .toVar();
-      const crestFoam = foamArg
-        .smoothstep(float(0.12).sub(foamFootprint), float(0.78).add(foamFootprint))
-        .clamp(0, 1)
-        .toVar();
+      // The mechanism is worth recording because it is counter-intuitive and the
+      // next reader will have the same idea. A steep threshold on a noisy
+      // argument produces a **binary** field: its Laplacian is large, but only on
+      // sparse edges, and saturation hides everything either side of them. A ramp
+      // wide enough to cover the sub-footprint spread maps that noise
+      // *continuously*, so every pixel in the band carries a share of it. The
+      // blobs soften and the noise floor rises. Widening band-limits the *edge*;
+      // it does not band-limit the *field*, and the field is what the mip chain
+      // lost. `fwidth` is no better than the variance here for the same reason it
+      // is no help to the specular: it is the derivative of a quantity that is
+      // itself undersampled, so in the far field it reports a large number
+      // because the wave, not the noise, moved.
+      //
+      // What *is* correct is fading the field itself where it stops being
+      // resolvable, which is what the breakup noise above now does, and what the
+      // refracted backdrop and the specular's slope-space filter do in their own
+      // terms. The mask's remaining hard edges at mid distance are a real and
+      // acknowledged limit, and the honest fix for them is a temporal resolve
+      // this renderer deliberately does not have.
+      const crestFoam = foamArg.smoothstep(0.12, 0.78).clamp(0, 1).toVar();
 
       // --- accumulated foam ---------------------------------------------------
       // Wake and any other persistent deposit, read from the world-anchored

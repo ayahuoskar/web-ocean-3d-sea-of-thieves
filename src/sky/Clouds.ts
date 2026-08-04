@@ -11,6 +11,7 @@ import {
   float,
   interleavedGradientNoise,
   max,
+  min,
   mix,
   mx_fractal_noise_float,
   normalize,
@@ -132,6 +133,31 @@ const PLANET_RADIUS = 1.5e6;
  * alpha fade below handles the last degree.
  */
 const GRAZE_FLOOR = 0.0005;
+
+/**
+ * Longest path through the shell that is actually marched, in layer thicknesses.
+ *
+ * The sphere bounds the crossing where the flat slab could not — but it bounds it
+ * at about 15 km near the horizon, and a fixed step count divided into that is
+ * 1200 m a step through a 700 m layer at Medium. Adjacent pixels then land at
+ * completely different heights *inside* the layer, so the vertical profile term
+ * swings between them and the horizon band boils. `gallery-jitter` measured it:
+ * far-field high-frequency energy at Medium went to 2.954 against a 2.33 ceiling,
+ * while High — the same march at twice the steps — stayed inside its own.
+ *
+ * Capping the *integration* is not capping the geometry. The shell still curves,
+ * the deck still converges, and `tEnter` still walks out to the horizon; what
+ * stops is accumulating along a path whose far end the step count cannot resolve.
+ * Seven thicknesses is past where the transmittance of anything worth drawing has
+ * already closed, and it puts the horizon step at 400 m even at Medium.
+ *
+ * This is the same quantity the flat slab clamped at ten, and it is worth being
+ * clear that its return is not a retreat: there it was load-bearing, hiding a
+ * span that ran to infinity, and it needed a four-degree horizon fade on top to
+ * cover what it could not. Here it is a sampling bound on a crossing that is
+ * finite either way.
+ */
+const MAX_SPAN_FACTOR = 7;
 
 /** Feature scale of the base noise: 1 noise unit ~= 1/NOISE_SCALE metres. */
 const NOISE_SCALE = 0.00055;
@@ -725,9 +751,10 @@ export class Clouds {
       const result = vec4(0, 0, 0, 0).toVar('cloudResult');
 
       const tEnter = this.shellDistance(ro, rd, this.uAltitude).max(0).toVar('tEnter');
-      const tExit = this.shellDistance(ro, rd, this.uAltitude.add(this.uThickness))
-        .max(0)
-        .toVar('tExit');
+      const tExit = min(
+        this.shellDistance(ro, rd, this.uAltitude.add(this.uThickness)).max(0),
+        tEnter.add(this.uThickness.mul(MAX_SPAN_FACTOR)),
+      ).toVar('tExit');
 
       If(tExit.greaterThan(tEnter), () => {
         const stepSize = tExit.sub(tEnter).mul(this.uInvSteps).toVar('cloudStep');
