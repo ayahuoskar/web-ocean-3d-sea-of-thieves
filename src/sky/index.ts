@@ -6,3 +6,5 @@ export type { CloudParams } from './Clouds.ts';
 
 export { Weather } from './Weather.ts';
 export type { WeatherKind } from './Weather.ts';
+
+export { AerialPerspective } from './AerialPerspective.ts';

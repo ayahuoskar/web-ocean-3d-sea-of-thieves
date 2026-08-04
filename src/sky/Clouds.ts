@@ -11,7 +11,7 @@ import {
   float,
   interleavedGradientNoise,
   max,
-  min,
+  mix,
   mx_fractal_noise_float,
   normalize,
   positionGeometry,
@@ -23,6 +23,7 @@ import {
   vec4,
 } from 'three/tsl';
 import { smoothstepDown } from '../core/tslMath';
+import type { AerialPerspective } from './AerialPerspective';
 
 /**
  * Raymarched volumetric cloud layer.
@@ -83,11 +84,95 @@ const MAX_STEPS = 96;
 /** Secondary samples taken toward the sun per march step. */
 const LIGHT_STEPS = 4;
 
-/** Longest slab crossing we will march, as a multiple of `thickness`. */
-const MAX_SPAN_FACTOR = 10;
+/**
+ * Radius the cloud layer is wrapped on, metres.
+ *
+ * The layer used to be a flat slab, and a flat slab is why the sky stopped: the
+ * crossing had to be clamped to ten thicknesses or a grazing ray marched to
+ * infinity, and then everything below 4 degrees of elevation was faded out to
+ * hide the clamp. The result is `clear-day.png` — uniformly sized puffs at
+ * uniform spacing all the way out, ending in a band with clear sky underneath
+ * it. A real deck converges: puffs shrink and crowd together into the haze
+ * because the layer is falling away with the curvature of the earth.
+ *
+ * Wrapping it on a sphere is eight lines and it bounds the crossing *naturally*,
+ * which was the actual reason grazing rays were a problem in the first place.
+ * The horizon crossing comes out around 15 km against the slab's clamped 7, and
+ * it arrives at a finite distance instead of at infinity.
+ *
+ * **1500 km, not the earth's 6371.** This is a free parameter and reinder picks
+ * the same order of magnitude in `MdGfzh` for the same reason: it exaggerates the
+ * convergence, so a deck reads as a deck within the few kilometres this scene
+ * actually spans rather than needing a hundred. The horizon distance for a 1.4 km
+ * layer falls from 134 km to 65 km, which is where a viewer expects to see the
+ * puffs merge.
+ */
+const PLANET_RADIUS = 1.5e6;
+
+/**
+ * Floor on the ray's vertical component for the shell intersection.
+ *
+ * A sphere has an intersection for a ray pointed *down* as well — on the far
+ * side, through the planet. Rather than test for that, rays at or below the
+ * horizon are treated as horizon rays, which is what they look like anyway: the
+ * layer converged into the haze. The sea draws over them regardless, and the
+ * alpha fade below handles the last degree.
+ */
+const GRAZE_FLOOR = 0.0005;
 
 /** Feature scale of the base noise: 1 noise unit ~= 1/NOISE_SCALE metres. */
 const NOISE_SCALE = 0.00055;
+
+/**
+ * Feature scale of the weather field, and how far it moves the coverage
+ * threshold.
+ *
+ * `uThreshold` is one scalar over the whole hemisphere, which is exactly why
+ * `clear-day.png` and `waves.png` show an even field of near-identical puffs:
+ * every part of the sky has the same coverage because the shader was told so.
+ * A real sky has regions. `4dSBDt` gates its fine field on a very low-frequency
+ * lookup for this, and 22 km is the scale at which a viewer reads "it is
+ * clearing over there".
+ *
+ * Sampled once per main-march step and reused for that step's four light
+ * samples, which are only a few hundred metres away — three orders of magnitude
+ * inside the field's own feature size, so the reuse is exact to any precision
+ * that matters and turns five noise calls a step into one.
+ */
+const WEATHER_SCALE = 1 / 22000;
+const WEATHER_AMOUNT = 0.2;
+
+/**
+ * Multiple-scattering approximation: octaves, and how each one differs.
+ *
+ * A single Beer term drives thick cloud to flat grey, because it says all the
+ * light that was not transmitted is gone. It is not — it scattered, and in a
+ * medium with an albedo as close to 1 as a water cloud it scatters many times
+ * before it leaves. That is why the interior of a cumulus glows instead of going
+ * black, and a renderer without it produces exactly the flat lighting the gap
+ * analysis describes.
+ *
+ * The approximation is Hillaire's (Frostbite, 2016): sum a few orders, each
+ * seeing less extinction, contributing less energy, and being more isotropic
+ * than the last. Three terms, no extra density samples — the optical depth is
+ * already in hand and this is three more `exp`s on it.
+ *
+ * Normalised by the contribution sum so a sample at zero optical depth returns
+ * what a single Beer term returned. The extra light therefore lands where it
+ * physically belongs — deep in the cloud — rather than as a global brightening.
+ */
+const MS_OCTAVES = 3;
+/** Energy of each successive order. */
+const MS_ATTENUATION = 0.5;
+/** Extinction each successive order sees. */
+const MS_EXTINCTION = 0.42;
+/** How much of the phase function each successive order keeps. */
+const MS_PHASE = 0.55;
+const MS_NORM = (() => {
+  let sum = 0;
+  for (let n = 0; n < MS_OCTAVES; n++) sum += Math.pow(MS_ATTENUATION, n);
+  return sum;
+})();
 
 /**
  * Measured quantiles of `mx_fractal_noise_float(p, 4, 2, 0.5, 1) * 0.5 + 0.5`,
@@ -117,6 +202,22 @@ const EDGE_WIDTH = 0.1;
 
 /** Strength of the single-scattering term with the sun fully above the horizon. */
 const SUN_GAIN = 1.5;
+
+/**
+ * Bounds on the combined phase function.
+ *
+ * The raw Henyey-Greenstein spike at `g = 0.76` is about thirty at zero
+ * scattering angle, which blows the disc around the sun to flat white. The
+ * ceiling was 3.2, and the gap analysis is right that it was damaging the
+ * forward peak: a silver lining is *supposed* to be several times the ambient,
+ * and clipping it at 3.2 flattened the one feature that tells a viewer the sun
+ * is behind that cloud. 6.5 keeps the lining and still stops the disc.
+ */
+const PHASE_MIN = 0.3;
+const PHASE_MAX = 6.5;
+
+/** Value of the normalised phase function for isotropic scattering. */
+const PHASE_ISOTROPIC = 1;
 
 function coverageToThreshold(coverage: number): number {
   const c = Math.min(1, Math.max(0, coverage));
@@ -172,6 +273,19 @@ export class Clouds {
   private readonly uLightStep = uniform(175);
   private readonly uSunGain = uniform(SUN_GAIN);
   private readonly uAmbientGain = uniform(0.55);
+  /**
+   * Ambient reaching the *top* of the layer.
+   *
+   * Written from the atmosphere's zenith colour, so the light a cloud top
+   * receives is the sky that is actually over it. The base keeps
+   * `shadowColor * ambientGain`, which is the darker, sea-facing end.
+   */
+  private readonly uAmbientTop: any = uniform(new THREE.Color(0.62, 0.72, 0.86));
+  /** How far the weather field is allowed to move the coverage threshold. */
+  private readonly uWeatherAmount = uniform(0);
+
+  /** Shared haze, so the deck fades into the same air the island does. */
+  private aerial: AerialPerspective | null = null;
 
   constructor() {
     this.params = {
@@ -229,6 +343,31 @@ export class Clouds {
 
   getParams(): Readonly<CloudParams> {
     return this.params;
+  }
+
+  /**
+   * The haze the deck dissolves into. Must be set before the node is built to
+   * take effect — `buildCloudNode` runs in the constructor — so this is a
+   * constructor-time dependency expressed as a setter only because `Clouds` is
+   * built before `Atmosphere` is.
+   */
+  setAerialPerspective(aerial: AerialPerspective): void {
+    if (this.aerial === aerial) return;
+    this.aerial = aerial;
+    this.material.colorNode = this.buildCloudNode();
+    this.material.needsUpdate = true;
+  }
+
+  /**
+   * The sky the layer is lit by, from the same source the water and the dome
+   * read. Uniform writes only.
+   */
+  setSkyColors(zenith: THREE.Color): void {
+    // Cloud tops are bright: they see the whole upper hemisphere plus what the
+    // deck around them bounces. The zenith radiance alone is the sky *behind*
+    // them and reads as a grey top, so it is lifted toward the sunlit cloud
+    // colour by a fixed fraction rather than used raw.
+    this.uAmbientTop.value.copy(zenith).lerp(this.params.color, 0.45).multiplyScalar(1.35);
   }
 
   setSunDirection(dir: THREE.Vector3): void {
@@ -296,6 +435,14 @@ export class Clouds {
 
     this.uLightStep.value = (p.thickness / LIGHT_STEPS) * 1.1;
 
+    // The weather field vanishes at both ends of the coverage range, which is
+    // not a fudge: a clear sky and a solid overcast are both *uniform*, and it is
+    // only the broken states in between that have regions. Without the taper a
+    // storm at 0.95 coverage would develop blue holes and a clear day would grow
+    // a bank.
+    const c = Math.min(1, Math.max(0, p.coverage));
+    this.uWeatherAmount.value = WEATHER_AMOUNT * 4 * c * (1 - c);
+
     this.windVector.set(Math.cos(p.windDirection), 0, Math.sin(p.windDirection));
   }
 
@@ -327,39 +474,65 @@ export class Clouds {
    * Bound against the same uniforms as the cloud node, including the wind offset,
    * so the shade drifts with the deck that casts it.
    */
-  shadowNode(): (worldPosition: any) => any {
+  /**
+   * @param options.samples Points sampled through the layer. Three for a
+   *   surface, where the shadow is evaluated once per pixel. One for a consumer
+   *   calling this from inside its own raymarch, where the whole cost is
+   *   multiplied by that march's step count.
+   * @param options.coarse Base field only — no erosion octave, no weather
+   *   lookup. Same reasoning: a shaft is a low-frequency feature and the
+   *   silhouette detail would be integrated away along the ray regardless.
+   */
+  shadowNode(
+    options: { samples?: number; coarse?: boolean } = {},
+  ): (worldPosition: any) => any {
+    const shadowSamples = Math.max(1, Math.round(options.samples ?? 3));
+    const coarse = options.coarse ?? false;
+
     return (worldPosition: any) => {
       const p = vec3(worldPosition).toVar('cloudShadowP');
-      // Distance along the sun ray to the middle of the slab. Floored on the sun
-      // elevation: at a grazing sun the true path is enormous and the plane-
-      // parallel approximation stops meaning anything, so the shadow is allowed
-      // to soften out rather than stretch to the horizon.
-      const mid = this.uAltitude.add(this.uThickness.mul(0.5));
-      const t = mid.sub(p.y).div(this.uSunDir.y.max(0.25)).max(0).toVar('cloudShadowT');
-      const hit = p.add(this.uSunDir.mul(t)).toVar('cloudShadowHit');
 
-      // `softness` 1: the shadow is a low-frequency feature by nature and the
-      // detail octave would only alias across the sea surface.
-      const d = this.densityAt(hit, float(1)).toVar('cloudShadowD');
-
-      // Beer-Lambert along the *sun path* through the slab, not down its
-      // vertical thickness. With the sun low the ray crosses far more cloud than
-      // the slab is deep — `thickness / sun.y` — which is why shadows lengthen
-      // and deepen toward evening. Using the vertical thickness made a shadow at
-      // 20 degrees elevation as light as one at noon.
+      // Three samples through the layer, not one, and this is the fix for a
+      // defect the previous implementation documented but did not solve: with
+      // one sample the walk had to be floored on the sun's elevation, and below
+      // about 14 degrees the floored distance stops reaching the slab at all —
+      // so the sample lands *outside* the layer and the shadow **vanishes**
+      // rather than deepening. Sunset and the tour's squall beat are exactly
+      // those cases, and they are the two where a cloud shadow matters most.
       //
-      // Capped at four slab thicknesses by the same 0.25 floor on `sun.y` that
-      // bounds the walk. Note what that floor costs below 14 degrees of sun
-      // elevation: the sample point stops reaching the slab's midpoint, so the
-      // density it returns is whatever is at the capped distance — which can be
-      // *outside* the layer entirely, and the shadow then vanishes rather than
-      // merely stopping deepening. Sunset presets are the case, and the correct
-      // fix is a short march rather than one sample.
-      const pathLength = this.uThickness.div(this.uSunDir.y.max(0.25)).toVar();
+      // The march makes the floor unnecessary. Each sample is placed at a fixed
+      // fraction of the way up the layer and the walk to it is computed
+      // per-sample, so a grazing sun simply travels further between them; there
+      // is no distance at which the samples leave the slab, because they are
+      // defined by where they are *in* it.
+      const acc = float(0).toVar('cloudShadowAcc');
+      // Floored only against a division by zero. Rays from a sun on the horizon
+      // travel enormously far, which is correct — that is why evening shadows
+      // are long — and the sphere is not involved here because the shadow is a
+      // local question about one point.
+      const invSunY = float(1).div(this.uSunDir.y.max(0.06)).toVar('cloudShadowInvY');
+
+      for (let i = 0; i < shadowSamples; i++) {
+        const fraction = (i + 0.5) / shadowSamples;
+        const level = this.uAltitude.add(this.uThickness.mul(fraction));
+        const t = level.sub(p.y).mul(invSunY).max(0);
+        const hit = p.add(this.uSunDir.mul(t));
+        // `softness` 1: the shadow is a low-frequency feature by nature and the
+        // detail octave would only alias across the sea surface.
+        const weather = coarse ? float(0.5) : this.weatherAt(hit);
+        acc.addAssign(this.densityAt(hit, float(1), weather, coarse));
+      }
+
+      // Beer-Lambert along the *sun path* through the layer, not down its
+      // vertical thickness. With the sun low the ray crosses far more cloud than
+      // the layer is deep, which is why shadows lengthen and deepen toward
+      // evening. Bounded at sixteen thicknesses by the floor on `sun.y` above.
+      const pathLength = this.uThickness.mul(invSunY).toVar();
 
       // Never to zero: a shaded sea is darker, not black, because the sky around
       // the cloud still lights it.
-      return d
+      return acc
+        .mul(1 / shadowSamples)
         .mul(pathLength)
         .mul(this.uShadowStrength)
         .negate()
@@ -368,8 +541,80 @@ export class Clouds {
     };
   }
 
-  private densityAt(p: any, softness: any): any {
-    const h = p.y.sub(this.uAltitude).div(this.uThickness);
+  /**
+   * Height above the wrapped surface, metres, computed without cancellation.
+   *
+   * `length(p + (0, R, 0)) - R` is the obvious spelling and it is unusable in
+   * float32: both terms are 1.5e6, so the subtraction throws away everything
+   * below about a quarter of a metre. The algebraically identical
+   * `(|p|² - R²) / (|p| + R)` never forms the difference of two large numbers,
+   * and `|p|² - R²` expands to terms that are all small except `2 y R`.
+   */
+  private radialAltitude(p: any): any {
+    const lateral = p.x.mul(p.x).add(p.z.mul(p.z));
+    const numerator = lateral.add(p.y.mul(p.y)).add(p.y.mul(2 * PLANET_RADIUS));
+    const radius = lateral.add(p.y.add(PLANET_RADIUS).mul(p.y.add(PLANET_RADIUS))).sqrt();
+    return numerator.div(radius.add(PLANET_RADIUS));
+  }
+
+  /** Position in the layer, 0 at its base and 1 at its top. */
+  private heightFraction(p: any): any {
+    return this.radialAltitude(p).sub(this.uAltitude).div(this.uThickness);
+  }
+
+  /**
+   * Distance along `rd` from `ro` to the shell at altitude `altitude`.
+   *
+   * Written as `-c / (b + sqrt(b² - c))` rather than as `-b + sqrt(b² - c)`.
+   * They are the same root; the second one subtracts two numbers that agree to
+   * five digits when the ray is steep, and loses most of the answer's precision
+   * doing it. This form is a division of small by large and keeps all of it.
+   */
+  private shellDistance(ro: any, rd: any, altitude: any): any {
+    // `b = dot(ro + (0,R,0), rd)`, with the large term kept separate so adding
+    // R to ro.y cannot round ro.y away first.
+    const b = ro.x
+      .mul(rd.x)
+      .add(ro.z.mul(rd.z))
+      .add(ro.y.mul(rd.y))
+      .add(rd.y.mul(PLANET_RADIUS))
+      .toVar('cloudShellB');
+    // `c = |ro + (0,R,0)|² - (R + altitude)²`, expanded so the R² terms cancel
+    // symbolically instead of numerically.
+    const c = ro.x
+      .mul(ro.x)
+      .add(ro.z.mul(ro.z))
+      .add(ro.y.mul(ro.y))
+      .add(ro.y.mul(2 * PLANET_RADIUS))
+      .sub(altitude.mul(2 * PLANET_RADIUS))
+      .sub(altitude.mul(altitude))
+      .toVar('cloudShellC');
+
+    const disc = b.mul(b).sub(c).max(0).sqrt().toVar('cloudShellDisc');
+    return c.negate().div(max(b.add(disc), 1e-3));
+  }
+
+  /**
+   * Coverage at the 20 km scale, so the sky has weather in it.
+   *
+   * Two octaves is enough: this exists to make one part of the hemisphere
+   * clearer than another, and detail below its own feature size would only be a
+   * second copy of the field the density function already has.
+   */
+  private weatherAt(p: any): any {
+    const q = vec3(p.x, 0, p.z).sub(this.uWindOffset).mul(WEATHER_SCALE);
+    return mx_fractal_noise_float(q, 2, 2.0, 0.5, 1.0).mul(0.5).add(0.5);
+  }
+
+  /**
+   * @param coarse Skips the erosion octave and evaluates only the base field.
+   *   `softness` already fades the octave's *contribution* to zero, but the
+   *   noise call still happens — and for a consumer that is sampling this from
+   *   inside another raymarch, the call is the entire cost. A build-time flag is
+   *   the only way to actually not pay it.
+   */
+  private densityAt(p: any, softness: any, weather: any, coarse = false): any {
+    const h = this.heightFraction(p);
 
     // Flat base, rounded top — the cumulus profile in ref-default.png. Raising
     // the threshold toward the top and bottom of the slab (rather than only
@@ -391,15 +636,21 @@ export class Clouds {
     // What the eye actually reads as weather is the silhouette changing —
     // billows growing and eroding in place — and that is a second offset through
     // the noise field rather than a faster one along the wind.
-    const detail = mx_fractal_noise_float(
-      q.mul(4.3).add(vec3(7.3, 2.1, 5.7)).add(this.uEvolution),
-      3,
-      2.0,
-      0.5,
-      1.0,
-    ).mul(0.5);
+    const detail = coarse
+      ? null
+      : mx_fractal_noise_float(
+          q.mul(4.3).add(vec3(7.3, 2.1, 5.7)).add(this.uEvolution),
+          3,
+          2.0,
+          0.5,
+          1.0,
+        ).mul(0.5);
 
-    const edge = this.uThreshold.add(float(1).sub(profile).mul(0.22));
+    // The weather field moves the threshold, so coverage varies across the sky
+    // instead of being one number for the whole hemisphere.
+    const edge = this.uThreshold
+      .add(float(1).sub(profile).mul(0.22))
+      .add(weather.sub(0.5).mul(this.uWeatherAmount));
     const width = float(EDGE_WIDTH).add(softness.mul(0.4));
 
     // The erosion octave fades out as the march coarsens.
@@ -414,105 +665,146 @@ export class Clouds {
     // the march cannot resolve is not detail, it is noise, so it is faded rather
     // than sampled. Same reasoning as the wave cascades' geometry fade.
     const detailFade = float(1).sub(softness).clamp(0, 1);
-    const shaped = smoothstep(edge, edge.add(width), base.add(detail.mul(detailFade).mul(0.3)));
+    const field =
+      detail === null ? base : base.add(detail.mul(detailFade).mul(0.3));
+    const shaped = smoothstep(edge, edge.add(width), field);
 
     return shaped.mul(profile).mul(this.uDensity);
   }
 
   private buildCloudNode(): any {
     return Fn(() => {
-      const rd = normalize(positionGeometry).toVar('cloudRd');
+      const view = normalize(positionGeometry).toVar('cloudView');
       const ro = cameraPosition.toVar('cloudRo');
 
+      // Rays at or below the horizon are marched as horizon rays. On a sphere
+      // they would otherwise find the shell on the far side, through the planet;
+      // and what they should look like *is* the horizon — the layer converged
+      // into the haze — so the floor produces the right image as well as a safe
+      // one. The alpha fade at the end removes the last degree, where the sea
+      // takes over.
+      const rd = normalize(
+        vec3(view.x, max(view.y, GRAZE_FLOOR), view.z),
+      ).toVar('cloudRd');
+
       const result = vec4(0, 0, 0, 0).toVar('cloudResult');
-      const up = rd.y.toVar('cloudUp');
 
-      If(up.greaterThan(0.015), () => {
-        const hBottom = this.uAltitude.sub(ro.y);
-        const hTop = this.uAltitude.add(this.uThickness).sub(ro.y);
+      const tEnter = this.shellDistance(ro, rd, this.uAltitude).max(0).toVar('tEnter');
+      const tExit = this.shellDistance(ro, rd, this.uAltitude.add(this.uThickness))
+        .max(0)
+        .toVar('tExit');
 
-        const tEnter = max(hBottom.div(up), 0.0).toVar('tEnter');
-        const tExitRaw = max(hTop.div(up), 0.0);
-        // Grazing rays cross an enormous span; clamping keeps the step size —
-        // and therefore the banding — bounded near the horizon.
-        const tExit = min(tExitRaw, tEnter.add(this.uThickness.mul(MAX_SPAN_FACTOR))).toVar('tExit');
+      If(tExit.greaterThan(tEnter), () => {
+        const stepSize = tExit.sub(tEnter).mul(this.uInvSteps).toVar('cloudStep');
+        // Offsetting each pixel's first sample turns the raymarch's concentric
+        // banding into fine noise, which reads as cloud texture instead of as
+        // contour lines. Interleaved gradient noise rather than a plain hash:
+        // a 2D hash of the pixel coordinate leaves visible diagonal hatching at
+        // these step counts, IGN does not.
+        const jitter = interleavedGradientNoise(screenCoordinate);
+        const t = tEnter.add(stepSize.mul(jitter)).toVar('cloudT');
 
-        If(tExit.greaterThan(tEnter), () => {
-          const stepSize = tExit.sub(tEnter).mul(this.uInvSteps).toVar('cloudStep');
-          // Offsetting each pixel's first sample turns the raymarch's concentric
-          // banding into fine noise, which reads as cloud texture instead of as
-          // contour lines. Interleaved gradient noise rather than a plain hash:
-          // a 2D hash of the pixel coordinate leaves visible diagonal hatching at
-          // these step counts, IGN does not.
-          const jitter = interleavedGradientNoise(screenCoordinate);
-          const t = tEnter.add(stepSize.mul(jitter)).toVar('cloudT');
+        const transmittance = float(1).toVar('cloudTr');
+        const scattered = vec3(0, 0, 0).toVar('cloudScatter');
 
-          const transmittance = float(1).toVar('cloudTr');
-          const scattered = vec3(0, 0, 0).toVar('cloudScatter');
+        const cosTheta = dot(rd, this.uSunDir).toVar('cloudCos');
+        // Strong forward lobe + a weak backward lobe: the forward term is what
+        // makes cloud edges glow when the sun is behind them.
+        const phase = clamp(
+          hg(cosTheta, 0.76).mul(0.75).add(hg(cosTheta, -0.2).mul(0.25)).mul(12.566),
+          PHASE_MIN,
+          PHASE_MAX,
+        ).toVar('cloudPhase');
 
-          const cosTheta = dot(rd, this.uSunDir).toVar('cloudCos');
-          // Strong forward lobe + a weak backward lobe: the forward term is what
-          // makes cloud edges glow when the sun is behind them. The raw HG spike
-          // is ~30x at zero scattering angle, which blows the disc around the sun
-          // to pure white, so it is clamped to a usable silver-lining range.
-          const phase = clamp(
-            hg(cosTheta, 0.76).mul(0.75).add(hg(cosTheta, -0.2).mul(0.25)).mul(12.566),
-            0.35,
-            3.2,
-          ).toVar('cloudPhase');
+        const softness = clamp(stepSize.mul(0.0032), 0.0, 1.0).toVar('cloudLod');
 
-          const softness = clamp(stepSize.mul(0.0032), 0.0, 1.0).toVar('cloudLod');
+        Loop(this.uSteps, () => {
+          const p = ro.add(rd.mul(t)).toVar('cloudP');
+          // One weather sample per step, shared with this step's light march —
+          // see WEATHER_SCALE for why that is exact rather than approximate.
+          const weather = this.weatherAt(p).toVar('cloudWeather');
+          const d = this.densityAt(p, softness, weather).toVar('cloudD');
 
-          Loop(this.uSteps, () => {
-            const p = ro.add(rd.mul(t));
-            const d = this.densityAt(p, softness).toVar('cloudD');
-
-            If(d.greaterThan(0.002), () => {
-              // --- single-scattering: transmittance toward the sun ------------
-              const lightAcc = float(0).toVar('cloudLightAcc');
-              Loop(LIGHT_STEPS, ({ i }: any) => {
-                const lp = p.add(this.uSunDir.mul(this.uLightStep.mul(float(i).add(1.0))));
-                lightAcc.addAssign(this.densityAt(lp, softness));
-              });
-              const lightT = exp(
-                lightAcc.mul(this.uLightStep).mul(this.uExtinction).negate(),
-              ).toVar('cloudLightT');
-
-              // Powder term — darkens the parts of the cloud facing the viewer
-              // that are optically thin, which reads as internal structure.
-              const powder = float(1).sub(exp(d.mul(-2.4)));
-
-              const sunTerm = lightT.mul(phase).mul(powder).mul(this.uSunGain);
-              const lum = this.uShadowColor
-                .mul(this.uAmbientGain)
-                .add(this.uColor.mul(sunTerm))
-                .toVar('cloudLum');
-
-              const sampleT = exp(d.mul(stepSize).mul(this.uExtinction).negate());
-              // Energy-conserving analytic integration over the step.
-              scattered.addAssign(lum.mul(float(1).sub(sampleT)).mul(transmittance));
-              transmittance.mulAssign(sampleT);
+          If(d.greaterThan(0.002), () => {
+            // --- optical depth toward the sun -------------------------------
+            const lightAcc = float(0).toVar('cloudLightAcc');
+            Loop(LIGHT_STEPS, ({ i }: any) => {
+              const lp = p.add(this.uSunDir.mul(this.uLightStep.mul(float(i).add(1.0))));
+              lightAcc.addAssign(this.densityAt(lp, softness, weather));
             });
+            const opticalDepth = lightAcc
+              .mul(this.uLightStep)
+              .mul(this.uExtinction)
+              .toVar('cloudOd');
 
-            t.addAssign(stepSize);
+            // Powder term — darkens the optically thin parts of the cloud facing
+            // the viewer, which reads as internal structure. First order only:
+            // it is a near-surface effect, and the deeper orders are precisely
+            // the light that has stopped caring where the surface was.
+            const powder = float(1).sub(exp(d.mul(-2.4))).toVar('cloudPowder');
 
-            If(transmittance.lessThan(0.01), () => {
-              Break();
-            });
+            const sunTerm = float(0).toVar('cloudSun');
+            for (let n = 0; n < MS_OCTAVES; n++) {
+              const attenuation = Math.pow(MS_ATTENUATION, n);
+              const extinction = Math.pow(MS_EXTINCTION, n);
+              const phaseWeight = Math.pow(MS_PHASE, n);
+              const order = exp(opticalDepth.mul(-extinction))
+                .mul(mix(float(PHASE_ISOTROPIC), phase, phaseWeight))
+                .mul(attenuation);
+              sunTerm.addAssign(n === 0 ? order.mul(powder) : order);
+            }
+            sunTerm.mulAssign(this.uSunGain.mul(1 / MS_NORM));
+
+            // Ambient graded by depth in the layer.
+            //
+            // This was one constant — `shadowColor * ambientGain` — identical at
+            // the base of a 1400 m column and at its top, and it is most of why
+            // the deck read flat. The base of a cumulus sees the sea and its own
+            // underside; the top sees the whole sky. Grading between the two is
+            // the single substitution that makes a puff read as a volume.
+            const height = this.heightFraction(p).clamp(0, 1).toVar('cloudH');
+            const ambient = mix(
+              this.uShadowColor.mul(this.uAmbientGain),
+              this.uAmbientTop,
+              height,
+            ).toVar('cloudAmbient');
+
+            const lum = ambient.add(this.uColor.mul(sunTerm)).toVar('cloudLum');
+
+            const sampleT = exp(d.mul(stepSize).mul(this.uExtinction).negate());
+            // Energy-conserving analytic integration over the step.
+            scattered.addAssign(lum.mul(float(1).sub(sampleT)).mul(transmittance));
+            transmittance.mulAssign(sampleT);
           });
 
-          // Aerial perspective: the deck has to dissolve into haze with distance
-          // or the slab reads as a hard ceiling with a cut-off edge. Kept gentle
-          // — too strong and full overcast stops reaching the horizon.
-          const distanceFade = exp(tEnter.mul(-0.000012));
-          result.assign(vec4(scattered, float(1).sub(transmittance).mul(distanceFade)));
+          t.addAssign(stepSize);
+
+          If(transmittance.lessThan(0.01), () => {
+            Break();
+          });
         });
+
+        // The deck dissolves into the same haze the sea and the island dissolve
+        // into, rather than into an exponential of its own. The layer has fog
+        // disabled and is drawn on a camera-locked dome, so `scene.fogNode`
+        // never reaches it and the shared function is called by hand.
+        const lit =
+          this.aerial === null
+            ? scattered
+            : this.aerial.apply(scattered, tEnter, rd);
+        result.assign(vec4(lit, float(1).sub(transmittance)));
       });
 
-      // Fade the slab out at the horizon, where it would otherwise stretch to
-      // infinity along a grazing ray.
-      const horizonFade = smoothstep(0.015, 0.075, up);
-      const alpha = clamp(result.w.mul(horizonFade), 0.0, 1.0);
+      // Full alpha right down to the horizon line, and gone a third of a degree
+      // below it where the sea takes over.
+      //
+      // The fade this replaced ran from 0.9 degrees to 4.3, and it was not a
+      // horizon fade at all — it was hiding a flat slab that stretched to
+      // infinity along a grazing ray. That is what left clear sky under the
+      // cloud field in `clear-day.png`. The sphere bounds the crossing on its
+      // own, so what is left here is only the job of not drawing cloud where the
+      // water is.
+      const alpha = clamp(result.w.mul(smoothstep(-0.006, -0.0005, view.y)), 0.0, 1.0);
 
       return vec4(result.xyz, alpha);
     })();

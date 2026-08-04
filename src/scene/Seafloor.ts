@@ -905,6 +905,7 @@ export class Seafloor {
   /** March steps for the terrain's own shadow; 0 leaves the island unshadowed. */
   private readonly uShadowSteps: Node = uniform(24, 'int');
   private causticsNode: Node = null;
+  private cloudShadow: ((worldPosition: Node) => Node) | null = null;
   private occlusionAttached = false;
   private disposed = false;
 
@@ -1121,40 +1122,51 @@ export class Seafloor {
   }
 
   /**
-   * Wires the two occlusion terms the island's key light needs.
+   * Supplies the cloud deck's shade, which the island receives along with its
+   * own. Call before anything reads `keyShadowNode`.
+   */
+  setCloudShadow(cloudShadow: (worldPosition: Node) => Node): void {
+    this.cloudShadow = cloudShadow;
+  }
+
+  /**
+   * How much key light reaches a world point, 0..1 — the island's own shadow
+   * times the cloud deck's.
    *
    * Both are analytic functions of world position rather than rasterised maps,
    * and both are unavailable to the shadow map for structural reasons: the
    * island is four times wider than the sun's +/-260 m shadow box, and the cloud
-   * deck is a procedural field with no geometry to render. See
-   * `core/lightOcclusion` for how they reach the direct term.
+   * deck is a procedural field with no geometry to render.
    *
-   * Idempotent — a second call replaces nothing and wraps nothing twice, so a
-   * tier change cannot stack occlusion factors.
+   * Public because the things standing *on* the island need the same answer the
+   * island gets. A hillside with a shaded face and a fully-lit forest on it is
+   * worse than no shadow at all.
+   */
+  keyShadowNode(worldPosition: unknown): Node {
+    const wp = vec3(worldPosition as Node);
+    const terrain = this.nodes.sunShadow(wp, this.uKeyDir, this.uShadowSteps);
+    if (this.cloudShadow === null) return terrain;
+    // Multiplied rather than taken as a minimum: a hillside in its own shadow
+    // under a cloud is darker than either alone, because the two occluders are
+    // independent.
+    return terrain.mul(this.cloudShadow(wp));
+  }
+
+  /**
+   * Routes `keyShadowNode` into this material's own direct lighting. See
+   * `core/lightOcclusion` for why that is not the same as multiplying albedo.
+   *
+   * Idempotent — a second call wraps nothing twice, so a tier change cannot
+   * stack occlusion factors.
    *
    * @param light The key light. `Atmosphere` retargets the same light to the
    *   moon after sunset, which is why the direction is a separate uniform rather
    *   than being read off the light.
-   * @param cloudShadow `Clouds.shadowNode()`, or null to leave the land in
-   *   permanent sun.
    */
-  setKeyLight(light: THREE.DirectionalLight, cloudShadow: ((wp: Node) => Node) | null): void {
+  setKeyLight(light: THREE.DirectionalLight): void {
     if (this.occlusionAttached) return;
     this.occlusionAttached = true;
-
-    const factor = Fn(() => {
-      const wp = positionWorld.toVar();
-      const terrain = this.nodes
-        .sunShadow(wp, this.uKeyDir, this.uShadowSteps)
-        .toVar('terrainKeyShadow');
-      if (cloudShadow === null) return terrain;
-      // Multiplied rather than taken as a minimum: a hillside in its own shadow
-      // under a cloud is darker than either alone, because the two occluders are
-      // independent.
-      return terrain.mul(cloudShadow(wp));
-    })();
-
-    occludeLight(this.material, light, factor);
+    occludeLight(this.material, light, Fn(() => this.keyShadowNode(positionWorld))());
   }
 
   /** Direction toward the key light, world space. Cheap; call it per frame. */

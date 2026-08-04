@@ -17,6 +17,7 @@ import {
   ISLAND,
   Ship,
   SurfaceWetness,
+  applyGroundShadingTo,
 } from './scene';
 import { AudioSystem, DEFAULT_AUDIO_SCENE_PARAMS } from './audio';
 import {
@@ -36,7 +37,7 @@ import { Reflections } from './ocean/Reflections';
 import { DEFAULT_SSR_STEPS, ScreenSpaceReflection } from './ocean/ScreenSpaceReflection';
 import { OceanSampler } from './ocean/Sampler';
 import { DEFAULT_SPECTRUM, significantWaveHeight } from './ocean/Spectrum';
-import { Atmosphere, Clouds, Weather } from './sky';
+import { AerialPerspective, Atmosphere, Clouds, Weather } from './sky';
 import { VolumetricFog } from './post/VolumetricFog';
 import { LensRain } from './post/LensRain';
 import { ColorGrade } from './post/ColorGrade';
@@ -130,6 +131,7 @@ class App {
   private sampler!: OceanSampler;
 
   private atmosphere!: Atmosphere;
+  private aerial!: AerialPerspective;
   private clouds!: Clouds;
   private weather!: Weather;
   /** Gulls over the play area. Owns no simulation state — see `Birds`. */
@@ -298,10 +300,19 @@ class App {
     this.sampler = new OceanSampler(this.renderer, this.simulation);
     this.waveHeightNode = this.simulation.heightNode();
 
+    // Before the seafloor, the water and the canopy, all three of which sample
+    // the cloud shadow field — and every one of those bindings is baked into a
+    // node graph at construction. Built here rather than with the rest of the
+    // sky purely so the ordering is impossible to get wrong.
+    this.clouds = new Clouds();
+
     boot.set(0.4, 'Building seafloor…');
     // The seafloor must exist before the water material: the surface samples its
     // depth to shade shallows, and that binding is baked into the node graph.
     this.seafloor = new Seafloor(4000);
+    // And the cloud shade before anything asks the seafloor for its combined key
+    // occlusion — the canopy does, at its own construction.
+    this.seafloor.setCloudShadow(this.clouds.shadowNode());
     this.scene.add(this.seafloor.mesh);
 
     // The foam buffer must exist before the water material too, and for the same
@@ -339,12 +350,6 @@ class App {
       this.ssr.setCamera(this.camera);
     }
 
-    // Before the water material, and for the same reason as the seafloor and the
-    // foam buffer: the surface samples the cloud shadow field, and that binding
-    // is baked into its node graph. Built here rather than with the rest of the
-    // sky purely so the ordering is impossible to get wrong.
-    this.clouds = new Clouds();
-
     boot.set(0.5, 'Compiling water shaders…');
     this.water = this.buildWaterMaterial();
     this.oceanMesh = new OceanMesh(this.water.material, {
@@ -356,6 +361,23 @@ class App {
     boot.set(0.7, 'Building atmosphere…');
     this.atmosphere = new Atmosphere(this.renderer);
     this.scene.add(this.atmosphere.mesh, this.atmosphere.sunLight, this.atmosphere.ambientLight);
+
+    // One haze for the whole frame.
+    //
+    // As `scene.fogNode`, so three applies it after lighting to every material
+    // that has not opted out — terrain, props, hull, canopy and water all at
+    // once, with no per-material plumbing and no chance of one of them being
+    // forgotten. Which is exactly what had happened: the water had an authored
+    // exponential, the volumetric pass is a sea fog that clear presets switch
+    // off, and the island had nothing at all.
+    //
+    // Assigned before any material compiles, because the fog node is part of
+    // every one of their cache keys.
+    this.aerial = new AerialPerspective();
+    this.scene.fogNode = this.aerial.node;
+    // The cloud layer draws with `fog = false` on a camera-locked dome, so it
+    // never reaches `setupFog` and has to be handed the same function directly.
+    this.clouds.setAerialPerspective(this.aerial);
 
     this.scene.add(this.clouds.mesh);
 
@@ -384,8 +406,17 @@ class App {
     // Distant canopy. The island's trees are LOD2 specks from the play area and
     // the biome in the terrain colour cannot give a dome a broken edge, so past
     // the last mesh LOD the forest becomes billboards. See `src/scene/Canopy.ts`.
-    this.canopy = new IslandCanopy(quality.canopy, (worldPosition) =>
-      this.seafloor.heightNode(worldPosition),
+    this.canopy = new IslandCanopy(
+      quality.canopy,
+      (worldPosition) => this.seafloor.heightNode(worldPosition),
+      {
+        // The forest takes the cloud deck's shade and the hill's own shadow.
+        // Without this it goes on being fully lit across a hillside that now has
+        // a shaded face — a canopy floating over its own shadow, which reads
+        // worse than the flat lighting it replaced.
+        sunOcclusion: (worldPosition) =>
+          this.seafloor.keyShadowNode(worldPosition),
+      },
     );
     this.scene.add(this.canopy.object);
 
@@ -433,7 +464,7 @@ class App {
     // The two occlusion terms the land had neither of: its own hillside, and the
     // cloud deck overhead. Both rebuild the sand shader, so like the caustics
     // they are wired here at setup and never from a frame path.
-    this.seafloor.setKeyLight(this.atmosphere.sunLight, this.clouds.shadowNode());
+    this.seafloor.setKeyLight(this.atmosphere.sunLight);
     // The volumetric march picks its caustics mip level from this, so it has to
     // be told after the field exists — see `uCausticsTexel`.
     this.underwater.setCausticsTexelSize(this.caustics.extent / this.caustics.resolution);
@@ -450,6 +481,15 @@ class App {
     // Required: a post pass draws with the post-processor's own orthographic
     // quad camera, so the scene camera has to be handed over explicitly.
     this.fog.setCamera(this.camera);
+    // Crepuscular rays above the water. The march had every ingredient except an
+    // occlusion term; this is it, and the deck casting it is the same field the
+    // clouds are drawn from, so a shaft lands under the cloud that made it.
+    //
+    // The cheapest variant on offer — one sample, base field only. This is
+    // evaluated once per march cell and Max marches 56 of them, so the
+    // three-sample surface variant would be a hundred and sixty-eight noise
+    // evaluations a pixel for a feature that is by nature low-frequency.
+    this.fog.setSunOcclusion(this.clouds.shadowNode({ samples: 1, coarse: true }));
 
     // Fog wraps the underwater pass, not the other way round.
     //
@@ -810,6 +850,17 @@ class App {
       // Props share materials with the hull through the loader's cache;
       // `adopt` de-duplicates, so this is a no-op for anything already tracked.
       this.wetness.adopt(props.object);
+      // Everything placed on the ground learns about the ground: contact
+      // darkening at its base, the caustic pattern if it is under water, and the
+      // island's own shadow and the cloud deck's if it is not. See
+      // `scene/groundShading`. One pass over the tree, one treatment per
+      // distinct material.
+      applyGroundShadingTo(props.object, {
+        light: this.atmosphere.sunLight,
+        keyShadow: (worldPosition) => this.seafloor.keyShadowNode(worldPosition),
+        caustics: (worldPosition) => this.caustics.intensityNode(worldPosition),
+        groundHeight: (worldPosition) => this.seafloor.heightNode(worldPosition),
+      });
 
       for (const floater of props.floaters) {
         this.buoyancy.add(
@@ -1600,12 +1651,35 @@ class App {
     // better answer wherever it is active, so the analytic one yields to it
     // rather than the two being summed.
     const fogPreset = getPreset(this.state.preset).fog;
+    const hazeDensity = fogPreset.density * (1 - 0.75 * this.state.fogDensity);
     this.water.setSky(
       this.atmosphere.zenithColor,
       this.atmosphere.horizonColor,
       fogPreset.color,
-      fogPreset.density * (1 - 0.75 * this.state.fogDensity),
+      // Zero: the shared aerial perspective owns this now, for the sea as well
+      // as for the land. Two independent haze terms meeting at the shoreline is
+      // precisely the horizon step the gap analysis describes, and the water's
+      // was the one that could not know what colour the sky was in a given
+      // direction. The uniform stays wired so a future caller can put a
+      // surface-local term back without re-plumbing the material.
+      0,
     );
+    // Everything the haze has to agree with, from the same atmosphere the dome
+    // and the water read. Uniform writes; no rebuild.
+    this.aerial.setSky(
+      this.atmosphere.betaRayleigh,
+      this.atmosphere.betaMie,
+      fogPreset.color,
+      hazeDensity,
+      this.atmosphere.horizonColor,
+      this.atmosphere.zenithColor,
+      this.atmosphere.sunDirection,
+      this.atmosphere.sunColor,
+    );
+    // Cloud tops are lit by the sky over them, and the environment capture has
+    // to know how much of that sky is cloud.
+    this.clouds.setSkyColors(this.atmosphere.zenithColor);
+    this.atmosphere.setCloudCoverage(this.clouds.getParams().coverage);
 
     // Rain reaches the water. Only rain does — snow settles far too slowly to
     // punch a ring into a surface, and driving this from `weather.intensity`

@@ -4,9 +4,12 @@ import {
   attribute,
   cameraPosition,
   float,
+  fract,
   mix,
+  mx_fractal_noise_float,
   normalize,
   positionGeometry,
+  sin,
   uniform,
   varying,
   vec2,
@@ -111,6 +114,31 @@ const CANOPY_SUNLIT = new THREE.Color(0.062, 0.078, 0.036);
 const CANOPY_SHADE = new THREE.Color(0.026, 0.034, 0.02);
 /** The flowering accent, on a small fraction of cards. See `bloom` below. */
 const CANOPY_BLOOM = new THREE.Color(0.44, 0.1, 0.03);
+/**
+ * Dry, sun-bleached canopy — the yellower stand on an exposed spur.
+ *
+ * Warmer and lighter than either of the greens above, but not by much: it is a
+ * different *stand* of the same forest, not a different biome, and pushing it
+ * further turns the hillside patchy rather than varied.
+ */
+const CANOPY_DRY = new THREE.Color(0.072, 0.07, 0.03);
+
+/**
+ * Feature width of the stand-variation field, metres, and how far it and the
+ * per-instance term are each allowed to push the tone.
+ *
+ * Two scales, because they do different jobs. The field makes one part of the
+ * hillside browner than another, which is what a viewer reads as a forest having
+ * regions; the per-instance term breaks up neighbouring crowns, which is what
+ * stops a region reading as a flat wash. Either alone looks wrong — the field on
+ * its own gives smooth blotches of identical cards, and the instance term on its
+ * own gives uniform noise.
+ */
+const STAND_FIELD_METRES = 150;
+const STAND_FIELD_WEIGHT = 0.62;
+const STAND_INSTANCE_WEIGHT = 0.38;
+/** Peak-to-peak brightness jitter the combined tone applies. */
+const STAND_VALUE_RANGE = 0.42;
 
 /** Sway: metres of crown travel at full wind, and the wave that carries it. */
 const SWAY_WAVELENGTH = 90;
@@ -123,6 +151,15 @@ const CLOCK_WRAP = 3600;
 
 export interface IslandCanopyOptions {
   seed?: number;
+  /**
+   * How much key light reaches a world point, 0..1. Sampled once per card, at
+   * its foot, in the vertex stage.
+   *
+   * A constructor input rather than a setter because the material is built once
+   * and the sample has to be inside its graph. Everything it needs — the cloud
+   * field and the heightfield — exists before the canopy is planted.
+   */
+  sunOcclusion?: (worldPosition: unknown) => unknown;
 }
 
 function clampCount(count: number): number {
@@ -195,6 +232,29 @@ export class IslandCanopy {
   private readonly uSunlit = uniform(new THREE.Color(CANOPY_SUNLIT));
   private readonly uShade = uniform(new THREE.Color(CANOPY_SHADE));
   private readonly uBloom = uniform(new THREE.Color(CANOPY_BLOOM));
+  /**
+   * The colour the dry patches go.
+   *
+   * Twenty-four thousand cards were two tones between them — `mix(shade,
+   * sunlit, cornerY)` and nothing else — which is the whole of the bubble-wrap
+   * read: identical round blobs at identical tone tile into a texture rather
+   * than into a forest. `4ttSWf` gives each tree a per-instance material offset
+   * *and* runs a low-frequency `brownAreas` field across the whole canopy, and
+   * the two together are what make its hillside vary in tone across its width.
+   */
+  private readonly uDry = uniform(new THREE.Color(CANOPY_DRY));
+
+  /**
+   * How much key light reaches a card, 0..1. Evaluated per vertex.
+   *
+   * Per vertex rather than per fragment, and that is not a compromise: a card is
+   * a few metres across, a cloud shadow is hundreds and the hill's own shadow is
+   * larger still, so four samples per card is far above the rate either field
+   * needs. It is also the only affordable place — the canopy is drawn with heavy
+   * overdraw across a hillside, and a heightfield march per fragment would be
+   * paid several times over for every pixel.
+   */
+  private readonly sunOcclusion: ((worldPosition: Node) => Node) | null;
 
   private readonly groundHeight: (worldPosition: Node) => Node;
 
@@ -205,6 +265,7 @@ export class IslandCanopy {
   ) {
     this.count = clampCount(count);
     this.groundHeight = groundHeight;
+    this.sunOcclusion = (options.sunOcclusion as ((p: Node) => Node) | undefined) ?? null;
 
     this.geometry = buildCardGeometry();
     attachInstanceAttributes(this.geometry, options.seed ?? CANOPY_SEED);
@@ -317,6 +378,10 @@ export class IslandCanopy {
     const corner = positionGeometry as Node;
     const shade = varying(float(0), 'canopyShade') as Node;
     const bloomMix = varying(float(0), 'canopyBloom') as Node;
+    /** Stand tone, 0 lush to 1 dry. See STAND_FIELD_METRES. */
+    const stand = varying(float(0), 'canopyStand') as Node;
+    /** Key light reaching this card, 0..1. */
+    const keyLight = varying(float(1), 'canopyKey') as Node;
 
     // `Fn`, not a plain closure. TSL only maintains an assignment stack while an
     // `Fn` callback is executing, and the two `varying(...).assign(...)` calls
@@ -391,6 +456,34 @@ export class IslandCanopy {
       // happens to stand.
       bloomMix.assign(seed.w.smoothstep(0.978, 0.998).mul(0.7));
 
+      // Stand tone: a broad field across the island, plus a per-crown offset.
+      //
+      // The hash is a sine hash, which `Seafloor` deliberately refuses to use —
+      // and the distinction is real rather than inconsistent. There the noise has
+      // to agree between a float64 CPU evaluation and a float32 GPU one, because
+      // buoyancy and prop seating read the same field the mesh is built from.
+      // Nothing on the CPU has an opinion about what colour a card is.
+      const field = mx_fractal_noise_float(
+        vec3n(foot.x, 0, foot.y).mul(1 / STAND_FIELD_METRES),
+        3,
+        2.0,
+        0.5,
+        1.0,
+      )
+        .mul(0.5)
+        .add(0.5);
+      const crown = fract(sin(seed.z.mul(127.1).add(seed.w.mul(311.7))).mul(43758.5453));
+      stand.assign(
+        field.mul(STAND_FIELD_WEIGHT).add(crown.mul(STAND_INSTANCE_WEIGHT)).clamp(0, 1),
+      );
+
+      // Cloud shade and the hill's own shadow, sampled at the card's foot.
+      keyLight.assign(
+        this.sunOcclusion === null
+          ? float(1)
+          : this.sunOcclusion(vec3n(foot.x, ground.add(CARD_HEIGHT * 0.4), foot.y)),
+      );
+
       return world;
     })();
 
@@ -434,17 +527,30 @@ export class IslandCanopy {
       // what survives a kilometre of air is the mass, not the modelling.
       const lit = mix(this.uShade, this.uSunlit, shade.smoothstep(-0.45, 1.15));
       const flowering = mix(lit, this.uBloom, bloomMix.mul(shade.smoothstep(0.35, 1)));
+      // Stand variation, in hue and in value. The hue term is weighted toward the
+      // dry end so most of the forest stays green and the browner stands read as
+      // exposure rather than as a second species; the value term is symmetric
+      // about 1, so it varies the canopy without changing how bright it is on
+      // average — which matters, because this field is most of the island's
+      // luminance at range.
+      const varied = mix(flowering, this.uDry, stand.smoothstep(0.5, 0.95).mul(0.7));
+      const value = stand.sub(0.5).mul(STAND_VALUE_RANGE).add(1);
 
       // Sun contributes by elevation only. There is no normal on a card worth
       // the name, and inventing one from the uv gives a lighting seam down the
       // middle of every clump; what a canopy actually does at this range is get
       // brighter as the sun climbs, which is this.
+      //
+      // `keyLight` is the cloud deck and the hillside between the card and the
+      // sun. Without it the forest went on being fully lit across a hill whose
+      // own shading now has a lit face and a shaded one — a canopy floating over
+      // its own shadow, which reads worse than no shadow at all.
       const sun = this.uSunDir.y.max(0).smoothstep(0, 0.4);
       const light = this.uAmbient
         .mul(0.55)
-        .add(this.uSunColor.mul(sun.mul(0.8)));
+        .add(this.uSunColor.mul(sun.mul(0.8)).mul(keyLight));
 
-      return vec4(flowering.mul(light), alpha);
+      return vec4(varied.mul(light).mul(value), alpha);
     })();
 
     return material;

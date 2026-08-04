@@ -21,3 +21,4 @@ export {
   seafloorHeight,
   type SeafloorOptions,
 } from './Seafloor';
+export { applyGroundShading, applyGroundShadingTo, type GroundShadingInputs } from './groundShading';

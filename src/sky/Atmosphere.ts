@@ -81,7 +81,39 @@ const SKY_RADIUS = 100;
 /** Distance the directional light is parked at along the sun vector. */
 const SUN_LIGHT_DISTANCE = 3000;
 
-const ENV_SIZE = 128;
+/**
+ * Environment cube face size.
+ *
+ * 256, up from 128. The capture feeds every PBR material's specular
+ * probe through the PMREM chain, and at 128 the roughest mips were being built
+ * from a face barely wider than the blur kernel. The dome is analytic and the
+ * capture is throttled (see `updateEnvironment`), so four times the pixels is a
+ * cost that does not show up in a frame.
+ */
+const ENV_SIZE = 256;
+
+/**
+ * How much of the sky's own chroma survives a full overcast.
+ *
+ * Not zero, which is what it effectively was. See the overcast block in
+ * `buildSkyNode`.
+ */
+const OVERCAST_DESATURATION = 0.74;
+
+/** How far a full cloud deck darkens the sky the environment capture sees. */
+const CLOUD_ENV_DARKEN = 0.62;
+
+/**
+ * How far the key light has to move before the environment is re-captured.
+ *
+ * About a quarter of a degree. The capture is six render passes and the
+ * irradiance it produces is a low-order average, so re-running it for every
+ * sub-degree step of the tour's sun is pure cost. Gating on the *value* rather
+ * than on a frame counter keeps it deterministic: the same sequence of sun
+ * angles from the same reset produces the same sequence of captures, which is
+ * what the visual harness rests on.
+ */
+const ENV_ANGLE_EPSILON = 0.0045;
 
 /**
  * Preetham returns scene-referred radiance in the tens; this maps it onto the
@@ -271,6 +303,15 @@ export class Atmosphere {
   private readonly envTarget: THREE.CubeRenderTarget;
   private readonly envCamera: THREE.CubeCamera;
   private envDirty = true;
+  /**
+   * Set when something other than the light's *direction* changed.
+   *
+   * The direction throttle below must never swallow a turbidity, overcast or
+   * night change: those alter the capture at a fixed sun angle, so a preset
+   * switch that happened to leave the sun where it was would otherwise keep the
+   * previous preset's image-based light indefinitely.
+   */
+  private envForce = true;
   private envScene3D: THREE.Scene | null = null;
 
   private readonly _sunDirection = new THREE.Vector3(0, 1, 0);
@@ -330,6 +371,14 @@ export class Atmosphere {
   // colour uniform to a float-ish node, which blocks legitimate vec3 chaining.
   private readonly uGround: any = uniform(new THREE.Color(0.05, 0.09, 0.13));
   private readonly uSunDiscVisible = uniform(1);
+  /**
+   * Cloud coverage, applied to the dome **only while the environment is being
+   * captured**. Zero in the view, where the marched layer draws the real thing.
+   */
+  private readonly uEnvCloudAmount = uniform(0);
+  private cloudCoverage = 0;
+  /** Key direction at the last capture, for the throttle. */
+  private readonly envCapturedDir = new THREE.Vector3(0, -2, 0);
   private readonly uMoonDiscCos = uniform(0.9995);
   private readonly uTime = uniform(0);
 
@@ -512,6 +561,21 @@ export class Atmosphere {
    * threshold is the same `smoothstepScalar(-0.06, 0.1, sunY)` the light itself
    * uses and two copies of it would drift.
    */
+  /**
+   * The scattering coefficients the dome is currently built from.
+   *
+   * Published so the shared aerial perspective can take its *hue* from the same
+   * atmosphere rather than from a hand-picked triple. Deriving the two
+   * independently is how a horizon step gets into a frame.
+   */
+  get betaRayleigh(): THREE.Vector3 {
+    return this.uBetaR.value as THREE.Vector3;
+  }
+
+  get betaMie(): THREE.Vector3 {
+    return this.uBetaM.value as THREE.Vector3;
+  }
+
   get keyDirection(): THREE.Vector3 {
     return smoothstepScalar(-0.06, 0.1, this._sunDirection.y) > 0.001
       ? this._sunDirection
@@ -526,6 +590,8 @@ export class Atmosphere {
   setParams(params: Partial<AtmosphereParams>): void {
     const p = this.params;
     let changed = false;
+    /** Anything but the light's own bearing. See `envForce`. */
+    let structural = false;
 
     if (params.sunElevation !== undefined && params.sunElevation !== p.sunElevation) {
       p.sunElevation = params.sunElevation;
@@ -538,30 +604,37 @@ export class Atmosphere {
     if (params.turbidity !== undefined && params.turbidity !== p.turbidity) {
       p.turbidity = params.turbidity;
       changed = true;
+      structural = true;
     }
     if (params.rayleigh !== undefined && params.rayleigh !== p.rayleigh) {
       p.rayleigh = params.rayleigh;
       changed = true;
+      structural = true;
     }
     if (params.mieCoefficient !== undefined && params.mieCoefficient !== p.mieCoefficient) {
       p.mieCoefficient = params.mieCoefficient;
       changed = true;
+      structural = true;
     }
     if (params.mieDirectionalG !== undefined && params.mieDirectionalG !== p.mieDirectionalG) {
       p.mieDirectionalG = params.mieDirectionalG;
       changed = true;
+      structural = true;
     }
     if (params.overcast !== undefined && params.overcast !== p.overcast) {
       p.overcast = params.overcast;
       changed = true;
+      structural = true;
     }
     if (params.exposure !== undefined && params.exposure !== p.exposure) {
       p.exposure = params.exposure;
       changed = true;
+      structural = true;
     }
     if (params.nightIntensity !== undefined && params.nightIntensity !== p.nightIntensity) {
       p.nightIntensity = params.nightIntensity;
       changed = true;
+      structural = true;
     }
     if (params.moonElevation !== undefined && params.moonElevation !== p.moonElevation) {
       p.moonElevation = params.moonElevation;
@@ -574,11 +647,13 @@ export class Atmosphere {
     if (params.groundColor !== undefined && !p.groundColor.equals(params.groundColor)) {
       p.groundColor.copy(params.groundColor);
       changed = true;
+      structural = true;
     }
 
     if (!changed) return;
     this.applyParams();
     this.envDirty = true;
+    if (structural) this.envForce = true;
   }
 
   /** Read-only view of the currently applied parameters. */
@@ -591,20 +666,50 @@ export class Atmosphere {
    * Cheap to call every frame: it is a no-op unless a parameter actually changed
    * or the target scene changed.
    */
+  /**
+   * How cloudy the environment capture should think the sky is, 0..1.
+   *
+   * Wired from the same coverage the cloud layer is drawn at, so the light an
+   * object receives and the deck a viewer sees come from one number.
+   */
+  setCloudCoverage(coverage: number): void {
+    const c = Math.min(1, Math.max(0, coverage));
+    if (c === this.cloudCoverage) return;
+    this.cloudCoverage = c;
+    this.envDirty = true;
+    this.envForce = true;
+  }
+
   updateEnvironment(renderer: THREE.WebGPURenderer, scene: THREE.Scene): void {
     if (!this.envDirty && this.envScene3D === scene) return;
+    // Throttled on how far the key light has actually moved. `setParams` marks
+    // the capture dirty for any change including a sub-degree step of the tour's
+    // sun, and six faces for a quarter of a degree is work nothing can see.
+    // A scene change is never throttled — that one is not a refinement.
+    if (
+      !this.envForce &&
+      this.envScene3D === scene &&
+      this.envCapturedDir.distanceTo(this.keyDirection) < ENV_ANGLE_EPSILON
+    ) {
+      return;
+    }
     this.envScene3D = scene;
     this.envDirty = false;
+    this.envForce = false;
+    this.envCapturedDir.copy(this.keyDirection);
 
-    // The Preetham sun disc is ~19000x the sky radiance; captured into 128px
-    // faces it becomes a single blown-out texel that flickers as the sun moves.
+    // The Preetham sun disc is ~19000x the sky radiance; captured into a cube
+    // face it becomes a single blown-out texel that flickers as the sun moves.
     // Sky.js recommends hiding it for environment capture — do the same.
     const disc = this.uSunDiscVisible.value;
     this.uSunDiscVisible.value = 0;
+    // And the deck goes *on* for the capture only: see the note in the sky node.
+    this.uEnvCloudAmount.value = this.cloudCoverage;
 
     this.envCamera.update(renderer, this.envScene);
 
     this.uSunDiscVisible.value = disc;
+    this.uEnvCloudAmount.value = 0;
 
     // Force the PMREM chain used by PBR materials to be rebuilt from the new faces.
     this.envTarget.texture.needsPMREMUpdate = true;
@@ -765,8 +870,18 @@ export class Atmosphere {
     // grey sky would keep casting blue light into the shadows.
     const overcast = overcastAmount;
     if (overcast > 0) {
+      // Partial, for the same reason the dome's is — and this is the second of
+      // the three desaturations that were compounding into a monochrome storm.
+      // The fill is the light in the *shadows*, and under a deck that light is
+      // the whole sky rather than a grey card.
       const grey = _skyTint.r * 0.2126 + _skyTint.g * 0.7152 + _skyTint.b * 0.0722;
-      _skyTint.lerp(_overcastFill.setRGB(grey * 0.92, grey * 0.96, grey * 1.04), overcast);
+      const k = OVERCAST_DESATURATION;
+      _overcastFill.setRGB(
+        (_skyTint.r + (grey - _skyTint.r) * k) * 0.92,
+        (_skyTint.g + (grey - _skyTint.g) * k) * 0.96,
+        (_skyTint.b + (grey - _skyTint.b) * k) * 1.04,
+      );
+      _skyTint.lerp(_overcastFill, overcast);
     }
     this.ambientLight.color.copy(_skyTint);
 
@@ -899,10 +1014,44 @@ export class Atmosphere {
       // sky's own luminance, flatten the gradient, and darken. It is a separate
       // control from cloud coverage because the cloud layer draws the clouds and
       // this describes the light between and behind them.
+      // Desaturated toward its own luma, **not replaced by it**, and that is the
+      // fix for `storm.png` coming out almost fully monochrome.
+      //
+      // What stood here was `vec3(skyLuma) * tint`: the chroma was discarded and
+      // a tint reapplied to a luma that had already collapsed, so the tint had
+      // nothing left to act on. Three desaturations then compounded — this one,
+      // the ambient fill's, and the water reflecting the result — and the sea
+      // lost its colour entirely. A real storm at sea keeps green-grey in the
+      // water; the light under a deck is *diffused*, and diffusion by droplets
+      // is near-achromatic but it is not a bleach. Keeping a quarter of the
+      // original chroma is what a photograph of one shows.
       const skyLuma = dayColor.dot(vec3(0.2126, 0.7152, 0.0722)).toVar('skyLuma');
-      const flat = vec3(skyLuma).mul(this.uOvercastTint).toVar('skyFlat');
+      const flat = mix(dayColor, vec3(skyLuma), OVERCAST_DESATURATION)
+        .mul(this.uOvercastTint)
+        .toVar('skyFlat');
       dayColor.assign(
         mix(dayColor, flat.mul(this.uOvercastDarken), this.uOvercast),
+      );
+
+      // The cloud deck's contribution to the environment capture.
+      //
+      // The capture is the source of every object's image-based light and it saw
+      // a *clear* sky: no clouds, no sea, no island. Under a 0.9 overcast that
+      // means the hull and the island were being filled with the radiance of a
+      // blue sky that is not there — too bright, and much too blue.
+      //
+      // Deliberately an average rather than the marched layer. Putting the real
+      // cloud mesh in `envScene` is the obvious fix and it is what the gap
+      // analysis proposes; the arithmetic is against it. The capture is six
+      // faces, and the tour moves the sun every frame, so it would be a
+      // volumetric raymarch over a third of a million pixels per frame for a
+      // term that is by construction a low-order spherical average. Grading the
+      // dome by coverage gives that average — the right energy and the right
+      // colour — for one `mix`, and the spatial variation it cannot supply is
+      // variation an irradiance probe would integrate away regardless.
+      const overcastFromDeck = mix(dayColor, vec3(skyLuma).mul(this.uOvercastTint), 0.7);
+      dayColor.assign(
+        mix(dayColor, overcastFromDeck.mul(CLOUD_ENV_DARKEN), this.uEnvCloudAmount),
       );
 
 

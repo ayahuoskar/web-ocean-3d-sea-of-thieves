@@ -280,6 +280,19 @@ export class VolumetricFog {
   private cameraHeight = 0;
   private disposed = false;
 
+  /**
+   * How much of the key light reaches a world point, 0..1.
+   *
+   * The march had **no occlusion term at all** — the header above says so — so
+   * the in-scattering varied only by height and by the phase lobe, and there
+   * were no crepuscular rays: none through the cloud deck, none over the ridge,
+   * none through the rigging. The march itself was already the whole recipe;
+   * this was the one missing piece.
+   *
+   * Set before `build`, because the graph is compiled once.
+   */
+  private sunOcclusion: ((worldPosition: any) => any) | null = null;
+
   /** Wind as a world vector, metres per second. Reused — never reallocated. */
   private readonly windVector = new THREE.Vector3(1, 0, 0);
 
@@ -494,7 +507,17 @@ export class VolumetricFog {
           const t = tEnd.mul(sMid).mul(sMid).toVar('fogT2');
           const sigma = this.sigmaAt(t, sigmaOrigin, slope).toVar('fogSigma');
 
-          const light = this.lightAt(sigma, phase).toVar('fogLight');
+          // Crepuscular rays. The cell's own sample point is asked how much key
+          // light reaches it; where a cloud is in the way, the sun term drops and
+          // the surrounding air stays lit, and the difference between the two
+          // *is* the shaft. `Nt3XDM`'s Buffer C is this and nothing more:
+          // jittered start, a handful of steps, a shadow function at each,
+          // weighted by phase. Every part of that was already here.
+          const occlusion =
+            this.sunOcclusion === null
+              ? null
+              : this.sunOcclusion(this.uCameraPos.add(rd.mul(t))).toVar('fogOcc');
+          const light = this.lightAt(sigma, phase, occlusion).toVar('fogLight');
 
           If(this.uDetail.greaterThan(0.001), () => {
             const p = this.uCameraPos.add(rd.mul(t)).toVar('fogP');
@@ -524,7 +547,11 @@ export class VolumetricFog {
         // scene closes with the same weight the cells used. This is why
         // `maxDistance` can be lowered for performance without carving a visible
         // shell out of the horizon.
-        const tailLight = this.lightAt(this.sigmaAt(tEnd, sigmaOrigin, slope), phase);
+        // The tail is unoccluded on purpose. It stands for everything past the
+        // march, which by construction has no resolved structure — giving it one
+        // sample's worth of shadow would put a hard edge at `maxDistance` in
+        // exactly the region the tail exists to make smooth.
+        const tailLight = this.lightAt(this.sigmaAt(tEnd, sigmaOrigin, slope), phase, null);
         const tail = tailLight.mul(boundary.sub(transmittance).max(0));
 
         outRgb.assign(src.rgb.mul(transmittance).add(acc).add(tail));
@@ -573,6 +600,17 @@ export class VolumetricFog {
    * The scene camera. Required for depth linearisation and for rebuilding the
    * world-space view ray; see the backend note at the top of this file.
    */
+  /**
+   * Supplies the occlusion function the march samples. Must be called before
+   * `build`, which compiles the graph.
+   *
+   * Ask for the cheapest variant the source offers: this is evaluated once per
+   * march cell, so its cost is multiplied by the step count and Max marches 56.
+   */
+  setSunOcclusion(occlusion: (worldPosition: any) => any): void {
+    this.sunOcclusion = occlusion;
+  }
+
   setCamera(camera: THREE.PerspectiveCamera): void {
     this.camera = camera;
     this.cameraHeight = camera.position.y;
@@ -704,14 +742,19 @@ export class VolumetricFog {
    * the entire layer goes black at exactly the elevation fog is most worth
    * looking at.
    */
-  private lightAt(sigma: any, phase: any): any {
+  private lightAt(sigma: any, phase: any, occlusion: any): any {
     const vertical = sigma.mul(this.uHeight).toVar();
     const sky = exp(vertical.mul(AMBIENT_PATH).negate());
     const sun = exp(vertical.mul(this.uSunPath).negate());
+    // Occlusion multiplies the *sun* term only. The ambient term is the sky
+    // dome, and a point in a cloud's shadow still sees most of the sky — which
+    // is exactly why a shaft reads as a bright wedge in dim air rather than as a
+    // hole cut in a lit volume.
+    const direct = this.uSunColor.mul(this.uSunIntensity).mul(phase).mul(sun);
     return this.uColor
       .mul(this.uAmbient)
       .mul(sky)
-      .add(this.uSunColor.mul(this.uSunIntensity).mul(phase).mul(sun));
+      .add(occlusion === null ? direct : direct.mul(occlusion));
   }
 
   private applyParams(): void {

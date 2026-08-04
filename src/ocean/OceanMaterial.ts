@@ -2,6 +2,7 @@ import * as THREE from 'three/webgpu';
 import {
   Fn,
   If,
+  abs,
   cameraPosition,
   float,
   linearDepth,
@@ -211,12 +212,53 @@ const SPECULAR_AA_SCREEN_SPACE_VARIANCE = 0.5;
  * to integrate away the single-pixel spikes on a wave face, nowhere near enough
  * to lose the glitter's structure.
  *
- * This is a ceiling on a heuristic, and residual striping in the near field is
- * the honest consequence of filtering with a scalar what is genuinely an
- * anisotropic, temporally-varying distribution. The full fix is slope-space NDF
- * filtering plus a temporal resolve, and this renderer has neither.
+ * It is now a per-axis ceiling. The distribution being filtered is genuinely
+ * anisotropic — the sea varies about `uSlopeAnisotropy` times as much along the
+ * wind as across it — and the filter resolves the screen-space covariance onto
+ * the tangent frame before applying this, so each axis is capped against its own
+ * measurement rather than both against a shared scalar. See the filtering block
+ * in the fragment stage.
  */
 const SPECULAR_AA_VARIANCE_CEIL = 0.004;
+
+/**
+ * How far the crest-foam ramp is widened per unit of its own screen footprint,
+ * and how wide it may get.
+ *
+ * The mask is a `smoothstep` over a Jacobian fold, and a threshold on an
+ * undersampled field has no gradient at its boundary: it is fully on in one
+ * pixel and fully off in the next. That is what makes the mid-field whitecaps in
+ * `clear-day.png` read as torn paper — hard-edged white blobs and dark holes
+ * rather than foam.
+ *
+ * The gain is above 1 because the ramp has to cover the footprint on *both*
+ * sides of the threshold and `fwidth` reports the total change across one pixel;
+ * 1.6 leaves a little margin for the fold field's own curvature inside the
+ * footprint. The ceiling stops a pixel straddling a whole wave from dissolving
+ * the mask entirely — past that the correct answer is that the pixel is
+ * partially foamed, which is what the widened ramp already returns.
+ */
+const FOAM_FOOTPRINT_GAIN = 1.6;
+const FOAM_FOOTPRINT_CEIL = 0.3;
+
+/**
+ * Where the refracted backdrop starts and finishes yielding to the body colour,
+ * metres.
+ *
+ * `waves.png` has a band of khaki-grey scratches across the water 200 to 400 m
+ * out, and it is the seafloor. Over the origin plateau the water is 17 m deep, so
+ * `absorption` stays high and the refracted sand shows through at close to full
+ * contrast — carrying the sand normal map's own aliasing with it, at a distance
+ * where that map is far below its Nyquist rate.
+ *
+ * The argument for fading it is the one the cascades' shading fade already makes:
+ * a detail the pixel cannot resolve is not detail. What replaces it is not
+ * nothing — it is `inscatter`, the analytic depth-graded body colour, which is
+ * what the transmission through that column integrates to anyway and is smooth
+ * by construction.
+ */
+const REFRACTION_FADE_NEAR = 140;
+const REFRACTION_FADE_FAR = 460;
 
 /**
  * Water thickness a backlit crest and a wave body present to the sun, metres.
@@ -914,10 +956,21 @@ export class OceanMaterial {
       // other rather than both being tuned independently.
       const refracted: any = viewportSharedTexture(sampleUv).rgb.toVar();
       const inscatter: any = mix(this.uDeepColor, this.uShallowColor, absorption).toVar();
+      // Faded out with distance — see REFRACTION_FADE_NEAR. The backdrop is a
+      // screen-space read at whatever resolution the frame happens to be, so
+      // past a couple of hundred metres it is delivering the seabed's texture
+      // well below its sampling rate and the result is the aliased khaki band
+      // across `waves.png`. The body colour it hands over to is the integral of
+      // the same column.
+      const refractionReach: any = smoothstepDownClamped(
+        viewDistance,
+        REFRACTION_FADE_NEAR,
+        REFRACTION_FADE_FAR,
+      ).toVar();
       const bodyColor: any = mix(
         inscatter,
         refracted,
-        absorption.mul(this.uRefractionAmount),
+        absorption.mul(this.uRefractionAmount).mul(refractionReach),
       ).toVar();
 
       // --- subsurface scattering ---------------------------------------------
@@ -1132,40 +1185,12 @@ export class OceanMaterial {
       // normal is smooth this adds nothing; where a pixel spans a lot of slope it
       // broadens the lobe to cover what it is actually looking at, which is the
       // definition of correct filtering rather than a hack.
+      // Resolved onto the tangent frame further down, once that frame exists —
+      // see the filtering block below `aspect`. These two are the raw material.
       const dNdx = dFdx(n).toVar();
       const dNdy = dFdy(n).toVar();
-      const normalVariance = dNdx
-        .dot(dNdx)
-        .add(dNdy.dot(dNdy))
-        .mul(SPECULAR_AA_SCREEN_SPACE_VARIANCE)
-        .toVar();
 
       const alphaBase = this.uRoughness.mul(this.uRoughness).toVar();
-      // Widen alpha^2, not alpha: the variance is a second moment, and the cap
-      // keeps a pixel that straddles a crest from going fully rough.
-      //
-      // Two variance terms, and they are not redundant. The screen-space one
-      // above measures how much the *surviving* normal changes across a pixel;
-      // it cannot see detail the mip chain already averaged out, because after
-      // filtering that normal is smooth and `dFdx` of it is small — which is
-      // exactly why it never touched the far field. `lostSlopeVariance` is the
-      // complement: the detail inside the footprint, recovered from the second
-      // moment. Together they cover both sides of the filter.
-      //
-      // It gets no `SPECULAR_AA_VARIANCE_CEIL`. That ceiling is 0.004 because the
-      // published screen-space value is five thousand times water's alpha^2 and
-      // needed reining in; this term is a measured slope variance in the same
-      // units as alpha^2, so clamping it would throw away the correction just
-      // where the footprint is widest and it matters most. Slope variance V over
-      // both axes is V/2 per axis, and alpha^2 takes twice the per-axis variance,
-      // so it enters at unit weight. `min(1)` still bounds the result.
-      const a2 = alphaBase
-        .mul(alphaBase)
-        .add(normalVariance.mul(2).min(SPECULAR_AA_VARIANCE_CEIL))
-        .add(lostSlopeVariance)
-        .min(1)
-        .toVar();
-      const alpha = a2.sqrt().toVar();
 
       // D — anisotropic Trowbridge-Reitz.
       //
@@ -1224,8 +1249,76 @@ export class OceanMaterial {
       // variance ratio of exactly R, with the geometric mean of the two
       // roughnesses preserved at the isotropic value.
       const aspect = this.uSlopeAnisotropy.pow(0.25).toVar();
-      const alphaT = alpha.mul(aspect).toVar();
-      const alphaB = alpha.div(aspect).toVar();
+
+      // Specular antialiasing, resolved on the *anisotropic* frame.
+      //
+      // This is the fix for the single most visible defect in the gallery: hard
+      // white blobs across the mid-field of `clear-day.png`, scratchy stripes in
+      // `island.png`, dark speckle holes in `sunset.png`. One cause, three
+      // appearances.
+      //
+      // What stood here added a **scalar** to `alpha^2` and only then split the
+      // result into `alphaT` and `alphaB`, which is the geometric variant
+      // Frostbite and HDRP ship and is honest about what it discards: the
+      // covariance. That matters more on this surface than on almost any other,
+      // because a pixel of wind-driven sea does not vary equally in every
+      // direction — it varies about `uSlopeAnisotropy` times as much along the
+      // wind as across it. Filtering it isotropically and *then* stretching the
+      // result by the aspect ratio widens the lobe in proportion to the
+      // roughness rather than in proportion to the measured variance, so it
+      // over-filters across the wind and under-filters along it. Under-filtering
+      // along the wind is what leaves the blobs.
+      //
+      // Kaplanyan et al. (2016) filter the distribution in slope space and carry
+      // the full 2x2 covariance. This carries its diagonal in the tangent frame,
+      // which is where the sea's covariance is very nearly diagonal by
+      // construction — the frame is built on the wind axis, and the wind axis is
+      // the principal axis of the slope distribution. The off-diagonal term the
+      // full method would add is what remains after that alignment, and it is
+      // small.
+      //
+      // `dN` is tangential to `n`, so its components on T and B are exactly the
+      // per-axis slope changes; `varT + varB` recovers the scalar this replaces.
+      const dT = vec2(dNdx.dot(tangent), dNdy.dot(tangent)).toVar();
+      const dB = vec2(dNdx.dot(bitangent), dNdy.dot(bitangent)).toVar();
+      const varT = dT.dot(dT).mul(SPECULAR_AA_SCREEN_SPACE_VARIANCE).toVar();
+      const varB = dB.dot(dB).mul(SPECULAR_AA_SCREEN_SPACE_VARIANCE).toVar();
+
+      // The sub-footprint variance splits along the same axes, because it is the
+      // same distribution seen at a smaller scale. `lostSlopeVariance` is the
+      // total over both axes and the ratio between them is `uSlopeAnisotropy` by
+      // definition, so `R/(1+R)` and `1/(1+R)` divide it exactly. At R = 1 each
+      // axis takes half, which reproduces the isotropic behaviour this replaces.
+      const ratio = this.uSlopeAnisotropy.toVar();
+      const lostShare = ratio.div(ratio.add(1)).toVar();
+      const lostT = lostSlopeVariance.mul(lostShare).toVar();
+      const lostB = lostSlopeVariance.mul(lostShare.oneMinus()).toVar();
+
+      // Widen alpha^2, not alpha: variance is a second moment. For GGX the slope
+      // variance is `alpha^2 / 2`, so a slope variance `v` enters as `2v`.
+      //
+      // The ceiling applies to the screen-space term only, and that asymmetry is
+      // deliberate. It exists because the published screen-space constant is five
+      // thousand times water's own alpha^2 and needed reining in; `lostT`/`lostB`
+      // are measured slope variances already in the right units, and capping them
+      // would throw the correction away exactly where the footprint is widest and
+      // it matters most.
+      const alphaT = alphaBase
+        .mul(aspect)
+        .pow(2)
+        .add(varT.mul(2).min(SPECULAR_AA_VARIANCE_CEIL))
+        .add(lostT.mul(2))
+        .min(1)
+        .sqrt()
+        .toVar();
+      const alphaB = alphaBase
+        .div(aspect)
+        .pow(2)
+        .add(varB.mul(2).min(SPECULAR_AA_VARIANCE_CEIL))
+        .add(lostB.mul(2))
+        .min(1)
+        .sqrt()
+        .toVar();
 
       const hT = halfVector.dot(tangent).div(alphaT).toVar();
       const hB = halfVector.dot(bitangent).div(alphaB).toVar();
@@ -1351,9 +1444,28 @@ export class OceanMaterial {
 
       // A wide smoothstep keeps the boundary soft; the noise decides *where* that
       // boundary falls, which reads as texture rather than as a fading blob.
-      const crestFoam = biased
-        .add(perturb.mul(0.45))
-        .smoothstep(0.12, 0.78)
+      //
+      // Widened by the mask's own screen-space footprint, and this is the second
+      // half of the aliasing fix. The specular filter above was not the whole
+      // story: the frames show the *foam* aliasing too, and it is what makes the
+      // blobs hard-edged rather than merely bright. At mid distance the Jacobian
+      // fold field is undersampled, so a threshold on it flips fully on and fully
+      // off between neighbouring pixels — there is no gradient at the boundary
+      // because the boundary is narrower than a pixel.
+      //
+      // `fwidth` of the thresholded quantity is the textbook band-limit for
+      // exactly this: it measures how much the argument moves across one pixel,
+      // so widening the ramp by it makes the transition take at least a pixel
+      // wherever the field stops being resolved, and changes nothing up close
+      // where it is. Same argument the specular filter makes, one term along.
+      const foamArg = biased.add(perturb.mul(0.45)).toVar();
+      const foamFootprint = abs(dFdx(foamArg))
+        .add(abs(dFdy(foamArg)))
+        .mul(FOAM_FOOTPRINT_GAIN)
+        .clamp(0, FOAM_FOOTPRINT_CEIL)
+        .toVar();
+      const crestFoam = foamArg
+        .smoothstep(float(0.12).sub(foamFootprint), float(0.78).add(foamFootprint))
         .clamp(0, 1)
         .toVar();
 
