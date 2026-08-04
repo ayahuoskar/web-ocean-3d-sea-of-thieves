@@ -65,6 +65,13 @@ interface OceanHooks {
   ): Promise<void>;
   step(dt: number, steps?: number): Promise<void>;
   capturePixels(): Promise<CapturedPixels>;
+  /** Test-only grade override. Colours are plain triples; see the hook's note. */
+  setGrade(g: {
+    slope: [number, number, number];
+    offset: [number, number, number];
+    power: [number, number, number];
+    saturation: number;
+  }): void;
   setShipInput(throttle: number, rudder: number): void;
   shipControlsEnabled(): boolean;
   touchControlsVisible(): boolean;

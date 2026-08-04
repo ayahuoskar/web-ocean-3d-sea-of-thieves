@@ -159,3 +159,56 @@ export async function measureFrameRate(page: Page, seconds = 4): Promise<FrameSa
     return { fps, frameMs, rafThrottled };
   }, seconds);
 }
+
+/**
+ * Mean of R+G+B across the whole frame.
+ *
+ * Coarse on purpose. It exists to answer one question — did an *additive* post
+ * stage contribute anything — and for that a single scalar over the frame is
+ * both sufficient and immune to the specular sparkle that makes per-pixel
+ * comparisons of this scene noisy.
+ *
+ * Two steps before the read, never zero: the frame immediately after a state
+ * change is not converged, and `tests/lib/capture.ts` measures that difference
+ * at roughly a factor of thirty in mean ΔE.
+ */
+export async function frameMean(page: Page): Promise<number> {
+  return page.evaluate(async () => {
+    const ocean = (
+      window as unknown as {
+        __ocean: {
+          step: (dt: number, steps?: number) => Promise<void>;
+          capturePixels: () => Promise<{ data: Uint8Array }>;
+        };
+      }
+    ).__ocean;
+    await ocean.step(1 / 60, 2);
+    const { data } = await ocean.capturePixels();
+    let sum = 0;
+    for (let i = 0; i < data.length; i += 4) sum += data[i] + data[i + 1] + data[i + 2];
+    return sum / (data.length / 4);
+  });
+}
+
+/**
+ * The first `count` bytes of the frame, as plain numbers.
+ *
+ * For byte-exactness checks, where the question is "is this stage a genuine
+ * pass-through" rather than "does this look right". A prefix rather than the
+ * whole frame because it crosses the `page.evaluate` boundary as JSON.
+ */
+export async function frameHead(page: Page, count = 65536): Promise<number[]> {
+  return page.evaluate(async (n) => {
+    const ocean = (
+      window as unknown as {
+        __ocean: {
+          step: (dt: number, steps?: number) => Promise<void>;
+          capturePixels: () => Promise<{ data: Uint8Array }>;
+        };
+      }
+    ).__ocean;
+    await ocean.step(1 / 60, 2);
+    const { data } = await ocean.capturePixels();
+    return Array.from(data.slice(0, n));
+  }, count);
+}

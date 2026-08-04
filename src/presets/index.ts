@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { IDENTITY_GRADE, type ColorGradeParams } from '../post/ColorGrade';
 import type { PresetId } from '../ui/types';
 import type { WaterAppearance } from '../ocean/OceanMaterial';
 import type { SpectrumParams } from '../ocean/Spectrum';
@@ -72,10 +73,35 @@ export interface Preset {
     godRayStrength: number;
   };
   toneMappingExposure: number;
+  /**
+   * Global colour grade, applied in linear before ACES. See `src/post/ColorGrade.ts`.
+   *
+   * Required rather than optional, for the reason `atmosphere.overcast` above is:
+   * `ColorGrade.setParams` merges, so a key only some presets mention is a key
+   * that leaks from whichever preset was selected before.
+   *
+   * Identity means "this preset is already the colour it wants to be", which is
+   * a real answer and not a placeholder — the grade reinforces a look, it does
+   * not supply one.
+   */
+  grade: ColorGradeParams;
 }
 
 const color = (hex: number) => new THREE.Color(hex);
 const vec = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
+/**
+ * A fresh identity grade per preset.
+ *
+ * Cloned rather than spread from the shared constant: spreading copies the
+ * `Color` *references*, so all nine presets would alias the same three objects
+ * and a single mutation anywhere would silently regrade the whole set.
+ */
+const identityGrade = (): ColorGradeParams => ({
+  slope: IDENTITY_GRADE.slope.clone(),
+  offset: IDENTITY_GRADE.offset.clone(),
+  power: IDENTITY_GRADE.power.clone(),
+  saturation: IDENTITY_GRADE.saturation,
+});
 
 /**
  * Nine environment looks. Each one moves the sun, the sea state, the medium and
@@ -198,6 +224,7 @@ export const PRESETS: Record<PresetId, Preset> = {
      * veil in the post chain. The frame was simply over-exposed.
      */
     toneMappingExposure: 0.42,
+    grade: identityGrade(),
   },
 
   arctic: {
@@ -248,6 +275,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       godRayStrength: 0.7,
     },
     toneMappingExposure: 1.05,
+    grade: identityGrade(),
   },
 
   blackFlag: {
@@ -298,6 +326,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       godRayStrength: 1.15,
     },
     toneMappingExposure: 1,
+    grade: identityGrade(),
   },
 
   dusk: {
@@ -348,6 +377,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       godRayStrength: 0.55,
     },
     toneMappingExposure: 0.95,
+    grade: identityGrade(),
   },
 
   foggy: {
@@ -400,6 +430,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       godRayStrength: 0.35,
     },
     toneMappingExposure: 1,
+    grade: identityGrade(),
   },
 
   moonlit: {
@@ -450,6 +481,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       godRayStrength: 0.3,
     },
     toneMappingExposure: 1.35,
+    grade: identityGrade(),
   },
 
   seaOfThieves: {
@@ -500,6 +532,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       godRayStrength: 1.35,
     },
     toneMappingExposure: 1.05,
+    grade: identityGrade(),
   },
 
   storm: {
@@ -555,6 +588,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       godRayStrength: 0.25,
     },
     toneMappingExposure: 0.85,
+    grade: identityGrade(),
   },
 
   sunset: {
@@ -605,6 +639,7 @@ export const PRESETS: Record<PresetId, Preset> = {
       godRayStrength: 0.7,
     },
     toneMappingExposure: 1,
+    grade: identityGrade(),
   },
 };
 

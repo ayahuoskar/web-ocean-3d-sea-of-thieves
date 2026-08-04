@@ -39,6 +39,7 @@ import { DEFAULT_SPECTRUM, significantWaveHeight } from './ocean/Spectrum';
 import { Atmosphere, Clouds, Weather } from './sky';
 import { VolumetricFog } from './post/VolumetricFog';
 import { LensRain } from './post/LensRain';
+import { ColorGrade } from './post/ColorGrade';
 import { CameraDirector } from './cameras/CameraDirector';
 import { getPreset } from './presets';
 import { Panel } from './ui/Panel';
@@ -135,6 +136,7 @@ class App {
   private underwater!: UnderwaterPass;
   private fog!: VolumetricFog;
   private lensRain!: LensRain;
+  private colorGrade!: ColorGrade;
   private particles!: UnderwaterParticles;
   private caustics!: Caustics;
 
@@ -453,7 +455,19 @@ class App {
     //
     // All of this lives inside `outputNode`, so the droplets are part of the
     // rendered frame while the DOM HUD stays crisp on top of them.
-    this.post.outputNode = this.lensRain.build(rtt(graded as THREE.Node)) as THREE.Node;
+    //
+    // The grade goes *inside* that `rtt`, which is to say before the lens rather
+    // than after it. Two reasons, and both are about the ordering being physical
+    // rather than convenient. A colourist grades the image a camera recorded, not
+    // the water on its front element — so the droplets should be refracting a
+    // graded frame, which is what LensRain's own note asks for when it says the
+    // thing it refracts should be the finished image. And the grade is in linear:
+    // `outputColorTransform` applies ACES after `outputNode`, so this shapes what
+    // the tone curve then compresses. See `src/post/ColorGrade.ts`.
+    this.colorGrade = new ColorGrade();
+    this.post.outputNode = this.lensRain.build(
+      rtt(this.colorGrade.build(graded) as THREE.Node),
+    ) as THREE.Node;
 
     boot.set(0.85, 'Wiring controls…');
     this.director = new CameraDirector({
@@ -1192,6 +1206,12 @@ class App {
     );
 
     this.renderer.toneMappingExposure = preset.toneMappingExposure;
+    // With the exposure, not instead of it, and the pair is not redundant:
+    // exposure decides where the scene sits on the tone curve, the grade decides
+    // what colour it is once it gets there. Collapsing them into one number is
+    // how a preset ends up choosing between being the right brightness and being
+    // the right colour.
+    this.colorGrade.setParams(preset.grade);
     if (captureEnvironment) this.atmosphere.updateEnvironment(this.renderer, this.scene);
   }
 
@@ -1900,6 +1920,25 @@ class App {
         setRainOverride: (intensity: number | null) => {
           this.rainOverride = intensity;
         },
+        /**
+         * Test-only grade override.
+         *
+         * Colours arrive as plain triples because this crosses `page.evaluate`,
+         * which structured-clones its argument and would strip a `THREE.Color`
+         * down to a bare object with no `copy` on it.
+         */
+        setGrade: (g: {
+          slope: [number, number, number];
+          offset: [number, number, number];
+          power: [number, number, number];
+          saturation: number;
+        }) =>
+          this.colorGrade.setParams({
+            slope: new THREE.Color(g.slope[0], g.slope[1], g.slope[2]),
+            offset: new THREE.Color(g.offset[0], g.offset[1], g.offset[2]),
+            power: new THREE.Color(g.power[0], g.power[1], g.power[2]),
+            saturation: g.saturation,
+          }),
         /** Exact-pixel frame capture; see `App.capturePixels`. */
         capturePixels: () => this.capturePixels(),
         dispose: () => this.dispose(),
@@ -1934,6 +1973,11 @@ class App {
     this.underwater?.dispose();
     this.fog?.dispose();
     this.lensRain?.dispose();
+    // Every stage in `src/post/` is torn down here, including the ones that own
+    // nothing. `RenderPipeline.dispose` disposes only its own quad material and
+    // does not traverse the node graph, so anything in the chain that holds a
+    // render target has to be released from this list or it is simply leaked.
+    this.colorGrade?.dispose();
     this.particles?.dispose();
     this.caustics?.dispose();
     this.shipControls?.dispose();
