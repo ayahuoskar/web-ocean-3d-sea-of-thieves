@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { IDENTITY_GRADE, type ColorGradeParams } from '../post/ColorGrade';
+import type { ColorGradeParams } from '../post/ColorGrade';
 import type { PresetId } from '../ui/types';
 import type { WaterAppearance } from '../ocean/OceanMaterial';
 import type { SpectrumParams } from '../ocean/Spectrum';
@@ -89,20 +89,9 @@ export interface Preset {
 
 const color = (hex: number) => new THREE.Color(hex);
 const vec = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
-/**
- * A fresh identity grade per preset.
- *
- * Cloned rather than spread from the shared constant: spreading copies the
- * `Color` *references*, so all nine presets would alias the same three objects
- * and a single mutation anywhere would silently regrade the whole set.
- */
-const identityGrade = (): ColorGradeParams => ({
-  slope: IDENTITY_GRADE.slope.clone(),
-  offset: IDENTITY_GRADE.offset.clone(),
-  power: IDENTITY_GRADE.power.clone(),
-  saturation: IDENTITY_GRADE.saturation,
-  vignette: IDENTITY_GRADE.vignette,
-});
+// Every preset now declares its own grade, so there is no shared identity to
+// clone. Note that each one builds fresh `Color` objects: sharing them between
+// presets would mean a single mutation anywhere silently regraded the whole set.
 
 /**
  * Nine environment looks. Each one moves the sun, the sea state, the medium and
@@ -225,7 +214,16 @@ export const PRESETS: Record<PresetId, Preset> = {
      * veil in the post chain. The frame was simply over-exposed.
      */
     toneMappingExposure: 0.42,
-    grade: identityGrade(),
+    grade: {
+      // The reference image, so barely touched: a whisker of contrast and
+      // saturation, and the lightest vignette of the nine. A preset the whole
+      // project is tuned against should not be the one carrying a look.
+      slope: color(0xffffff),
+      offset: new THREE.Color(0, 0, 0),
+      power: new THREE.Color(1.03, 1.02, 1.0),
+      saturation: 1.04,
+      vignette: 0.16,
+    },
   },
 
   arctic: {
@@ -276,7 +274,16 @@ export const PRESETS: Record<PresetId, Preset> = {
       godRayStrength: 0.7,
     },
     toneMappingExposure: 1.05,
-    grade: identityGrade(),
+    grade: {
+      // Cold light on ice. Blue slope, a hair of blue lift in the shadows so
+      // they read as snow-shadow rather than as black, and saturation up
+      // slightly because the only colour in the frame is the sea.
+      slope: new THREE.Color(0.96, 1.0, 1.07),
+      offset: new THREE.Color(0.0, 0.002, 0.006),
+      power: new THREE.Color(1.02, 1.0, 0.98),
+      saturation: 1.06,
+      vignette: 0.24,
+    },
   },
 
   blackFlag: {
@@ -327,7 +334,16 @@ export const PRESETS: Record<PresetId, Preset> = {
       godRayStrength: 1.15,
     },
     toneMappingExposure: 1,
-    grade: identityGrade(),
+    grade: {
+      // Warm midtones over deep blacks — the look the preset is named for.
+      // Negative offset is doing the work: it crushes the aerial haze out of
+      // the shadows, which is what separates this from Sea of Thieves.
+      slope: new THREE.Color(1.06, 1.0, 0.93),
+      offset: new THREE.Color(-0.008, -0.006, -0.004),
+      power: new THREE.Color(1.06, 1.04, 1.02),
+      saturation: 1.02,
+      vignette: 0.28,
+    },
   },
 
   dusk: {
@@ -378,7 +394,17 @@ export const PRESETS: Record<PresetId, Preset> = {
       godRayStrength: 0.55,
     },
     toneMappingExposure: 0.95,
-    grade: identityGrade(),
+    grade: {
+      // Cool shadows under a warm sky, which is what dusk actually looks like:
+      // the sun is reddened and everything it is not lighting is lit by the
+      // blue half of the sky instead. Mild desaturation as the eye gives up
+      // colour with the light.
+      slope: new THREE.Color(0.99, 0.99, 1.05),
+      offset: new THREE.Color(0.0, 0.002, 0.008),
+      power: new THREE.Color(1.0, 1.0, 0.98),
+      saturation: 0.94,
+      vignette: 0.3,
+    },
   },
 
   foggy: {
@@ -431,7 +457,17 @@ export const PRESETS: Record<PresetId, Preset> = {
       godRayStrength: 0.35,
     },
     toneMappingExposure: 1,
-    grade: identityGrade(),
+    grade: {
+      // Flattened deliberately. Power below 1 lifts the midtones, a positive
+      // offset lifts the blacks off the floor, and the saturation comes well
+      // down — fog is a low-contrast, low-chroma medium and a preset that
+      // renders it punchy is not rendering fog.
+      slope: new THREE.Color(0.98, 0.99, 1.0),
+      offset: new THREE.Color(0.014, 0.015, 0.017),
+      power: new THREE.Color(0.96, 0.96, 0.96),
+      saturation: 0.84,
+      vignette: 0.14,
+    },
   },
 
   moonlit: {
@@ -482,7 +518,18 @@ export const PRESETS: Record<PresetId, Preset> = {
       godRayStrength: 0.3,
     },
     toneMappingExposure: 1.35,
-    grade: identityGrade(),
+    grade: {
+      // Strongly blue and strongly desaturated, which is the Purkinje shift
+      // rather than a stylistic choice: at scotopic levels the eye's rods take
+      // over, sensitivity moves toward blue and colour discrimination all but
+      // disappears. Contrast is raised because the alternative at these levels
+      // is an even grey.
+      slope: new THREE.Color(0.89, 0.97, 1.13),
+      offset: new THREE.Color(0.0, 0.0, 0.003),
+      power: new THREE.Color(1.07, 1.04, 1.0),
+      saturation: 0.78,
+      vignette: 0.34,
+    },
   },
 
   seaOfThieves: {
@@ -533,7 +580,16 @@ export const PRESETS: Record<PresetId, Preset> = {
       godRayStrength: 1.35,
     },
     toneMappingExposure: 1.05,
-    grade: identityGrade(),
+    grade: {
+      // The stylised one, and the only place saturation goes meaningfully above
+      // 1. Warm slope with a cool-ish blue kept intact, so the turquoise stays
+      // turquoise rather than going green as it saturates.
+      slope: new THREE.Color(1.05, 1.02, 0.99),
+      offset: new THREE.Color(0.0, 0.0, 0.0),
+      power: new THREE.Color(1.03, 1.0, 0.99),
+      saturation: 1.18,
+      vignette: 0.2,
+    },
   },
 
   storm: {
@@ -589,7 +645,17 @@ export const PRESETS: Record<PresetId, Preset> = {
       godRayStrength: 0.25,
     },
     toneMappingExposure: 0.85,
-    grade: identityGrade(),
+    grade: {
+      // Low contrast, low chroma, lifted blacks. Weather is not dramatic to
+      // look at, it is *flat*: the deck kills the key light, everything is lit
+      // by an overcast hemisphere, and the air between the viewer and anything
+      // worth seeing is full of water. The heaviest vignette of the nine.
+      slope: new THREE.Color(0.97, 0.98, 1.02),
+      offset: new THREE.Color(0.014, 0.015, 0.018),
+      power: new THREE.Color(0.96, 0.96, 0.96),
+      saturation: 0.76,
+      vignette: 0.32,
+    },
   },
 
   sunset: {
@@ -640,7 +706,21 @@ export const PRESETS: Record<PresetId, Preset> = {
       godRayStrength: 0.7,
     },
     toneMappingExposure: 1,
-    grade: identityGrade(),
+    grade: {
+      // Warm, and — the part that matters — *contrastier*. Shooting into a low
+      // sun puts a large amount of scattered light into every part of the
+      // frame, and with a bloom on top the first cut of this rendered as a pale
+      // wash with the rigging lost in it. Power above 1 in linear steepens the
+      // midtones and deepens the shadows without touching the highlights that
+      // ACES is about to roll off anyway; the negative offset takes the haze
+      // off the floor. The measurement is the sails: if they are not legible
+      // against the sun, this is too weak.
+      slope: new THREE.Color(1.06, 0.99, 0.92),
+      offset: new THREE.Color(-0.012, -0.010, -0.006),
+      power: new THREE.Color(1.16, 1.13, 1.08),
+      saturation: 1.06,
+      vignette: 0.26,
+    },
   },
 };
 
