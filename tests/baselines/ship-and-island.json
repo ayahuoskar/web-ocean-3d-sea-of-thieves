@@ -1,6 +1,6 @@
 {
-  "shot": "near-water-detail",
-  "capturedAt": "2026-08-04T18:08:49.460Z",
+  "shot": "ship-and-island",
+  "capturedAt": "2026-08-04T18:09:51.372Z",
   "width": 1280,
   "height": 720,
   "definition": {
@@ -14,17 +14,17 @@
     },
     "camera": {
       "position": [
-        -46,
-        5,
-        44
+        64,
+        15,
+        89
       ],
       "target": [
-        -64,
-        0,
-        26
+        -214,
+        23,
+        -198
       ]
     },
-    "time": 23.5,
+    "time": 36,
     "settleSteps": 90
   },
   "stack": {

@@ -321,9 +321,15 @@ const BEATS: readonly Beat[] = [
     duration: 12,
     throttle: 0.25,
     keys: [
-      { at: 0.0, eye: [-900, 30, -400], look: [-800, 4, -470] },
-      { at: 0.45, eye: [-800, 13, -432], look: [-792, 2, -502] },
-      { at: 0.78, eye: [-716, 9, -478], look: [-800, 3, -542] },
+      // Every eye sits *outside* the 500 m mean shore radius, and every look
+      // point just inside it. The first cut of this beat did not: its opening
+      // eye was 455 m from the island centre, which is 45 m inland, so the shot
+      // opened on a grey expanse of wet sand with the sea somewhere off to one
+      // side. Authored on bearings and radii for that reason — a beat about the
+      // waterline has to be positioned relative to the waterline.
+      { at: 0.0, eye: [-723, 26, -358], look: [-804, 4, -464] },
+      { at: 0.45, eye: [-731, 12, -427], look: [-767, 2, -507] },
+      { at: 0.78, eye: [-709, 9, -504], look: [-724, 3, -563] },
     ],
   },
   {

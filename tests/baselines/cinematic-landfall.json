@@ -1,29 +1,18 @@
 {
   "shot": "cinematic-landfall",
-  "capturedAt": "2026-08-03T22:37:37.901Z",
+  "capturedAt": "2026-08-04T18:09:47.108Z",
   "width": 1280,
   "height": 720,
   "definition": {
     "state": {
       "quality": "high",
-      "cameraMode": "orbit",
+      "cameraMode": "cinematic",
       "windSpeed": 15,
       "peakWavelength": 47,
       "cloudCoverage": 0.32,
       "preset": "skyPro"
     },
-    "camera": {
-      "position": [
-        -812,
-        58,
-        -318
-      ],
-      "target": [
-        -768,
-        6,
-        -476
-      ]
-    },
+    "camera": null,
     "time": 30,
     "settleSteps": 90
   },

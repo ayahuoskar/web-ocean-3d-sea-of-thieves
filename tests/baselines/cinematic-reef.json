@@ -1,29 +1,18 @@
 {
   "shot": "cinematic-reef",
-  "capturedAt": "2026-08-03T22:37:34.598Z",
+  "capturedAt": "2026-08-04T18:09:43.280Z",
   "width": 1280,
   "height": 720,
   "definition": {
     "state": {
       "quality": "high",
-      "cameraMode": "orbit",
+      "cameraMode": "cinematic",
       "windSpeed": 15,
       "peakWavelength": 47,
       "cloudCoverage": 0.32,
       "preset": "skyPro"
     },
-    "camera": {
-      "position": [
-        -116,
-        -10.5,
-        -104
-      ],
-      "target": [
-        -52,
-        -15.5,
-        -62
-      ]
-    },
+    "camera": null,
     "time": 44,
     "settleSteps": 90
   },

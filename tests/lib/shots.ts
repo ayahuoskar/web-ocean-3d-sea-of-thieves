@@ -451,9 +451,13 @@ export const SHOTS: readonly Shot[] = [
      */
     camera: null,
     time: 44,
-    // A third of the way into `reef-run`, where the flight's dawn has come up
-    // far enough to light the coral. The beat deliberately begins before it.
-    cinematicTime: 137,
+    // 133 s, which is the beat's *middle key* — the one authored to pass within
+    // fifteen metres of the reef patch at (-97, -102). 137 was four seconds too
+    // late and put the camera over open sand between two patches, which is the
+    // same mistake this shot list has now made three times in different places:
+    // aiming at the reef in general rather than at something in particular.
+    // The tour's dawn has reached an elevation of 0.29 by then, so it is lit.
+    cinematicTime: 133,
     settleSteps: 90,
   },
   {
