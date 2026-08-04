@@ -1878,23 +1878,49 @@ export function normaliseImportedBody(
   else if (forwardAxis === '-x') geometry.rotateY(Math.PI);
 
   geometry.computeBoundingBox();
+  const measured = geometry.boundingBox;
+  if (!measured) return geometry;
+
+  const length = measured.max.x - measured.min.x;
+  if (!(length > 1e-6)) return geometry;
+
+  geometry.scale(1 / length, 1 / length, 1 / length);
+
+  /**
+   * Re-measured after the scale, never derived from the measurement before it.
+   *
+   * `BufferGeometry.scale` goes through `applyMatrix4`, which recomputes a
+   * non-null `boundingBox` *in place* — and `computeBoundingBox` hands back the
+   * geometry's own `Box3`, not a copy. So a box read before the scale is
+   * silently rescaled underneath every later use of it, and multiplying it by
+   * the scale again applies the factor twice.
+   *
+   * That is not a rounding error. `emperor_angelfish` is authored 0.2 m long,
+   * so the second application was a factor of five: the body landed at
+   * x in -2.46..-1.46 instead of -0.5..0.5, which put the wave's body axis
+   * `s = 0.5 - x` at 1.96..2.96 instead of 0..1. The envelope is `WAVE_AMP *
+   * s^3`, so the lateral swing went from a designed 0.085 body lengths at the
+   * tail to 2.2 at the tail and 0.64 *at the nose* — the fish was sheared into a
+   * travelling S about two body lengths deep, which is exactly what an eel does
+   * and nothing like what an angelfish does. It also displaced the body off the
+   * origin the school frame places and banks it about.
+   *
+   * Measuring here keeps the scale factor out of the translation altogether, so
+   * the mistake has nowhere left to hide.
+   */
+  geometry.computeBoundingBox();
   const box = geometry.boundingBox;
   if (!box) return geometry;
 
-  const length = box.max.x - box.min.x;
-  if (!(length > 1e-6)) return geometry;
-
-  // Scale to unit length, then put the nose exactly on +0.5 so `s = 0.5 - x`
-  // starts at zero on the snout. The tail then lands on -0.5, a little short of
-  // the -0.69 the procedural caudal fin reaches — which is correct for this
-  // animal: an angelfish is a pectoral swimmer with a short, stiff tail, and it
-  // should beat less than the pelagic silhouette does.
-  const scale = 1 / length;
-  geometry.scale(scale, scale, scale);
+  // The nose goes exactly on +0.5 so `s = 0.5 - x` starts at zero on the snout.
+  // The tail then lands on -0.5, a little short of the -0.69 the procedural
+  // caudal fin reaches — which is correct for this animal: an angelfish is a
+  // pectoral swimmer with a short, stiff tail, and it should beat less than the
+  // pelagic silhouette does.
   geometry.translate(
-    0.5 - box.max.x * scale,
-    -((box.min.y + box.max.y) * 0.5) * scale,
-    -((box.min.z + box.max.z) * 0.5) * scale,
+    0.5 - box.max.x,
+    -(box.min.y + box.max.y) * 0.5,
+    -(box.min.z + box.max.z) * 0.5,
   );
 
   geometry.computeBoundingSphere();
