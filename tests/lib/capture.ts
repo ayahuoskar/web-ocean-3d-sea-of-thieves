@@ -41,6 +41,18 @@ interface OceanHooks {
     readonly cinematicTime: number;
     resetCinematic(time?: number): void;
   };
+  /** The tour's environment curves at a loop time. */
+  cinematicEnvironment(time?: number): {
+    hours: number;
+    rain: number;
+    cloudCoverage: number;
+    fogDensity: number;
+    weatherKind: 'clear' | 'rain';
+  };
+  /** Beat names, start times and durations, in order. */
+  cinematicBeats(): Array<{ name: string; start: number; duration: number }>;
+  /** Nominal hull position at a loop time, world XZ. */
+  nominalShipAt(time: number): { x: number; z: number };
   camera: { position: { x: number; y: number; z: number } };
   /** The surface material. Only the knobs a test drives are declared. */
   water: {
@@ -86,7 +98,10 @@ interface OceanHooks {
   /** Reflection layers. Null on the WebGL2 path, which has neither. */
   reflections: { setQuality(scale: number): void; readonly resolutionScale: number } | null;
   /** Sky and sun. Declared for the per-tier shadow resolution check. */
-  atmosphere: { readonly shadowMapSize: number };
+  atmosphere: {
+    readonly shadowMapSize: number;
+    readonly sunDirection: { x: number; y: number; z: number };
+  };
   ssr: { setStrength(amount: number): void } | null;
   surfaceWetness(): number;
   setSurfaceWetness(value: number): void;

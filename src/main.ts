@@ -49,6 +49,7 @@ import {
   OutputTransform,
 } from './post/OutputTransform';
 import { CameraDirector } from './cameras/CameraDirector';
+import { CINEMATIC_BEATS, nominalShipXZ } from './cameras/Cinematic';
 import { getPreset } from './presets';
 import { Panel } from './ui/Panel';
 import { Hud } from './ui/Hud';
@@ -72,6 +73,15 @@ const _meadowAmbient = new THREE.Color();
 const _meadowWind = new THREE.Vector2();
 /** Scratch for the drawing-buffer size, read on resize and at startup. */
 const _drawingBuffer = new THREE.Vector2();
+/**
+ * How far the sun must move before the tour re-captures the environment cube.
+ *
+ * 0.035 in elevation, which over the flight's full day is about twenty captures
+ * a lap — a few milliseconds each, spread out, and never two in a row.
+ */
+const TOUR_ENV_ELEVATION_STEP = 0.035;
+/** Scratch for the nominal-hull test hook. */
+const _shipProbe = new THREE.Vector2();
 
 const boot = {
   root: document.getElementById('boot'),
@@ -210,6 +220,19 @@ class App {
   private deterministic = false;
   /** Test-only rain rate override; null means the weather system decides. */
   private rainOverride: number | null = null;
+  /**
+   * The tour's multiplier on the preset's volumetric fog. 1 outside Cinematic.
+   *
+   * A field rather than a second `fog.setParams` call, because the density is
+   * one expression assembled from three independent scalars and splitting it
+   * across two call sites is how one of them silently stops applying.
+   */
+  private cinematicFog = 1;
+  /**
+   * Sun elevation at the last environment-cube capture, for the throttle in
+   * `refreshTourEnvironment`.
+   */
+  private lastEnvElevation = Number.NaN;
   /** Tier change waiting for a safe moment. See `drainQualityRequests`. */
   private pendingQuality: QualityTier | null = null;
   /** The in-flight drain, so concurrent requests coalesce into one. */
@@ -896,7 +919,11 @@ class App {
         );
         this.onResize();
         break;
-      case 'cameraMode':
+      case 'cameraMode': {
+        // Read before `setMode`, which is what changes it. The environment-cube
+        // restore below has to know whether the tour is being *left*, and by the
+        // time the director has been told the new mode that is unanswerable.
+        const leftTheTour = this.director.currentMode === 'cinematic';
         this.director.setMode(this.state.cameraMode);
         this.hud.setCameraMode(this.state.cameraMode);
         // Selecting Boat selects the *ship*, not just a camera. Cinematic drives
@@ -912,8 +939,20 @@ class App {
         // position directly every frame (see `update`), so without this the hour
         // it happened to be at when the viewer pressed a key would stick until
         // something else re-applied the preset.
-        if (this.state.cameraMode !== 'cinematic') this.applyPreset(false);
+        // `true` on the way *out of* the tour, and only there.
+        //
+        // The flight now moves the environment cube as well as the sun, so
+        // leaving it at night with the capture suppressed would restore the
+        // preset's daylight sky to the dome and leave the night IBL bound to
+        // every PBR surface in the scene, with nothing that would ever clear it.
+        // Entering the tour, and every other mode change, still skips the
+        // capture — it is a whole extra scene render and the sky has not moved.
+        if (this.state.cameraMode !== 'cinematic') {
+          this.applyPreset(leftTheTour);
+          if (leftTheTour) this.lastEnvElevation = Number.NaN;
+        }
         break;
+      }
       case 'volume':
         this.audio.setVolume(this.state.volume);
         break;
@@ -1144,6 +1183,37 @@ class App {
     // at the helm beats the on-screen throttle; during a cinematic that rule
     // would let a held S command full astern against a full-ahead beat.
     controls.setKeyboardEnabled(mode !== 'cinematic');
+  }
+
+  /**
+   * Re-captures the environment cube while the tour moves the sun.
+   *
+   * The tour drives `Atmosphere.setParams` directly, sixty times a second, and
+   * never touched the cube. That was invisible while the flight only swept
+   * 08:18 to 16:42 — a frozen daylight IBL is close enough to a moving daylight
+   * one that nothing shows. It is badly wrong now that the flight reaches night:
+   * every PBR surface in the scene, hull and rigging and cannon and wet rock,
+   * would go on being lit by a noon sky while the sky being drawn behind them is
+   * black.
+   *
+   * Not every frame. `updateEnvironment` renders six cube faces and then rebuilds
+   * the PMREM chain, which is milliseconds. Gated on the sun having actually
+   * moved, so the cost is paid a handful of times a lap instead of sixty times a
+   * second — and the gate is on *elevation* rather than on a timer, so the fast
+   * sweep through dawn gets the updates and the slow dwell at noon does not need
+   * them.
+   */
+  private refreshTourEnvironment(force = false): void {
+    const elevation = this.atmosphere.sunDirection.y;
+    if (
+      !force &&
+      Number.isFinite(this.lastEnvElevation) &&
+      Math.abs(elevation - this.lastEnvElevation) < TOUR_ENV_ELEVATION_STEP
+    ) {
+      return;
+    }
+    this.lastEnvElevation = elevation;
+    this.atmosphere.updateEnvironment(this.renderer, this.scene);
   }
 
   private applyPreset(captureEnvironment = true): void {
@@ -1416,7 +1486,20 @@ class App {
      * inside the determinism guarantee the capture harness depends on.
      */
     if (this.state.cameraMode === 'cinematic') {
-      this.atmosphere.setParams(this.sunFromClock(this.director.cinematicTimeOfDay));
+      const env = this.director.cinematicEnvironment();
+      this.atmosphere.setParams(this.sunFromClock(env.hours));
+      this.clouds.setParams({ coverage: env.cloudCoverage });
+      // Kind *and* intensity. Setting the intensity alone produces no weather
+      // at all under a clear preset: `Weather` will not draw while its kind is
+      // 'clear', and the `raining` scalar a dozen lines below — which is what
+      // reaches the lens beads, the surface stipple, the foam agitation and the
+      // hull wetting — is gated on the same test.
+      this.weather.setKind(env.weatherKind);
+      this.weather.setIntensity(env.rain);
+      this.cinematicFog = env.fogDensity;
+      this.refreshTourEnvironment();
+    } else {
+      this.cinematicFog = 1;
     }
 
     // The lens focuses on whatever this mode's shot is about. Closed-form in
@@ -1667,8 +1750,12 @@ class App {
       // 0.0074/m under every preset — around 400 m of visibility — and rendered
       // even Clear Day as a white-out. The preset numbers now carry the medium;
       // see `Preset.fog.volumetric`.
+      // `cinematicFog` is 1 outside the tour, so this term vanishes there. Inside
+      // it, the squall thickens the air between the viewer and everything else.
       density:
-        preset.fog.volumetric * (this.state.fogDensity / DEFAULT_UI_STATE.fogDensity) *
+        preset.fog.volumetric *
+        (this.state.fogDensity / DEFAULT_UI_STATE.fogDensity) *
+        this.cinematicFog *
         (1 - submersion),
       windDirection: preset.sea.windDirection,
       windSpeed: 0.4 + this.state.windSpeed * 0.06,
@@ -1935,7 +2022,24 @@ class App {
           // droplets in a clear-sky gallery image were that, and it made the
           // canonical shots depend on the order they ran in — exactly what the
           // shot list's own header warns against.
-          const resetRain = this.rainOverride ?? getPreset(this.state.preset).weather.intensity;
+          // The cinematic clock first, because with the tour driving the
+          // weather, "what should the world look like at `start`" is a question
+          // only the flight can answer.
+          //
+          // This used to sit forty lines below, after the seeds. That ordering
+          // was correct while the preset owned the weather and is wrong now: a
+          // night or squall capture would be seeded bone dry from a clear
+          // preset, and wetness dries on a 26 s constant, so no number of settle
+          // steps would recover it. The seeds have to come from the tour when
+          // the tour is what is being photographed.
+          this.director.resetCinematic(start);
+          const tour =
+            this.state.cameraMode === 'cinematic'
+              ? this.director.cinematicEnvironment(start)
+              : null;
+          if (tour) this.weather.setKind(tour.weatherKind);
+          const resetRain =
+            this.rainOverride ?? tour?.rain ?? getPreset(this.state.preset).weather.intensity;
           this.lensRain.setIntensity(resetRain);
           this.weather.setIntensity(resetRain);
           this.wake?.setRainAgitation(resetRain);
@@ -1947,6 +2051,19 @@ class App {
           this.lensRain.resetClock(start);
           this.caustics.resetClock(start);
           this.atmosphere.resetClock(start);
+          // Force the environment cube, rather than waiting for the elevation
+          // threshold to be crossed some frames into the settle.
+          //
+          // The throttle in `refreshTourEnvironment` exists so the cost is not
+          // paid every frame, and it means the *first* settled frame after a
+          // rewind would otherwise be lit by whichever hour the previous shot
+          // left in the cube. For a night capture taken after a daylight one
+          // that is the whole difference between the shot and a bug.
+          if (this.state.cameraMode === 'cinematic') {
+            this.atmosphere.setParams(this.sunFromClock(this.director.cinematicEnvironment(start).hours));
+            this.atmosphere.update(0);
+            this.refreshTourEnvironment(true);
+          }
           this.clouds.resetWind();
           this.birds.resetClock(start);
           this.fish.resetClock(start);
@@ -1955,11 +2072,9 @@ class App {
           this.stormQuote.reset();
           this.canopy.resetClock(start);
           this.audio.resetClock(start);
-          // The cinematic carries a position on its own 120 s loop, which is
-          // state exactly like a clock: without this, a capture taken in
-          // cinematic mode would frame whatever beat the previous shot happened
-          // to leave it on.
-          this.director.resetCinematic(start);
+          // `resetCinematic` is deliberately *not* here any more — it now runs
+          // before the weather seeds above, because those seeds are read from the
+          // flight and cannot be taken before its clock is set.
           this.wake?.reset(this.renderer);
 
           // Floating bodies carry position and momentum across a whole session;
@@ -2056,6 +2171,17 @@ class App {
          * renderer's own path.
          */
         setDitherLevels: (levels: number) => this.outputTransform.setDitherLevels(levels),
+        /** The tour's environment curves, for the seam and coverage tests. */
+        cinematicEnvironment: (time?: number) => ({
+          ...this.director.cinematicEnvironment(time),
+        }),
+        /** Beat names, start times and durations, for the framing tests. */
+        cinematicBeats: () => CINEMATIC_BEATS.map((b) => ({ ...b })),
+        /** Nominal hull position at a loop time; see `Cinematic.nominalShipXZ`. */
+        nominalShipAt: (time: number) => {
+          const p = nominalShipXZ(time, _shipProbe);
+          return { x: p.x, z: p.y };
+        },
         /** Test-only flare override. */
         setFlareEnabled: (on: boolean) => this.lensFlare.setEnabled(on),
         /** Test-only lens override: tap count and f-number. */

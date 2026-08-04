@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { CameraMode } from '../ui/types';
-import { CinematicDirector, type CinematicShipInput } from './Cinematic';
+import { type CinematicEnvironment, CinematicDirector, type CinematicShipInput } from './Cinematic';
 
 /**
  * Modes the director can be put into.
@@ -208,11 +208,15 @@ export class CameraDirector {
   }
 
   /**
-   * Hour of the day the cinematic tour wants to be lit at. Meaningless in other
-   * modes; see `Cinematic.timeOfDayHours`.
+   * The world the cinematic tour wants this frame — hour, rain, cloud, fog.
+   * Meaningless in other modes; see `Cinematic.environment`.
+   *
+   * `time` defaults to the live clock. Passing it explicitly is what lets a
+   * deterministic reset ask what the world *will* look like at the moment it is
+   * rewinding to, before it seeds the effects that accumulate.
    */
-  get cinematicTimeOfDay(): number {
-    return this.cinematic.timeOfDayHours;
+  cinematicEnvironment(time?: number): Readonly<CinematicEnvironment> {
+    return this.cinematic.environment(time);
   }
 
   /**

@@ -1550,8 +1550,21 @@ test.describe('interaction', () => {
     }));
     expect(early.orders.throttle, 'the flight is not calling for any power').toBeGreaterThan(0.1);
 
-    // Long enough to be well clear of the first beat and unambiguously under way.
-    await page.evaluate(() => window.__ocean.step(1 / 60, 420));
+    // 1200 steps — twenty seconds — and the number is load-bearing.
+    //
+    // This was 420 steps, which is seven, described in its own message as ten.
+    // The opening beat is fourteen seconds long, so seven never left it: the
+    // assertion below passed on a floating-point artefact instead. The settle
+    // left the loop clock at 119.99999999999997 against a 120 s lap — a hair
+    // short of the wrap — so `beatAt` reported the *last* beat, and stepping
+    // seven seconds into `open-water` therefore looked like a beat change. Re-
+    // authoring the flight to 166 s changed that accumulation by one ulp, the
+    // clock landed exactly on the wrap, and the test failed with everything
+    // about the tour working correctly.
+    //
+    // Twenty seconds genuinely crosses the first boundary, whatever the lap
+    // length and wherever the reset happens to land.
+    await page.evaluate(() => window.__ocean.step(1 / 60, 1200));
     const later = await page.evaluate(() => ({
       beat: window.__ocean.director.cinematicBeat,
       ship: window.__ocean.shipState(),
@@ -1559,9 +1572,9 @@ test.describe('interaction', () => {
 
     expect(
       later.ship?.forwardSpeed ?? 0,
-      `hull speed was ${(later.ship?.forwardSpeed ?? 0).toFixed(2)} m/s after 10 s of tour`,
+      `hull speed was ${(later.ship?.forwardSpeed ?? 0).toFixed(2)} m/s after 20 s of tour`,
     ).toBeGreaterThan(1);
-    expect(later.beat, `the tour stayed on beat "${early.beat}" for 10 s`).not.toBe(early.beat);
+    expect(later.beat, `the tour stayed on beat "${early.beat}" for 20 s`).not.toBe(early.beat);
 
     // Hand back to the viewer, and assert *immediately*.
     //

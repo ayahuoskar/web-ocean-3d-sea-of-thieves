@@ -169,19 +169,66 @@ const FORT: readonly [number, number] = [
 ];
 
 /**
- * How far the tour's time of day swings, in hours either side of noon, and why
- * it is a sine rather than a ramp.
+ * The tour's day, as a *phase warp* on a full twenty-four hours per lap.
  *
- * The loop is seamless, so anything driven from the clock has to be *periodic*
- * in it. A dawn-to-dusk ramp is the obvious way to move the light through a tour
- * and it puts an eight-hour cut at the loop point, which is the one edit this
- * flight exists to avoid. A sine over the loop period is continuous in value and
- * in derivative at the wrap, and still sweeps the sun from an elevation of 0.44
- * to 1.31 radians — afternoon light on the island at the quarter point, morning
- * light on the reef at the three-quarter.
+ * The obvious construction is a sine of the loop clock about noon, and the
+ * previous flight used one with a swing of 4.2 hours — which is why it only ever
+ * saw 08:18 to 16:42 and never reached sunset, let alone night. Widening that
+ * sine does not fix it: centred on noon, a swing large enough to reach darkness
+ * at the trough puts the *crest* past midnight as well, so the tour would pass
+ * through night twice and midday never.
+ *
+ * The right shape is a full day per lap. `hours` is then an angle rather than a
+ * quantity — `sunFromClock` reads it only through trigonometry, so hour 24 and
+ * hour 0 are the same sun — and a linear ramp through all twenty-four is
+ * therefore already seamless, in value and in derivative. The earlier worry that
+ * a ramp puts a cut at the loop point is true only of a ramp covering *part* of
+ * a day.
+ *
+ * A linear ramp is still not enough, because the beats do not want equal shares
+ * of it: the reef needs sun on it, the surf needs a low sun rather than no sun,
+ * and the squall and the night watch need real darkness — and the last two sit
+ * fourteen seconds apart on a 166-second lap. So the ramp is warped:
+ *
+ *     g(x) = x + (a / 2π) · sin(2π (x − p))
+ *
+ * which advances by exactly one day per lap for any `a` and `p`, is smooth
+ * everywhere, and has rate `1 + a·cos(2π(x − p))` — fastest at `p`, slowest half
+ * a lap away. At `a = 0.9` the sun runs nearly twice as fast at one end of the
+ * lap and almost stands still at the other, so the flight lingers in afternoon
+ * light on the island and hurries through the small hours.
+ *
+ * The three numbers are not taste. They were searched against the light each
+ * beat actually needs — surf lit end to end, squall and night watch below −0.25
+ * elevation throughout, the reef lit from a third of the way in and reaching
+ * noon by its end — and these are the values that satisfy all of it at once.
+ * The resulting schedule: afternoon on the open water, golden light on the
+ * island, a low sun in the surf, sunset on the way back, a squall after dark,
+ * the middle of the night on watch, and a dive that begins before dawn and
+ * surfaces at noon.
  */
-const TOUR_NOON_HOURS = 12.5;
-const TOUR_HOUR_SWING = 4.2;
+const HOUR_WARP_AMOUNT = 0.9;
+const HOUR_WARP_PHASE = 0.74;
+/** Hour of the day at the top of the lap. */
+const HOUR_AT_ORIGIN = 10.5;
+
+/**
+ * Peak rain rate in the squall, and the shape of its arrival.
+ *
+ * A raised cosine rather than a ramp or a clamp: it reaches zero *with zero
+ * derivative* at both ends, so the weather arrives and leaves without a corner
+ * in it. A clamped linear ramp would be continuous and not C¹, and the kink
+ * would show as the rain rate visibly changing gear — the same class of defect
+ * the camera curve is built to avoid, applied to the sky instead.
+ *
+ * Centred a little before the squall beat's midpoint and wider than the beat, so
+ * the weather is already making up as the `return` leg ends and has not quite
+ * cleared when the night watch begins. Weather that starts exactly when a shot
+ * starts reads as a switch being thrown.
+ */
+const RAIN_PEAK = 0.85;
+const RAIN_CENTRE_SECONDS = 99;
+const RAIN_HALF_WIDTH_SECONDS = 21;
 
 /**
  * The flight.
@@ -227,7 +274,7 @@ const BEATS: readonly Beat[] = [
     // speed reads as an establishing move rather than as a rush.
     name: 'outbound',
     duration: 20,
-    throttle: 1.0,
+    throttle: 0.85,
     keys: [
       { at: 0.0, eye: [66, 22, 96], look: 'ship' },
       { at: 0.35, eye: [-180, 92, -40], look: ISLAND_LOOK },
@@ -249,11 +296,34 @@ const BEATS: readonly Beat[] = [
     // crown stays above the lens where it belongs.
     name: 'landfall',
     duration: 26,
-    throttle: 0.85,
+    throttle: 0.45,
     keys: [
       { at: 0.0, eye: [-640, 96, -300], look: [COVE[0] + 30, 18, COVE[1] + 10] },
       { at: 0.36, eye: [-812, 58, -318], look: [COVE[0], 6, COVE[1] - 18] },
       { at: 0.7, eye: [-1044, 72, -322], look: [FORT[0], 38, FORT[1]] },
+    ],
+  },
+  {
+    // Into the surf zone, at the end of the island leg and before the run home.
+    //
+    // The shore break is one of this scene's headline features — depth-driven
+    // breaking foam, a swash band, wet sand, rock crossing the waterline — and
+    // the previous flight never came below 55 m, so the whole of it was a few
+    // pixels of white in a wide. This beat is the only one that flies low enough
+    // to see it.
+    //
+    // 9 to 30 m on the cove's bearing, angled *along* the beach rather than
+    // square at it, so the surf line runs across the frame instead of lying as a
+    // horizontal band. Cleared rather than clamped against the ground, for the
+    // reason the underwater keys are: a clamp is a non-smooth term and the one
+    // thing this curve must never develop is a corner.
+    name: 'surf-line',
+    duration: 12,
+    throttle: 0.25,
+    keys: [
+      { at: 0.0, eye: [-900, 30, -400], look: [-800, 4, -470] },
+      { at: 0.45, eye: [-800, 13, -432], look: [-792, 2, -502] },
+      { at: 0.78, eye: [-716, 9, -478], look: [-800, 3, -542] },
     ],
   },
   {
@@ -262,11 +332,52 @@ const BEATS: readonly Beat[] = [
     // that follows starts as a continuation of this move rather than as a new one.
     name: 'return',
     duration: 18,
-    throttle: 0.9,
+    throttle: 0.45,
     keys: [
       { at: 0.0, eye: [-1218, 88, -300], look: ISLAND_LOOK },
       { at: 0.42, eye: [-702, 44, -262], look: [-260, 6, -150] },
-      { at: 0.76, eye: [-338, 9, -206], look: [-150, -6, -128] },
+      { at: 0.76, eye: [-338, 9, -206], look: [-150, 4, -128] },
+    ],
+  },
+  {
+    // Weather, over open water, after dark.
+    //
+    // The one beat that exists for the sky rather than for anything in the sea:
+    // rain on the lens, the deck killing the key light, the whitecap deposit
+    // rate up, the hull darkening as it wets. All of it is driven from this same
+    // clock — see `CinematicEnvironment` — so it is as reproducible as the pose.
+    //
+    // Low and level. A squall read from above is a grey frame; read from fifteen
+    // metres with the swell running past the lens it is weather.
+    name: 'squall',
+    duration: 20,
+    throttle: 0.25,
+    keys: [
+      { at: 0.0, eye: [-300, 17, -190], look: [-160, 6, -120] },
+      { at: 0.4, eye: [-182, 12, -122], look: [-40, 5, -40] },
+      { at: 0.75, eye: [-64, 15, -42], look: [60, 6, 40] },
+    ],
+  },
+  {
+    // The middle of the night, with the ship.
+    //
+    // Moon glitter, the star field and a hull lit by nothing else — the whole
+    // night half of the atmosphere, which the previous flight never reached
+    // because its sun swing bottomed out at 08:18.
+    //
+    // Framed on the hull throughout, and that is what makes it a *watch* rather
+    // than a landscape: there is very little else legible at this hour, and a
+    // beat pointed at empty black water is indistinguishable from a renderer
+    // that has failed. The look targets resolve through `nominalShipXZ`, so they
+    // follow the hull wherever its circuit has taken it — about 230 m out at
+    // this point on the lap, still over the shallow plateau.
+    name: 'night-watch',
+    duration: 14,
+    throttle: 0.2,
+    keys: [
+      { at: 0.0, eye: [-40, 19, -28], look: 'ship' },
+      { at: 0.45, eye: [-92, 11, -62], look: 'ship' },
+      { at: 0.8, eye: [-152, 8, -12], look: 'ship' },
     ],
   },
   {
@@ -286,7 +397,7 @@ const BEATS: readonly Beat[] = [
     // level with the fish, which mill about three metres off the bottom.
     name: 'reef-run',
     duration: 26,
-    throttle: 0.5,
+    throttle: 0.18,
     keys: [
       { at: 0.0, eye: [-206, -4.5, -142], look: [-130, -13, -118] },
       { at: 0.34, eye: [-116, -10.5, -104], look: [-52, -15.5, -62] },
@@ -301,7 +412,7 @@ const BEATS: readonly Beat[] = [
     // surprising composition still reads as an edit.
     name: 'ascent',
     duration: 16,
-    throttle: 0.85,
+    throttle: 0.35,
     keys: [
       { at: 0.0, eye: [48, -6.5, 46], look: [92, -4, 96] },
       { at: 0.42, eye: [104, 12, 124], look: 'ship' },
@@ -409,7 +520,7 @@ function beatAt(time: number): number {
  * reading the live hull is what would make a capture depend on what the physics
  * did before it.
  */
-function nominalShipXZ(time: number, out: THREE.Vector2): THREE.Vector2 {
+export function nominalShipXZ(time: number, out: THREE.Vector2): THREE.Vector2 {
   const beat = beatAt(time);
   const arc = BEAT_START_ARC[beat] + BEAT_SPEED[beat] * (time - BEAT_START[beat]);
   const turned = arc / TRACK_RADIUS;
@@ -583,6 +694,67 @@ export interface CinematicShipInput {
 export const CINEMATIC_BEATS: ReadonlyArray<{ readonly name: string; readonly duration: number }> =
   BEATS.map((beat) => ({ name: beat.name, duration: beat.duration }));
 
+/**
+ * Everything about the world, other than the camera and the hull, that the tour
+ * owns while it is running.
+ *
+ * Every field is a pure, periodic, closed-form function of the loop clock — the
+ * same rule the pose and the ship orders already follow, and for the same
+ * reason. `resetClock(t)` has to reproduce a frame *exactly*, lighting and
+ * weather included, or every cinematic baseline becomes a function of how many
+ * frames happened to run before the capture.
+ */
+export interface CinematicEnvironment {
+  /** Hour of the day, 0..24. */
+  hours: number;
+  /** Rain rate, 0..1. */
+  rain: number;
+  /** Cloud coverage, 0..1. */
+  cloudCoverage: number;
+  /** Multiplier on the preset's volumetric fog density. */
+  fogDensity: number;
+  /**
+   * Which weather to draw, and this is not cosmetic.
+   *
+   * `Weather` refuses to draw anything at all while its kind is `'clear'`,
+   * whatever the intensity, and `main.update` computes the `raining` scalar that
+   * drives the lens beads, the surface ring stipple, the whitecap agitation and
+   * the hull wetting as `kind === 'rain' ? intensity : 0`. Every clear preset
+   * declares `'clear'`. So a squall that set only the intensity would produce no
+   * weather anywhere — and would look exactly like a bug in the curves rather
+   * than a missing field.
+   */
+  weatherKind: 'clear' | 'rain';
+}
+
+/** Warped day phase. See `HOUR_WARP_AMOUNT` for what the warp is for. */
+function tourHours(time: number): number {
+  const x = time / CINEMATIC_LOOP_SECONDS;
+  const warped =
+    x + (HOUR_WARP_AMOUNT / (Math.PI * 2)) * Math.sin(Math.PI * 2 * (x - HOUR_WARP_PHASE));
+  const hours = (warped * 24 + HOUR_AT_ORIGIN) % 24;
+  return hours < 0 ? hours + 24 : hours;
+}
+
+/**
+ * Rain rate at a loop time.
+ *
+ * A raised cosine, and the shape is the point: it reaches zero *with zero
+ * derivative* at both ends, so the weather makes up and clears without a corner
+ * in it. A clamped linear ramp would be continuous and not C¹, and that kink
+ * reads as the rain visibly changing gear — the same class of defect the camera
+ * spline is built to avoid, moved to the sky.
+ *
+ * The distance to the centre is measured *around the loop*, so a squall that
+ * straddled the wrap would still be one squall.
+ */
+function tourRain(time: number): number {
+  let d = Math.abs(time - RAIN_CENTRE_SECONDS);
+  if (d > CINEMATIC_LOOP_SECONDS / 2) d = CINEMATIC_LOOP_SECONDS - d;
+  if (d >= RAIN_HALF_WIDTH_SECONDS) return 0;
+  return RAIN_PEAK * 0.5 * (1 + Math.cos((Math.PI * d) / RAIN_HALF_WIDTH_SECONDS));
+}
+
 export class CinematicDirector {
   private enabled = false;
   private clock = 0;
@@ -592,6 +764,19 @@ export class CinematicDirector {
    * to read it immediately and not retain it.
    */
   private readonly input: CinematicShipInput = { throttle: 0, rudder: 0 };
+
+  /**
+   * Returned by `environment` rather than allocated per call, for the same
+   * reason `input` is: this is read every frame and the frame path must not
+   * allocate. Callers are expected to read it immediately and not retain it.
+   */
+  private readonly env: CinematicEnvironment = {
+    hours: 12,
+    rain: 0,
+    cloudCoverage: 0.3,
+    fogDensity: 1,
+    weatherKind: 'clear',
+  };
 
   get isEnabled(): boolean {
     return this.enabled;
@@ -608,20 +793,36 @@ export class CinematicDirector {
   }
 
   /**
-   * Hour of the day the tour is currently lit at, 0..24.
+   * The world the tour wants this frame, other than the camera and the hull.
    *
    * A pure function of the loop clock and nothing else, which is what keeps it
    * inside the same guarantee the rest of this class carries: `resetClock(t)`
-   * followed by a capture reproduces the frame exactly, lighting included. An
-   * accumulator here — "advance the clock a little each frame" — would have been
-   * simpler to write and would have made every cinematic baseline depend on how
-   * many frames had been rendered before it.
+   * followed by a capture reproduces the frame exactly, lighting and weather
+   * included. An accumulator here — "advance the weather a little each frame" —
+   * would have been simpler to write and would have made every cinematic
+   * baseline depend on how many frames had been rendered before it.
    *
-   * See `TOUR_HOUR_SWING` for why the shape is a sine.
+   * @param time Loop position to sample. Defaults to the live clock. The
+   *   explicit form is what lets a deterministic reset ask "what should the
+   *   world look like at the moment I am about to rewind to" *before* seeding
+   *   the accumulating effects — see `resetDeterministic`.
    */
-  get timeOfDayHours(): number {
-    const phase = (this.clock / CINEMATIC_LOOP_SECONDS) * Math.PI * 2;
-    return TOUR_NOON_HOURS + Math.sin(phase) * TOUR_HOUR_SWING;
+  environment(time: number = this.clock): Readonly<CinematicEnvironment> {
+    const t = wrapTime(time);
+    const rain = tourRain(t);
+    const env = this.env;
+    env.hours = tourHours(t);
+    env.rain = rain;
+    // Cloud builds with the rain and does not entirely clear afterwards, which
+    // is what stops the squall reading as a rain layer switched on under an
+    // otherwise blue sky.
+    env.cloudCoverage = 0.3 + rain * 0.62;
+    // Rain thickens the air between the viewer and everything else. Multiplier
+    // rather than an absolute, so a preset's own medium still decides what a
+    // squall over *this* place looks like.
+    env.fogDensity = 1 + rain * 1.7;
+    env.weatherKind = rain > 0.001 ? 'rain' : 'clear';
+    return env;
   }
 
   /**
