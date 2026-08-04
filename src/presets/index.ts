@@ -101,6 +101,7 @@ const identityGrade = (): ColorGradeParams => ({
   offset: IDENTITY_GRADE.offset.clone(),
   power: IDENTITY_GRADE.power.clone(),
   saturation: IDENTITY_GRADE.saturation,
+  vignette: IDENTITY_GRADE.vignette,
 });
 
 /**

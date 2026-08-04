@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { setCamera, setState } from './helpers';
+import { frameMean, setCamera, setState } from './helpers';
 import { bootOcean } from './lib/capture';
 
 /**
@@ -95,5 +95,76 @@ test.describe('colour grade', () => {
         slope: [1, 1, 1], offset: [0, 0, 0], power: [1, 1, 1], saturation: 1,
       }),
     );
+  });
+});
+
+/**
+ * Rewind, set the stage, then measure — in that order, every time.
+ *
+ * `frameMean` advances the world by two steps to let the frame converge, so two
+ * consecutive calls photograph *different seas* and their difference is mostly
+ * the swell moving. That is not a subtle effect: it is larger than the whole
+ * contribution of a restrained bloom, and it is what made the first cut of the
+ * Low test fail against a stage that was working correctly.
+ */
+async function measureAt(
+  page: import('@playwright/test').Page,
+  time: number,
+  prepare: () => Promise<void>,
+): Promise<number> {
+  await page.evaluate((t) => window.__ocean.resetDeterministic(t, 90), time);
+  await prepare();
+  return frameMean(page);
+}
+
+test.describe('bloom', () => {
+  const SUNSET_TIME = 31.25;
+
+  test('lifts the sun track and cannot darken the frame', async ({ page }) => {
+    await bootOcean(page);
+    // Sunset, looking straight down the sun's track: the one composition in the
+    // shot list where a large part of the frame is genuinely above 1.0 in
+    // linear, which is what the pyramid's threshold selects on.
+    await setState(page, { preset: 'sunset', quality: 'high', cameraMode: 'orbit' });
+    await setCamera(page, [58, 7, 9], [0, 4, 0]);
+
+    const on = await measureAt(page, SUNSET_TIME, () =>
+      page.evaluate(() => window.__ocean.setBloomEnabled(true)),
+    );
+    const off = await measureAt(page, SUNSET_TIME, () =>
+      page.evaluate(() => window.__ocean.setBloomEnabled(false)),
+    );
+
+    // Additive by construction: `bloom()` returns a contribution which the chain
+    // adds. If this ever came out darker, the stage would be replacing the image
+    // rather than adding to it — which is the mistake the node's own usage
+    // example exists to prevent, and which a baseline diff would not name.
+    expect(on).toBeGreaterThan(off);
+
+    await page.evaluate(() => window.__ocean.setBloomEnabled(true));
+  });
+
+  test('the Low tier actually reaches the stage', async ({ page }) => {
+    await bootOcean(page);
+    await setState(page, { preset: 'sunset', quality: 'low', cameraMode: 'orbit' });
+    await setCamera(page, [58, 7, 9], [0, 4, 0]);
+
+    // Low differs from High for a dozen reasons besides bloom, so comparing the
+    // two tiers proves nothing about this stage. What does prove something is
+    // asking whether the tier's own value arrived: at Low, turning bloom off
+    // must be a no-op, and forcing it on must not be. A `bloom` field that
+    // nothing read would pass the second check and fail the first.
+    const asTierLeftIt = await measureAt(page, SUNSET_TIME, async () => {});
+    const forcedOff = await measureAt(page, SUNSET_TIME, () =>
+      page.evaluate(() => window.__ocean.setBloomEnabled(false)),
+    );
+    expect(Math.abs(forcedOff - asTierLeftIt)).toBeLessThan(0.01);
+
+    const forcedOn = await measureAt(page, SUNSET_TIME, () =>
+      page.evaluate(() => window.__ocean.setBloomEnabled(true)),
+    );
+    expect(forcedOn).toBeGreaterThan(asTierLeftIt);
+
+    await setState(page, { quality: 'high' });
   });
 });

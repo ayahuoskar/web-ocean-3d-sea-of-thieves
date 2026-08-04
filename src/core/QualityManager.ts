@@ -99,6 +99,22 @@ export interface QualitySettings {
    */
   fogSteps: number;
   /**
+   * Whether the bloom pyramid contributes, 0 or 1.
+   *
+   * An enable, not a strength, and the distinction is the same one `refraction`
+   * makes: how strong bloom is belongs to the *look* — it is why
+   * `toneMappingExposure` lives on the preset and not here — while what a tier
+   * decides is whether a scene can afford five downsample-and-blur passes at
+   * all. A tier that also set the strength would make the same preset a
+   * different brightness on different hardware.
+   *
+   * 0 does not remove the node: rebuilding `outputNode` would recompile shaders
+   * on a live tier change. It zeroes the contribution and drops the pyramid to
+   * an eighth resolution, which together cost a rounding error. See
+   * `SceneBloom.setEnabled`.
+   */
+  bloom: 0 | 1;
+  /**
    * Lens-rain droplet lattice count, 1..3. 0 disables the effect entirely.
    *
    * Each level adds a lattice and, above 1, extra texture reads for misting
@@ -177,6 +193,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     reflection: 0,
     reflectionScale: 0.25,
     fogSteps: 0,
+    bloom: 0,
     lensRainQuality: 1,
     wakeDisplacement: 0,
     propsDetail: 0.3,
@@ -201,6 +218,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     reflection: 0.6,
     reflectionScale: 0.35,
     fogSteps: 12,
+    bloom: 1,
     lensRainQuality: 2,
     wakeDisplacement: 0.75,
     propsDetail: 0.5,
@@ -223,6 +241,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     reflection: 0.85,
     reflectionScale: 0.5,
     fogSteps: 24,
+    bloom: 1,
     lensRainQuality: 3,
     wakeDisplacement: 1,
     propsDetail: 0.75,
@@ -245,6 +264,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     reflection: 1,
     reflectionScale: 0.6,
     fogSteps: 40,
+    bloom: 1,
     lensRainQuality: 3,
     wakeDisplacement: 1,
     propsDetail: 1,
@@ -267,6 +287,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     reflection: 1,
     reflectionScale: 0.75,
     fogSteps: 56,
+    bloom: 1,
     lensRainQuality: 3,
     wakeDisplacement: 1,
     propsDetail: 1,

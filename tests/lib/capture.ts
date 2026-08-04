@@ -65,6 +65,8 @@ interface OceanHooks {
   ): Promise<void>;
   step(dt: number, steps?: number): Promise<void>;
   capturePixels(): Promise<CapturedPixels>;
+  /** Test-only bloom override. */
+  setBloomEnabled(on: boolean): void;
   /** Test-only grade override. Colours are plain triples; see the hook's note. */
   setGrade(g: {
     slope: [number, number, number];

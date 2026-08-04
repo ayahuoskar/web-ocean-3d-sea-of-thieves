@@ -8,6 +8,15 @@ dist/
 # never be committed. See the Sketchfab section of ASSET_LICENSES.md.
 sketchfab-token
 
+# Research credentials (Firecrawl, Apify). Same rule as the Sketchfab token:
+# personal, and nothing in the build reads them — they exist so a session can
+# reach documentation that is behind a bot challenge. This entry is load-bearing
+# rather than tidy: the workflow in this repository uses `git add -A`, so an
+# unignored `.env` is one commit away from being published.
+.env
+.env.*
+!.env.example
+
 # Playwright
 test-results/
 playwright-report/
@@ -46,3 +55,13 @@ assets/source/
 # here so `inspect`/`shells`/`plates` and the viewer can be pointed at it before
 # anyone decides whether it is worth a manifest entry. Nothing here ships.
 public/models/_preview/
+
+# Reference material fetched for study, never for reuse. Shadertoy's default
+# licence is CC BY-NC-SA 3.0 and two of the shaders in here are stricter still,
+# so this must not enter the tree: doing so would relicense the project. See
+# research/shadertoy/README.md, which records the terms and what was taken from
+# each one as *technique*.
+research/
+
+# Scratch capture spec used for eyeballing tuning changes between tasks.
+tests/_probe.spec.ts

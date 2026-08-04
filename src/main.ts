@@ -40,6 +40,7 @@ import { Atmosphere, Clouds, Weather } from './sky';
 import { VolumetricFog } from './post/VolumetricFog';
 import { LensRain } from './post/LensRain';
 import { ColorGrade } from './post/ColorGrade';
+import { SceneBloom } from './post/Bloom';
 import { CameraDirector } from './cameras/CameraDirector';
 import { getPreset } from './presets';
 import { Panel } from './ui/Panel';
@@ -137,6 +138,7 @@ class App {
   private fog!: VolumetricFog;
   private lensRain!: LensRain;
   private colorGrade!: ColorGrade;
+  private bloom!: SceneBloom;
   private particles!: UnderwaterParticles;
   private caustics!: Caustics;
 
@@ -464,9 +466,20 @@ class App {
     // thing it refracts should be the finished image. And the grade is in linear:
     // `outputColorTransform` applies ACES after `outputNode`, so this shapes what
     // the tone curve then compresses. See `src/post/ColorGrade.ts`.
+    this.bloom = new SceneBloom();
     this.colorGrade = new ColorGrade();
+
+    // Resolved to a texture before the bloom, and that costs a fullscreen pass
+    // worth having. `BloomNode` evaluates its input inside its own high-pass
+    // material, and the additive base evaluates it a second time — so handing it
+    // a composited expression computes that expression twice per frame. Once the
+    // depth-of-field gather is in this position that is up to 32 texture taps
+    // paid for twice; resolving once and sampling a texture is strictly cheaper
+    // from the first tap onward.
+    const bloomed = this.bloom.build(rtt(graded as THREE.Node));
+
     this.post.outputNode = this.lensRain.build(
-      rtt(this.colorGrade.build(graded) as THREE.Node),
+      rtt(this.colorGrade.build(bloomed) as THREE.Node),
     ) as THREE.Node;
 
     boot.set(0.85, 'Wiring controls…');
@@ -976,6 +989,12 @@ class App {
     // WebGL2 gets the two-lattice floor whatever the tier, matching the rest of
     // the fallback policy.
     this.lensRain.setQuality(this.backend === 'webgl' ? 1 : quality.lensRainQuality);
+    // Bloom keeps its tier on both backends, and that is a decision rather than
+    // an omission. The pyramid is ordinary texture sampling into ordinary render
+    // targets — there is no depth read, no backdrop read and no compute in it —
+    // so it is one of the few effects here with nothing backend-specific to go
+    // wrong. The stages that *do* read depth are gated below.
+    this.bloom.setEnabled(quality.bloom === 1);
     this.water.setWakeDisplacement(quality.wakeDisplacement);
     // Instance counts only, and safe on a live scene: no geometry is rebuilt and
     // nothing allocates, so this is a tier knob rather than a reload. Null until
@@ -1206,6 +1225,12 @@ class App {
     );
 
     this.renderer.toneMappingExposure = preset.toneMappingExposure;
+    // The bloom needs to know where white is, and only the exposure knows.
+    //
+    // Tone mapping happens after this whole post chain, so "1.0" in here is not
+    // the sensor limit — `1 / exposure` is. The presets span 0.42 to 1.35, so a
+    // fixed threshold would mean something different in each of the nine.
+    this.bloom.setExposure(preset.toneMappingExposure);
     // With the exposure, not instead of it, and the pair is not redundant:
     // exposure decides where the scene sits on the tone curve, the grade decides
     // what colour it is once it gets there. Collapsing them into one number is
@@ -1939,6 +1964,8 @@ class App {
             power: new THREE.Color(g.power[0], g.power[1], g.power[2]),
             saturation: g.saturation,
           }),
+        /** Test-only bloom override, so a test can prove the stage contributes. */
+        setBloomEnabled: (on: boolean) => this.bloom.setEnabled(on),
         /** Exact-pixel frame capture; see `App.capturePixels`. */
         capturePixels: () => this.capturePixels(),
         dispose: () => this.dispose(),
@@ -1978,6 +2005,7 @@ class App {
     // does not traverse the node graph, so anything in the chain that holds a
     // render target has to be released from this list or it is simply leaked.
     this.colorGrade?.dispose();
+    this.bloom?.dispose();
     this.particles?.dispose();
     this.caustics?.dispose();
     this.shipControls?.dispose();

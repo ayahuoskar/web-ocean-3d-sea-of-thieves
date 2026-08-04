@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { Fn, dot, max, mix, pow, uniform, vec3, vec4 } from 'three/tsl';
+import { Fn, dot, float, max, mix, pow, screenSize, uniform, uv, vec2, vec3, vec4 } from 'three/tsl';
 
 /**
  * A global colour grade, as the last thing that happens to the image before the
@@ -49,6 +49,15 @@ export interface ColorGradeParams {
   power: THREE.Color;
   /** 0 is monochrome, 1 is untouched, above 1 is more saturated. */
   saturation: number;
+  /**
+   * Natural vignetting, 0..1. 0 is a perfectly even field.
+   *
+   * How much of the physical `cos⁴θ` falloff to apply — see `VIGNETTE` below for
+   * why that is the law and not an authored curve. 1 is the full falloff a
+   * simple lens of this field of view actually has; the presets use rather less,
+   * because a real lens is corrected and this frame is not a pinhole photograph.
+   */
+  vignette: number;
 }
 
 /** No-op grade. A preset spread over this is a preset that grades itself. */
@@ -57,7 +66,19 @@ export const IDENTITY_GRADE: Readonly<ColorGradeParams> = {
   offset: new THREE.Color(0, 0, 0),
   power: new THREE.Color(1, 1, 1),
   saturation: 1,
+  vignette: 0,
 };
+
+/**
+ * Half-diagonal field angle, radians, for the `cos⁴` vignette.
+ *
+ * The camera's vertical field is 55° at 16:9, which puts the frame corner about
+ * 31° off axis. Derived as a constant rather than read from the live camera
+ * because the vignette is a property of the *lens* the whole project is
+ * photographed through, and a shot that changed the field of view should change
+ * what is in frame, not how dark its corners are.
+ */
+const CORNER_ANGLE = 0.545;
 
 /**
  * Rec.709 luma weights.
@@ -75,6 +96,7 @@ export class ColorGrade {
   private readonly uOffset = uniform(new THREE.Color(0, 0, 0));
   private readonly uPower = uniform(new THREE.Color(1, 1, 1));
   private readonly uSaturation = uniform(1);
+  private readonly uVignette = uniform(0);
 
   /**
    * @param sceneColor Any composited colour node. Unlike the depth-of-field and
@@ -99,7 +121,39 @@ export class ColorGrade {
       const cdl = pow(lifted, this.uPower).toVar('gradeCdl');
 
       const luma = dot(cdl, LUMA_709).toVar('gradeLuma');
-      return vec4(mix(vec3(luma), cdl, this.uSaturation), source.a);
+      const graded = mix(vec3(luma), cdl, this.uSaturation).toVar('gradeSat');
+
+      // --- natural vignetting ------------------------------------------------
+      //
+      // `cos⁴θ`, which is the actual law rather than a curve chosen to look
+      // like one. Off-axis illuminance at the sensor falls by four cosines and
+      // each one has a separate cause: the source is foreshortened, the exit
+      // pupil is foreshortened, the image point is further from the pupil by
+      // `1/cos²`, and the ray meets the sensor obliquely. Three of the reference
+      // shaders studied for this pass reach for `pow(16·u·v·(1-u)·(1-v), k)`
+      // instead — a separable polynomial that is cheaper, is not a cosine, and
+      // has the wrong shape near the corners, where it goes to zero rather than
+      // to `cos⁴` of the corner angle.
+      //
+      // Applied here, before the tone curve, because that is where it physically
+      // belongs: vignetting happens in the lens, to the light, on its way to a
+      // sensor that has not yet responded to it. A vignette multiplied onto a
+      // tone-mapped image instead is a darkening of the *picture*, which reads as
+      // a filter — it crushes corner shadows that the tone curve had already
+      // lifted, rather than giving the corners less light to begin with.
+      const centred = vec2(uv().x.sub(0.5), uv().y.sub(0.5)).toVar('gradeVc');
+      // Corrected to the frame's aspect so the falloff is radial on screen
+      // rather than elliptical, and normalised so `1` is the corner.
+      const aspect = screenSize.x.div(screenSize.y.max(1)).toVar('gradeAspect');
+      const radius = vec2(centred.x.mul(aspect), centred.y).length()
+        .div(vec2(aspect.mul(0.5), 0.5).length())
+        .toVar('gradeVr');
+      const cosTheta = float(1).div(radius.mul(Math.tan(CORNER_ANGLE)).pow(2).add(1).sqrt())
+        .toVar('gradeCos');
+      const falloff = cosTheta.pow(4).toVar('gradeFall');
+      const lens = mix(float(1), falloff, this.uVignette).toVar('gradeVig');
+
+      return vec4(graded.mul(lens), source.a);
     })();
   }
 
@@ -108,6 +162,7 @@ export class ColorGrade {
     if (params.offset !== undefined) this.uOffset.value.copy(params.offset);
     if (params.power !== undefined) this.uPower.value.copy(params.power);
     if (params.saturation !== undefined) this.uSaturation.value = params.saturation;
+    if (params.vignette !== undefined) this.uVignette.value = params.vignette;
   }
 
   /**
