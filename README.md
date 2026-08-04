@@ -2,8 +2,10 @@
 
 A realtime spectral ocean and tropical island rendered with **Three.js**, **WebGPU** and
 **TSL** — FFT wave synthesis, physically motivated water optics, a depth-driven shore break,
-foam, caustics, buoyancy, wakes, underwater transitions and a volumetric sky, with a graceful
-WebGL2 fallback from the same shader source.
+foam, caustics, buoyancy, wakes, underwater transitions and a volumetric sky, photographed
+through a lens rather than a pinhole: a thin-lens circle of confusion, veiling glare over a
+capped highlight, a sun-anchored flare the scene can occlude, and a per-preset ASC CDL grade.
+With a graceful WebGL2 fallback from the same shader source.
 
 ![Web Ocean 3D](docs/images/hero.png)
 
