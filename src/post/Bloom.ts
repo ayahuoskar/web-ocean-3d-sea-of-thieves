@@ -40,7 +40,6 @@ export class SceneBloom {
    * restore, and so a tier change and a look change cannot overwrite each other.
    */
   private strength = 0.03;
-  private enabled = true;
   private node: ReturnType<typeof bloom> | null = null;
   /**
    * Linear value that will read as white after exposure and tone mapping.
@@ -137,15 +136,9 @@ export class SceneBloom {
    * compile the whole quality system exists to avoid.
    */
   setEnabled(on: boolean): void {
-    this.enabled = on;
     if (this.node === null) return;
     this.node.strength.value = on ? this.strength : 0;
     this.node.setResolutionScale(on ? 0.5 : 0.125);
-  }
-
-  setStrength(value: number): void {
-    this.strength = value;
-    if (this.node !== null && this.enabled) this.node.strength.value = value;
   }
 
   dispose(): void {

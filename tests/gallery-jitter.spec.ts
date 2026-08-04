@@ -154,6 +154,30 @@ const DETAIL_FLOOR = 0.4;
 test('the far field does not shimmer, and the near field keeps its detail', async ({ page }) => {
   test.setTimeout(600_000);
   await bootOcean(page);
+
+  // The output dither is switched off for the whole of this test, and that is a
+  // correctness fix rather than a convenience.
+  //
+  // Both metrics below are per-pixel *spatial* operators — `highFreq` is a
+  // Laplacian along the row, `detail` a first difference — and the output stage
+  // adds a static, independent, one-LSB triangular dither to every pixel before
+  // quantisation. That is per-pixel high-frequency energy by construction, so it
+  // lands directly in both, and a Laplacian amplifies it: independent noise of
+  // standard deviation s comes through at s*sqrt(6).
+  //
+  // It confounds this test in *both* directions, which is what makes leaving it
+  // on untenable. It inflates `highFreq`, so a renderer whose distant water is
+  // perfectly calm reads as boiling — measured here at 2.101 before the dither
+  // existed and 2.604 after, against a 2.33 ceiling, with the *temporal* figure
+  // unchanged and comfortably passing the whole time. And it inflates `detail`
+  // by about the same amount, which is worse: `DETAIL_FLOOR` exists to stop the
+  // shimmer figure being won by flattening the water, and a dither would let a
+  // genuinely flattened frame clear it on noise alone.
+  //
+  // The ceilings are measured constants and stay where they were measured. What
+  // changes is that the thing being measured is the water again.
+  await page.evaluate(() => window.__ocean.setDitherLevels(0));
+
   for (const quality of ['medium', 'high', 'ultra', 'max'] as const) {
     await setState(page, { quality, preset: 'skyPro', windSpeed: 15 });
     await setCamera(page, [-46, 9, 44], [-90, 6, 8]);

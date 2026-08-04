@@ -5,11 +5,11 @@ A realtime spectral ocean and tropical island rendered with **Three.js**, **WebG
 foam, caustics, buoyancy, wakes, underwater transitions and a volumetric sky, with a graceful
 WebGL2 fallback from the same shader source.
 
-![Web Ocean 3D](docs/images/island.png)
+![Web Ocean 3D](docs/images/hero.png)
 
-<p align="center"><em>The island from 780 m off the beach — the deterministic approval frame.
-Every image in this README is regenerated from the current renderer by one command; none of
-them is hand-captured.</em></p>
+<p align="center"><em>A hundred metres off the hull, with the island a kilometre and a half
+beyond it. Every image in this README is regenerated from the current renderer by one command;
+none of them is hand-captured.</em></p>
 
 <p align="center">
   <img alt="Three.js r185" src="https://img.shields.io/badge/three.js-r185-000000?style=flat-square&logo=three.js&logoColor=white">
@@ -94,6 +94,16 @@ and weather together — so switching reads as a different *place*, not a colour
 | ![Sunset](docs/images/sunset.png) | ![Waves](docs/images/waves.png) |
 | Anisotropic glitter stretching down the sun's track | Whitecaps where the surface genuinely folds, at 15 m/s |
 
+| Clear day | The night watch |
+|---|---|
+| ![Clear day](docs/images/clear-day.png) | ![Night](docs/images/night.png) |
+| The reference frame every measurement in this repository is taken against | The cinematic tour at 02:20 — moon glitter, star field, and a hull lit by nothing else |
+
+| A squall | The surf line |
+|---|---|
+| ![Squall](docs/images/squall.png) | ![Surf](docs/images/surf.png) |
+| The tour changing the weather: rain on the lens, the deck killing the key light, the hull wet | Inside the shore break under a low sun, from the beat that flies at 9 m |
+
 ![Island](docs/images/island.png)
 
 *The frame the terrain, the planting and the grade are tuned against, and the one the
@@ -104,7 +114,7 @@ summit, and closed shoreline rock that can be dropped at any angle.*
 | The shore break | Over the reef |
 |---|---|
 | ![Shore](docs/images/shore.png) | ![Reef](docs/images/reef.png) |
-| Depth-driven breaking foam: the surf line sits where the water shoals to about 1.3 wave heights, so it walks seaward as the sea gets up | Coral, reef rock and kelp on the inner plateau — the half of the underwater scene the up-looking dive shot cannot see |
+| Depth-driven breaking foam: the surf line sits where the water shoals to about 1.3 wave heights, so it walks seaward as the sea gets up | Coral, reef rock and kelp on the inner plateau, framed on a school's *measured* position rather than on the centre of the circuit it travels |
 
 ![Interface](docs/images/interface.png)
 

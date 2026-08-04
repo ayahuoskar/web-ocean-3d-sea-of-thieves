@@ -1,6 +1,6 @@
 # Deterministic visual verification
 
-A visual regression harness for the seven canonical shots: fixed world state,
+A visual regression harness for the sixteen canonical shots: fixed world state,
 checked-in baselines, a perceptual metric, and thresholds derived from a measured
 noise floor rather than chosen to make the suite pass.
 
@@ -35,7 +35,7 @@ visible before it crosses.
 
 Defined as data in `tests/lib/shots.ts` — preset, quality tier, wind, cloud
 cover, camera mode, camera pose and simulation time — so the harness, any
-before/after review loop and the README screenshots can all frame the same seven
+before/after review loop and the README screenshots can all frame the same sixteen
 views.
 
 | Shot | Preset | What it is there to catch |
@@ -47,6 +47,30 @@ views.
 | `boat-chase` | seaOfThieves | Chase framing, buoyancy pose, hull material, contact shadow, wake footprint |
 | `waterline` | skyPro | Grazing near-surface silhouette against sky, up-sun specular path to the horizon |
 | `underwater` | skyPro | Extinction with depth, god rays, particulate, hull underside, surface from below |
+| `island-approach` | skyPro | The whole island: shoreline rock, beach, canopy, summit, and the depth ramp |
+| `shore-break` | skyPro | Inside the surf zone: breaking foam, swash band, wet sand, rock at the waterline |
+| `reef-dive` | skyPro | Coral, reef rock, kelp and a school framed on its *measured* position |
+| `ship-and-island` | skyPro | Hull and landmass in one frame at their real relative scale |
+| `cinematic-landfall` | skyPro | The tour over the cove — jetty, beached pinnace, fort |
+| `cinematic-reef` | skyPro | The tour's reef leg, a third of the way in, once its dawn has come up |
+| `cinematic-surf` | skyPro | The tour inside the shore break under a low sun |
+| `cinematic-squall` | skyPro | The tour changing the weather: rain on the lens, key light killed, hull wet |
+| `cinematic-night` | skyPro | The tour at 02:20 — moon glitter, star field, a hull lit by nothing else |
+
+**Five shots run the cinematic flight rather than pinning a camera.** Those are
+the ones whose `state.cameraMode` is `'cinematic'`, and they name a
+`cinematicTime` — a position on the tour's own 166 s lap — instead of a pose. The
+two clocks are independent: `time` settles the sea, the foam and the wake, while
+`cinematicTime` decides the camera, the hour and the weather together, so a shot
+can ask for a settled sea framed by the night watch.
+
+They used to be captured by copying a beat's key into an *orbit* camera, because
+the shot type had no cinematic mode. That was serviceable while the tour's sun
+only swept 08:18 to 16:42 and its light was close to the preset's. It stopped
+being serviceable when the flight gained a full day and a squall: a night beat
+photographed as an orbit shot under `skyPro` is a **noon** frame at a night
+camera position, and would have baselined the pose and nothing the beat exists
+to show.
 
 **`boat-chase` is still not "while moving".** The spec asks for the chase camera
 while under way. The ship controller now exists — W/S and A/D drive throttle and

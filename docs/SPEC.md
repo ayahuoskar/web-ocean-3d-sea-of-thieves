@@ -99,8 +99,17 @@ src/
     Atmosphere.ts         analytic sky + sun/moon disc + stars + env capture
     Clouds.ts             raymarched volumetric cloud layer
     Weather.ts            rain / snow particle systems
+  post/
+    DepthOfField.ts       thin-lens circle of confusion, spiral gather
+    Bloom.ts              veiling glare (three's mip pyramid, capped input)
+    LensFlare.ts          sun/moon-anchored, depth-occluded, above water only
+    ColorGrade.ts         ASC CDL + saturation + cos^4 vignette, per preset
+    OutputTransform.ts    ACES, sRGB and a triangular dither -- taken over from
+                          the renderer so there is a stage late enough to dither
+    VolumetricFog.ts      marched height fog and light shafts
+    LensRain.ts           refracting droplets on the front element
   underwater/
-    UnderwaterPass.ts     fog, god rays, colour grade
+    UnderwaterPass.ts     water column, god rays, per-pixel waterline
     Particles.ts          particulates + bubbles
     Caustics.ts           procedural caustic field shared by submerged materials
   scene/

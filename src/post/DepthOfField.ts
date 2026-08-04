@@ -73,6 +73,10 @@ const SENSOR_HEIGHT = 0.024;
  */
 const GOLDEN_ANGLE = 2.39996323;
 
+/** Gather radius ceiling in pixels at the top tier, and the tap count it assumes. */
+const MAX_RADIUS_AT_FULL_TAPS = 14;
+const FULL_TAPS = 32;
+
 export class DepthOfField {
   private camera: THREE.PerspectiveCamera | null = null;
 
@@ -100,7 +104,26 @@ export class DepthOfField {
   private readonly uSampleCount: any = uniform(0, 'int');
   private readonly uSamples = uniform(0);
 
-  private fNumber = 5.6;
+  /**
+   * f-number, and a note on why the effect is deliberately invisible in the
+   * wide shots.
+   *
+   * A 55-degree field on a full-frame sensor is a 23 mm lens, and a 23 mm lens
+   * has enormous depth of field: at f/2.8 the hyperfocal distance is about six
+   * metres, so anything past a dozen metres is sharp when the focus is at four
+   * hundred. That is not a defect to be tuned out — it is the correct answer,
+   * and it is also the right *look*, because a softened island in a landscape
+   * shot would read as a mistake.
+   *
+   * Where this earns its cost is the close work: the reef at twelve metres with
+   * coral at three, the underwater dive, the surf. There the circle of
+   * confusion is a few pixels and the frame gains the depth cue it should have.
+   *
+   * Written down because the tempting "fix" for a wide shot that shows no bokeh
+   * is a scale factor on the CoC, and that would be a lie applied everywhere to
+   * solve a problem that exists nowhere.
+   */
+  private fNumber = 2.8;
   private focusDistance = 120;
   private samples = 0;
 
@@ -241,11 +264,13 @@ export class DepthOfField {
     this.samples = Math.max(0, Math.floor(count));
     this.uSamples.value = this.samples;
     this.uSampleCount.value = this.samples;
-  }
-
-  /** Ceiling on the gather radius in pixels, so the cost is bounded. */
-  setMaxRadius(pixels: number): void {
-    this.uMaxRadius.value = Math.max(0, pixels);
+    // The radius ceiling follows the tap count, so tap *density* stays roughly
+    // constant across the tiers. Sample density over a disc goes as N / (pi r^2),
+    // so holding it fixed means r scales with the square root of N. A tier that
+    // kept the full radius on a quarter of the taps would not be a cheaper
+    // depth of field, it would be a visibly noisy one — the spiral would start
+    // to read as individual samples rather than as a defocused image.
+    this.uMaxRadius.value = MAX_RADIUS_AT_FULL_TAPS * Math.sqrt(this.samples / FULL_TAPS);
   }
 
   /** Owns no GPU resources; present so the chain's teardown stays uniform. */
