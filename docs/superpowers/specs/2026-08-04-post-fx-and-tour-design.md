@@ -72,11 +72,19 @@ scenePass.colour
   → outputNode
 ```
 
-Two `rtt` resolves are added, to three total. Both are forced, not chosen:
-`DepthOfField` and `Bloom` re-sample the image at offset coordinates, and a
-composited colour node has no `.sample()`. This is the same constraint `LensRain`
-already documents, and getting it wrong is silently fatal rather than merely
-wrong — the frame comes out black.
+Two `rtt` resolves are added, to three total, for two different reasons.
+
+The one before `DepthOfField` is **forced**: the gather re-samples the image at
+offset coordinates, and a composited colour node has no `.sample()`. This is the
+same constraint `LensRain` already documents, and getting it wrong is silently
+fatal rather than merely wrong — the frame comes out black.
+
+The one before `Bloom` is **chosen**. `BloomNode` takes any `Node<vec4>` and
+evaluates it inside its own high-pass material rather than sampling it, so
+`bloom(dofOutput)` would compile. It would also evaluate the entire DOF gather —
+up to 32 taps — a second time in the high-pass pass, and a third time for the
+additive base. Resolving once and sampling a texture three times is the whole
+reason to spend the resolve.
 
 `LensRain` stays last, for the reason its existing comment gives: droplets are
 lenses, and what they should refract is the finished image.
@@ -97,10 +105,15 @@ consequences, all of them good:
 
 ### A1. `src/post/DepthOfField.ts` — hand-written
 
-Three ships `DepthOfFieldNode`, and it is not usable here: its `focalLengthNode`
-means "how far an object can be from the focal plane before it is completely out
-of focus", which is an artistic range and not a lens. There is no way to drive it
-from a real aperture.
+Three ships `DepthOfFieldNode`, and it is the wrong shape for this. Its CoC is
+`smoothstep(0, focalLength, |viewZ − focus|)` scaled by `bokehScale` — a linear
+ramp in distance from the focal plane, with no sensor and no aperture in it. An
+aperture can be made to *drive* those two numbers, so the honest statement is not
+that it cannot be done but that the curve is wrong: a real lens' CoC is
+hyperbolic in object distance and strongly asymmetric about the focal plane —
+near-field blur grows far faster than far-field, and the far field saturates at
+the hyperfocal limit. A symmetric ramp cannot express either, and both are
+exactly what makes a wide lens over water read as a lens.
 
 The circle of confusion is computed from the thin-lens equation:
 
@@ -167,10 +180,16 @@ Instead:
 - **Elements.** A tight halo at the sun, three tinted ghosts along the
   sun→centre vector, one faint anamorphic horizontal streak, and a very slight
   full-frame veil. Aspect-corrected so ghosts stay round.
-- **Colour.** Scaled by `atmosphere.sunColor × sunLight.intensity`, so it warms
-  through sunset and is gone at night without a separate authored curve.
-- **Moon.** The same path at a much smaller weight, because the tour now spends
-  time at night and a bare moon disc reads flat.
+- **Colour.** Scaled by `atmosphere.sunColor × sunLight.intensity` while the sun
+  is the key, so it warms through sunset without a separate authored curve.
+- **Moon — and this is a trap worth spelling out.** `Atmosphere` has one
+  directional light. Once the sun drops it is *retargeted to the moon* and its
+  colour is overwritten with `MOON_LIGHT_COLOR`
+  (`src/sky/Atmosphere.ts:731`), while `atmosphere.sunColor` goes on reporting
+  the solar extinction colour regardless. So the moon path must anchor to
+  `moonDirection` and take its colour from the **live `sunLight.color`**, not
+  from `sunDirection` and `sunColor`. Reusing the sun's accessors would put a
+  warm flare on a blue moon, anchored where the sun is not.
 
 ### A4. `src/post/ColorGrade.ts` — hand-written
 
@@ -214,11 +233,21 @@ anything globally:
 | `lensFlare` | 0 | 1 | 1 | 1 | 1 |
 
 `dofSamples: 0` is a bit-exact pass-through, matching how `fogSteps: 0` and
-`godRaySteps: 0` already behave.
+`godRaySteps: 0` already behave. `bloom: 0` and `lensFlare: 0` add nothing, which
+is the same thing by a different route — they are additive terms.
 
-The *strength* of each effect is not a tier knob. Tiers decide whether an effect
-is affordable; the preset and the module constants decide what it looks like.
-This mirrors `refraction` and `reflection`, which are policy at Low and look
+**The colour grade is not tiered, and does not claim bit-exactness.** It is the
+look, in the same class as `toneMappingExposure`; a tier that dropped it would
+make the same preset a different colour on different hardware, which is worse
+than the cost it saves. It is also not free to claim as identity: the graph is
+built once and the grade lives in uniforms, so the CDL's `pow` and `mix` are in
+every frame at every tier. `pow(x, 1)` is not guaranteed to return `x` bit-exactly.
+The pass therefore costs what it costs everywhere, and the earlier draft's "Low is
+a bit-exact pass-through" applies to DOF only.
+
+The *strength* of the other three is not a tier knob either. Tiers decide whether
+an effect is affordable; the preset and the module constants decide what it looks
+like. This mirrors `refraction` and `reflection`, which are policy at Low and look
 everywhere else.
 
 ### A6. What is deliberately not being built
@@ -233,11 +262,28 @@ everywhere else.
 
 ### A7. WebGL2
 
-All four stages are TSL and should compile on the WebGL2 backend. The existing
-fallback policy applies if any of them does not: a coherent simpler image beats a
-broken richer one, so a stage that misbehaves is disabled on that backend the way
-`refraction` and the planar reflector already are. This is a contingency, not a
-plan — the intent is that all four run.
+All four stages are TSL and should compile on the WebGL2 backend, but "should" is
+not a policy, and the tier fields above will not produce one on their own —
+`applyQuality` gates `refraction` and `lensRainQuality` with individually
+hard-coded `backend === 'webgl'` checks (`src/main.ts:955`, `:964`), and anything
+not written that way is simply on at Medium and above.
+
+So each new stage gets its own explicit backend gate at the same site, decided
+from a rendered frame rather than from optimism. Half-float render targets and
+the depth-texture taps in the flare's occlusion disc are the two places most
+likely to differ. The existing forced-WebGL test path (`?webgl=1`) is extended to
+assert that a frame actually renders with the new chain, so a stage that compiles
+on WebGPU and produces a black frame on WebGL2 fails a test instead of shipping.
+
+### A8. Lifecycle
+
+`BloomNode` and `RTTNode` size themselves from the drawing buffer on each render,
+so no `onResize` wiring is needed. They do own render targets, and
+`RenderPipeline.dispose()` disposes only its own quad material — it does not
+traverse the node graph. Every node added here that owns a target is therefore
+disposed explicitly from `App.dispose()`, alongside the existing passes. The leak
+test already counts textures across tier changes and will see it if this is
+missed.
 
 ---
 
@@ -278,18 +324,35 @@ publishes `object.userData.schoolCentres`, and the harness can read it. The aim
 is a school at close enough range to be unmistakably fish, with coral in the same
 frame.
 
-### B3. New shots
+### B3. New shots — and the harness has to grow first
 
-Three, mirroring the existing `cinematic-reef` / `cinematic-landfall` pattern —
-a canonical shot pinned to a new beat's middle key, so each new beat is
-regression-covered and has a gallery image:
+Three new shots cover the three new beats:
 
 - `cinematic-surf`
 - `cinematic-squall`
 - `cinematic-night`
 
-Their comments must carry the same warning the existing two do: these copy beat
-keys verbatim, and if a beat moves, they move with it.
+**They cannot use the existing `cinematic-reef` pattern.** That pattern copies a
+beat's key into an *orbit* shot, because `ShotState.cameraMode` does not offer
+`'cinematic'` (`tests/lib/shots.ts:31`) and the shot's own comment records this
+as a deliberate cost. It works for `cinematic-reef` and `cinematic-landfall`
+precisely because the tour's lighting there is close to the preset's. It would be
+useless for the two new shots that matter most: a `cinematic-night` captured as
+an orbit shot under `skyPro` is a **noon** frame at a night camera position, and a
+`cinematic-squall` one is a clear-sky frame at a squall camera position. Each
+would baseline the pose and nothing the beat exists to show.
+
+So the harness gains what it was missing:
+
+- `ShotState.cameraMode` accepts `'cinematic'`.
+- `Shot` gains an optional `cinematicTime` — the loop position to rewind to.
+- `applyShot` selects the mode, rewinds the flight to that time, and settles.
+  `resetDeterministic` already rewinds the cinematic clock, and `CinematicDirector`
+  is closed-form in it, so this is deterministic by construction.
+
+The existing two shots are migrated to the same mechanism, which also removes the
+"if the beat moves, this must move with it" hazard their comments currently warn
+about — they stop copying coordinates and start naming a time.
 
 ### B4. Baseline regeneration
 
@@ -345,6 +408,16 @@ interface CinematicEnvironment {
   rain: number;           // 0..1, peaks on the squall beat
   cloudCoverage: number;  // 0..1, rises into the squall
   fogDensity: number;     // slider units, small rise in the squall
+  /**
+   * 'rain' wherever `rain > 0`, 'clear' elsewhere. Not cosmetic: `Weather`
+   * refuses to draw anything while its kind is 'clear' whatever the intensity
+   * (`Weather.applyVisibility`), and `main.update` computes its `raining` scalar
+   * as `kind === 'rain' ? intensity : 0` (`src/main.ts:1407`) — which is what
+   * drives the lens beads, the surface ring stipple, the foam agitation and the
+   * hull wetting. Under the default clear preset, setting intensity alone
+   * produces no weather at all, anywhere.
+   */
+  weatherKind: 'clear' | 'rain';
 }
 ```
 
@@ -397,18 +470,65 @@ cost. It is therefore re-captured on a **sun-elevation delta threshold**, not
 every frame: enough to keep the fill honest through sunset and into night,
 infrequent enough not to be felt.
 
-### C5. The hull's circuit must stay over the plateau
+**And leaving the tour has to put it back.** The mode-change path calls
+`applyPreset(false)` (`src/main.ts:835`), whose `false` explicitly suppresses the
+environment capture — correct today, because today the tour never changes the
+cube. Once it does, a viewer who exits Cinematic at night gets the preset's
+daylight sky back with the night IBL still bound, and nothing would ever clear
+it. That exit becomes a capture.
 
-`TRACK_RADIUS = TOTAL_ARC / (2π)` — that identity is what makes the circuit close,
-and it means the radius grows with the loop length. At today's throttles a 165 s
-loop would take the radius from 161 m to about 222 m, putting the ship's far
-point at 444 m: off the 320 m shallow plateau, over deep water, with nothing
-under it to look at.
+### C4b. Deterministic reset must ask the tour, not the preset
 
-The new beats therefore carry low throttles, chosen so the radius stays under
-about 180 m. This is a constraint on the authoring, and it is written down here
-because the failure mode is silent — the tour would still loop perfectly and
-would simply have sailed somewhere boring.
+`resetDeterministic` seeds rain, lens coverage, foam agitation and hull wetness
+from `rainOverride ?? preset.weather.intensity` and pushes them in *before*
+rewinding (`src/main.ts:1807`) — deliberately, because several of those snap to
+the current intensity and would otherwise inherit the previous shot's. It then
+resets the cinematic clock afterwards (`:1831`).
+
+With a tour that drives its own weather, that order is wrong: the seed comes from
+the preset while the frame being captured belongs to the tour, so a night or
+squall capture would settle with the wrong wetness and the wrong lens coverage
+and no number of settle steps would recover it — wetness alone has a 26 s time
+constant.
+
+The fix is an ordering, not a new mechanism: rewind the cinematic clock first,
+ask the flight for its environment at that time, and seed from *that* when the
+tour owns the world. The smoothed flare visibility and the environment-capture
+threshold are state of the same kind and are reset on the same path — a
+force-capture, so the IBL is right on the first settled frame rather than a
+threshold-crossing later.
+
+### C5. Where the hull actually goes
+
+`TRACK_RADIUS = TOTAL_ARC / (2π)` — that identity is what makes the circuit close.
+Two corrections to the obvious reading of it, both of which change the authoring.
+
+**The radius grows with travelled arc, not with duration.** `TOTAL_ARC` is
+`Σ speed × duration` and `speed = 9.64 · √throttle`, so a long beat at a low
+throttle adds far less radius than a short one at full ahead. That is the lever:
+the new beats can be generous in time and cheap in arc.
+
+**The far point is `2 × TRACK_RADIUS`, not `TRACK_RADIUS`.** `nominalShipXZ` puts
+the hull on a circle *through* the origin centred at `(0, −R)`, so its distance
+from the origin is `2R·|sin(turned/2)|`, maximised at half a lap. Today's 161.5 m
+radius therefore reaches 323 m, not 161 m — and the existing comment at
+`src/cameras/Cinematic.ts:361` claiming the lap stays inside the plateau's 320 m
+edge "and no further" is already 3 m wrong on its own arithmetic. At today's
+throttles a 165 s loop would reach 444 m.
+
+**But the binding constraint is not the radius.** The hull is at its far point at
+half a lap, and half a lap lands in the island beats — where the camera is a
+kilometre away looking at the cove and the ship is not in frame at all. What
+actually matters is where the hull is during the beats that *show* it:
+`open-water`, the first third of `outbound`, `night-watch` and `ascent`, all of
+which sit near the start and end of the lap where `turned` is small and the hull
+is close to the origin.
+
+So the authoring rule is: keep `2R` within a few tens of metres of the plateau
+edge if it comes for free, and — the part that is actually checked — assert that
+the hull is over the plateau at every beat that frames it. That is a test on
+`nominalShipXZ` at the ship-framing beat times, not a bound on a constant, and it
+is the form that survives someone re-timing a beat later.
 
 ### C6. Tests
 
@@ -440,10 +560,11 @@ would simply have sailed somewhere boring.
 - `src/cameras/CameraDirector.ts` — `focusDistance()`, environment pass-through
 - `src/core/QualityManager.ts` — `dofSamples`, `bloom`, `lensFlare`
 - `src/presets/index.ts` — `Preset.grade`, nine grades
-- `tests/lib/shots.ts` — `ship-and-island`, retuned `reef-dive`, three new
-  cinematic shots, re-measured noise floor
+- `tests/lib/shots.ts` — cinematic-mode shots, `ship-and-island`, retuned
+  `reef-dive`, three new cinematic shots, re-measured noise floor
+- `tests/lib/capture.ts` — `applyShot` drives cinematic mode and `cinematicTime`
 - `tests/gallery.spec.ts` — gallery mapping
-- `tests/ocean.spec.ts` — new tour assertions
+- `tests/ocean.spec.ts` — new tour assertions, hull-on-plateau check
 - `README.md` — hero image, gallery table
 - `docs/VERIFICATION.md` — new noise-floor measurements
 - `docs/SPEC.md` — the post chain is no longer only "fog, god rays, colour grade"
@@ -455,9 +576,11 @@ would simply have sailed somewhere boring.
 ## Success criteria
 
 1. Lens flare appears above water, anchored to the sun, occluded by geometry, and
-   absent below the surface and at night.
-2. Depth of field, bloom and colour grading are present, tier-scaled, and off at
-   Low as a bit-exact pass-through.
+   absent below the surface. At night it is the moon's, anchored to
+   `moonDirection` and coloured from the live key light.
+2. Depth of field, bloom and colour grading are present. DOF, bloom and flare are
+   tier-gated and off at Low, with DOF a bit-exact pass-through at zero taps. The
+   grade applies at every tier and makes no bit-exactness claim.
 3. The README's main image shows the ship in frame with the island behind it.
 4. The reef image shows fish unmistakably.
 5. The cinematic tour visits ship, island, shore break, reef, underwater, a
