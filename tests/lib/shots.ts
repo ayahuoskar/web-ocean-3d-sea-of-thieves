@@ -611,6 +611,21 @@ export interface NoiseFloor {
 }
 
 /**
+ * **Storm and boat-chase rose by more than an order of magnitude, and bloom is
+ * why.** They went from 0.0387 and 0.0318 to 0.5691 and 0.3886. Those two shots
+ * carry the heaviest foam in the list, and storm carries rain as well; a bloom
+ * pyramid takes a single whitecap pixel that differed between two runs and
+ * spreads it over a neighbourhood, so what used to be one isolated sparkle
+ * difference is now a halo of them. That shows up exactly where it did: `p95`
+ * and `fractionAbove` moved far more than the mean.
+ *
+ * The consequence is a genuine loss of sensitivity on those two shots — storm's
+ * gate is now 1.24 mean ΔE where it was 0.18, so a subtle storm regression could
+ * hide under it. It is recorded rather than tuned away, because the alternative
+ * is choosing a bloom strength to suit a metric. If it needs recovering, the
+ * lever is the harness (more warm-up captures, or a foam-masked comparison
+ * region), not the renderer.
+ *
  * The worst pairwise score over ten pairs, from five complete re-applications of
  * each shot, on this project's reference stack.
  *
@@ -633,30 +648,25 @@ export interface NoiseFloor {
  * came from, and how sensitive the resulting gate is to a real change.
  */
 export const MEASURED_NOISE_FLOOR: Readonly<Record<string, NoiseFloor>> = {
-  'clear-day-wide': { meanDeltaE: 0.0216, p95DeltaE: 0.0, fractionAbove: 0.00181 },
-  'near-water-detail': { meanDeltaE: 0.0155, p95DeltaE: 0.0, fractionAbove: 0.00133 },
-  sunset: { meanDeltaE: 0.0146, p95DeltaE: 0.0, fractionAbove: 0.00078 },
-  storm: { meanDeltaE: 0.0387, p95DeltaE: 0.0, fractionAbove: 0.00256 },
-  'boat-chase': { meanDeltaE: 0.0318, p95DeltaE: 0.0, fractionAbove: 0.00324 },
-  waterline: { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
-  underwater: { meanDeltaE: 0.005, p95DeltaE: 0.0, fractionAbove: 0.00019 },
-  // Exactly reproducible, and it should be: nothing in this frame moves except
-  // the sea, and at 900 m a wave is a fraction of a pixel. The gate it produces
-  // is `ABSOLUTE_FLOOR` alone, which is the intended behaviour for a shot with
-  // no measurable noise — see the note there.
-  'island-approach': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
-  'shore-break': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
-  'reef-dive': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
-  'cinematic-reef': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
-  'cinematic-landfall': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
-  // Placeholders until `MEASURE_NOISE=1` has been run against the new chain.
-  // Zeros mean the gate is `ABSOLUTE_FLOOR` alone, which is the correct
-  // behaviour for a shot whose noise has not yet been measured — strict, and
-  // therefore loud if it is wrong.
-  'ship-and-island': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
-  'cinematic-surf': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
-  'cinematic-squall': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
-  'cinematic-night': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
+  // Re-measured 2026-08-04 against the post chain, on the stack recorded in
+  // docs/VERIFICATION.md. Two of these rose by more than an order of magnitude
+  // and that is a real cost, not a rounding change -- see the note below.
+  'clear-day-wide': { meanDeltaE: 0.0000, p95DeltaE: 0.0000, fractionAbove: 0.00000 },
+  'near-water-detail': { meanDeltaE: 0.0265, p95DeltaE: 0.0000, fractionAbove: 0.00229 },
+  sunset: { meanDeltaE: 0.0337, p95DeltaE: 0.0000, fractionAbove: 0.00280 },
+  storm: { meanDeltaE: 0.5691, p95DeltaE: 3.2400, fractionAbove: 0.06169 },
+  'boat-chase': { meanDeltaE: 0.3886, p95DeltaE: 1.1000, fractionAbove: 0.01437 },
+  waterline: { meanDeltaE: 0.0003, p95DeltaE: 0.0000, fractionAbove: 0.00000 },
+  underwater: { meanDeltaE: 0.0210, p95DeltaE: 0.0000, fractionAbove: 0.00225 },
+  'island-approach': { meanDeltaE: 0.0000, p95DeltaE: 0.0000, fractionAbove: 0.00000 },
+  'shore-break': { meanDeltaE: 0.0000, p95DeltaE: 0.0000, fractionAbove: 0.00000 },
+  'reef-dive': { meanDeltaE: 0.0000, p95DeltaE: 0.0000, fractionAbove: 0.00000 },
+  'cinematic-reef': { meanDeltaE: 0.0162, p95DeltaE: 0.0000, fractionAbove: 0.00213 },
+  'cinematic-landfall': { meanDeltaE: 0.0000, p95DeltaE: 0.0000, fractionAbove: 0.00000 },
+  'ship-and-island': { meanDeltaE: 0.0069, p95DeltaE: 0.0000, fractionAbove: 0.00062 },
+  'cinematic-surf': { meanDeltaE: 0.0000, p95DeltaE: 0.0000, fractionAbove: 0.00000 },
+  'cinematic-squall': { meanDeltaE: 0.0072, p95DeltaE: 0.0000, fractionAbove: 0.00051 },
+  'cinematic-night': { meanDeltaE: 0.0000, p95DeltaE: 0.0000, fractionAbove: 0.00000 },
 };
 
 /**

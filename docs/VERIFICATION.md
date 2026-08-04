@@ -218,17 +218,46 @@ warm-up, capture, five times over. Repeating only `capturePixels` would measure
 the readback, which is exactly reproducible and would report zero; what the
 harness actually repeats between runs is the whole protocol.
 
-Measured 2026-08-01 on the reference stack below.
+Re-measured **2026-08-04** against the new post chain, on the reference stack
+below. The previous measurement (2026-08-01) predates depth of field, bloom, the
+lens flare, the per-preset grades and the output dither, and is superseded.
 
 | Shot | mean ΔE | p95 ΔE | pixels ΔE > 2.5 |
 | --- | --- | --- | --- |
-| `clear-day-wide` | 0.0216 | 0.00 | 0.181% |
-| `near-water-detail` | 0.0155 | 0.00 | 0.133% |
-| `sunset` | 0.0146 | 0.00 | 0.078% |
-| `storm` | 0.0387 | 0.00 | 0.256% |
-| `boat-chase` | 0.0318 | 0.00 | 0.324% |
-| `waterline` | 0.0000 | 0.00 | 0.000% |
-| `underwater` | 0.0050 | 0.00 | 0.019% |
+| `clear-day-wide` | 0.0000 | 0.00 | 0.000% |
+| `near-water-detail` | 0.0265 | 0.00 | 0.229% |
+| `sunset` | 0.0337 | 0.00 | 0.280% |
+| `storm` | 0.5691 | 3.24 | 6.169% |
+| `boat-chase` | 0.3886 | 1.10 | 1.437% |
+| `waterline` | 0.0003 | 0.00 | 0.000% |
+| `underwater` | 0.0210 | 0.00 | 0.225% |
+| `island-approach` | 0.0000 | 0.00 | 0.000% |
+| `shore-break` | 0.0000 | 0.00 | 0.000% |
+| `reef-dive` | 0.0000 | 0.00 | 0.000% |
+| `cinematic-reef` | 0.0162 | 0.00 | 0.213% |
+| `cinematic-landfall` | 0.0000 | 0.00 | 0.000% |
+| `ship-and-island` | 0.0069 | 0.00 | 0.062% |
+| `cinematic-surf` | 0.0000 | 0.00 | 0.000% |
+| `cinematic-squall` | 0.0072 | 0.00 | 0.051% |
+| `cinematic-night` | 0.0000 | 0.00 | 0.000% |
+
+**Two of these rose by more than an order of magnitude, and the cause is bloom.**
+`storm` went from 0.0387 to 0.5691 and `boat-chase` from 0.0318 to 0.3886. Those
+are the two shots carrying the heaviest foam, and `storm` carries rain as well. A
+bloom pyramid takes a single whitecap pixel that happened to differ between two
+runs and spreads it across a neighbourhood, so what used to be one isolated
+sparkle difference becomes a halo of them — which is exactly where the numbers
+moved: `p95` and the pixel fraction far more than the mean.
+
+That is a real loss of sensitivity, not a bookkeeping change. `storm`'s mean
+limit is now 1.24 ΔE where it was 0.18, and a subtle regression in that shot
+could hide underneath it. It is recorded rather than tuned away, because the
+alternative is choosing a bloom strength to suit a metric. If the sensitivity
+needs recovering, the lever is the harness — more warm-up captures, or a
+comparison that masks the foam field — not the renderer.
+
+Every other shot is at or below its previous figure, and seven are now exactly
+zero: for those, the whole protocol repeats bit-identically.
 
 `p95 = 0.00` means more than 95% of pixels were bit-identical.
 
@@ -244,8 +273,10 @@ Measured 2026-08-01 on the reference stack below.
 | `waterline` | 0.100 | — | 0.40 | 0.150% | — |
 | `underwater` | 0.110 | 22 | 0.40 | 0.188% | 9.9 |
 
-Because the measured p95 is zero everywhere, the p95 limit is the absolute floor
-for every shot and is the tightest of the three gates in practice.
+The measured p95 is zero for every shot except `storm` and `boat-chase`, so for
+the other fourteen the p95 limit is the absolute floor and is the tightest of the
+three gates in practice. For those two it is not: bloom has put real
+frame-to-frame variation into the top 5% of pixels.
 
 ### Cross-session behaviour
 
