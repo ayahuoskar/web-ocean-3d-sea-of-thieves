@@ -74,6 +74,7 @@ interface OceanHooks {
     time?: number,
     settleSteps?: number,
     shipInput?: { throttle: number; rudder: number } | null,
+    cinematicTime?: number | null,
   ): Promise<void>;
   step(dt: number, steps?: number): Promise<void>;
   capturePixels(): Promise<CapturedPixels>;
@@ -175,15 +176,31 @@ export async function applyShot(page: Page, shot: Shot): Promise<void> {
     );
   }
 
+  if (shot.state.cameraMode === 'cinematic' && shot.cinematicTime === undefined) {
+    throw new Error(`shot "${shot.id}" is cinematic but names no cinematicTime`);
+  }
+
+  // Two clocks, and they are not the same one. `shot.time` is the *simulation*
+  // clock — what the sea, the foam and the wake have been doing — while
+  // `cinematicTime` is a position on the flight's own 166 s lap, which decides
+  // the pose, the hour and the weather together. `resetDeterministic` rewinds
+  // both, each so that the settle *ends* on the requested value.
   await page.evaluate(
-    ({ time, settleSteps, shipInput }) =>
-      window.__ocean.resetDeterministic(time, settleSteps, shipInput),
-    { time: shot.time, settleSteps: shot.settleSteps, shipInput: shot.shipInput ?? null },
+    ({ time, settleSteps, shipInput, cinematicTime }) =>
+      window.__ocean.resetDeterministic(time, settleSteps, shipInput, cinematicTime),
+    {
+      time: shot.time,
+      settleSteps: shot.settleSteps,
+      shipInput: shot.shipInput ?? null,
+      cinematicTime: shot.cinematicTime ?? null,
+    },
   );
 
-  if (!shot.camera) {
+  if (!shot.camera && shot.state.cameraMode === 'boat') {
     // The chase rig damps toward its ideal pose, so after a settle it is close
-    // but not equal to it. `snapToTarget` places it exactly.
+    // but not equal to it. `snapToTarget` places it exactly. Chase-only: it
+    // returns immediately in any other mode, and the cinematic rig has its own
+    // deterministic entry point below.
     await page.evaluate(() => window.__ocean.director.snapToTarget());
   }
 

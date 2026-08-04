@@ -822,6 +822,23 @@ export class FishSchool {
       cz: Math.round(path.cz),
       radius: Math.round(path.radius),
     }));
+
+    // And the *live* position of each school, as a function rather than a
+    // snapshot.
+    //
+    // `schoolCentres` publishes the circuit a school travels; it does not say
+    // where on that circuit the school is now, and a resident school is a body
+    // that moves round its circuit rather than a cloud filling it. Framing one
+    // therefore needs the anchor, not the centre — aiming at the centre of an
+    // 11 m circuit from nine metres away photographs empty sand whenever the
+    // school happens to be on the far side, which is indistinguishable from a
+    // reef with no fish on it. That mistake has now been made three times in
+    // this repository, twice in the shot list and once in a gallery image.
+    this.object.userData.schoolAnchors = () =>
+      this.uAnchors.map((u) => {
+        const v = u.value as THREE.Vector4;
+        return { x: v.x, y: v.y, z: v.z };
+      });
     this.object.frustumCulled = false;
     this.object.matrixAutoUpdate = false;
     this.object.updateMatrix();

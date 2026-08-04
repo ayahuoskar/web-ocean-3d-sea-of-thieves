@@ -28,7 +28,7 @@ export type PresetId =
   | 'storm'
   | 'sunset';
 
-export type CameraMode = 'orbit' | 'fly' | 'boat';
+export type CameraMode = 'orbit' | 'fly' | 'boat' | 'cinematic';
 
 export type Vec3 = readonly [number, number, number];
 
@@ -70,6 +70,23 @@ export interface Shot {
    * `state.cameraMode` is `boat` — the controller is disabled otherwise.
    */
   shipInput?: { throttle: number; rudder: number };
+  /**
+   * Position on the cinematic loop, seconds. Required when `state.cameraMode`
+   * is `'cinematic'`, meaningless otherwise.
+   *
+   * This replaces the arrangement the two original tour shots used, where a
+   * beat's key was copied into an *orbit* camera because this type did not
+   * offer cinematic mode. That worked for those two only because the tour's
+   * light there was close to the preset's — and it is useless for the beats
+   * that matter most now that the flight has a day in it. A `cinematic-night`
+   * shot captured as an orbit camera under `skyPro` is a **noon** frame at a
+   * night camera position; a squall one is a clear-sky frame at a squall camera
+   * position. Each would baseline the pose and nothing the beat exists to show.
+   *
+   * Naming a time instead of copying coordinates also retires the "if the beat
+   * moves, this must move with it" hazard those shots' comments carried.
+   */
+  cinematicTime?: number;
 }
 
 /**
@@ -382,7 +399,26 @@ export const SHOTS: readonly Shot[] = [
      * nothing, which is worth recording: "no fish visible" had two independent
      * causes and fixing the aim only removed the first.
      */
-    camera: { position: [45, -12, 43], target: [33, -14.6, 31] },
+    /**
+     * Aimed at where the school **is**, not at the middle of the circuit it
+     * travels — and that distinction is the whole history of this shot.
+     *
+     * `schoolCentres` publishes an 11 m circuit centred on (33, 31), and both
+     * previous cuts aimed at that centre. A resident school is a *body* that
+     * moves round its circuit, not a cloud filling it, so aiming at the middle
+     * photographs empty sand for most of the lap — which is indistinguishable
+     * from a reef with no fish on it, and was twice concluded to be exactly
+     * that. The gallery image and the `cinematic-reef` baseline both show it.
+     *
+     * `FishSchool` now publishes `schoolAnchors()`, the live position, which is
+     * what a harness actually needs to frame one. At t = 68 this school sits at
+     * (29, -13, 25). The camera stands eleven metres off it on the bearing
+     * *away* from the coral bed, so the fish are between the lens and the reef
+     * rather than beside it — coral behind, school in front, and both inside
+     * the range where a 0.42 m body is thirty pixels of unmistakable fish
+     * rather than four pixels of water-coloured speck.
+     */
+    camera: { position: [23, -12.4, 16], target: [29, -13.6, 25] },
     time: 68,
     settleSteps: 90,
   },
@@ -396,14 +432,14 @@ export const SHOTS: readonly Shot[] = [
       'the whole 26 s of it.',
     state: {
       quality: 'high',
-      cameraMode: 'orbit',
+      cameraMode: 'cinematic',
       windSpeed: 15,
       peakWavelength: 47,
       cloudCoverage: 0.32,
       preset: 'skyPro',
     },
     /**
-     * The `reef-run` beat's middle key, verbatim.
+     * Captured by *running the tour*, not by copying its camera.
      *
      * Pinned as an orbit camera rather than by running the tour, because the
      * canonical shots cannot select cinematic mode — `ShotState.cameraMode` does
@@ -413,8 +449,11 @@ export const SHOTS: readonly Shot[] = [
      * with it; that is the cost of the arrangement and it is written down here
      * so the next person moving a key knows to.
      */
-    camera: { position: [-116, -10.5, -104], target: [-52, -15.5, -62] },
+    camera: null,
     time: 44,
+    // A third of the way into `reef-run`, where the flight's dawn has come up
+    // far enough to light the coral. The beat deliberately begins before it.
+    cinematicTime: 137,
     settleSteps: 90,
   },
   {
@@ -426,14 +465,135 @@ export const SHOTS: readonly Shot[] = [
       'any of them.',
     state: {
       quality: 'high',
+      cameraMode: 'cinematic',
+      windSpeed: 15,
+      peakWavelength: 47,
+      cloudCoverage: 0.32,
+      preset: 'skyPro',
+    },
+    camera: null,
+    time: 30,
+    cinematicTime: 46,
+    settleSteps: 90,
+  },
+  {
+    id: 'ship-and-island',
+    title: 'The ship, with the island beyond',
+    purpose:
+      'The frame the README opens on: the hull and the landmass in one shot, ' +
+      'which nothing in the gallery previously showed. Catches the two at their ' +
+      'real relative scale — a 27 m ship a hundred metres off, a 1 km island a ' +
+      'kilometre and a half beyond it — and the aerial perspective that has to ' +
+      'separate them.',
+    state: {
+      quality: 'high',
       cameraMode: 'orbit',
       windSpeed: 15,
       peakWavelength: 47,
       cloudCoverage: 0.32,
       preset: 'skyPro',
     },
-    camera: { position: [-812, 58, -318], target: [-768, 6, -476] },
-    time: 30,
+    /**
+     * Composed from the geometry rather than found by eye.
+     *
+     * The hull spawns at the origin and `ISLAND` sits at (-1150, -780), so the
+     * two are on a bearing of (-0.828, -0.561) and any camera on the opposite
+     * side of the ship has both in front of it. Standing 110 m off puts the 27 m
+     * hull at 14 degrees — about a sixth of the frame width, big enough to read
+     * as a ship rather than as a mark on the water — and the island at 1.5 km
+     * subtends 37, a little under half the frame.
+     *
+     * The stand-off bearing is rotated 20 degrees off the ship-to-island line so
+     * the hull does not eclipse the summit: it lands about 18 degrees off the
+     * aim axis, which is the near third of the frame, with the island centred
+     * behind it and open water in the foreground.
+     *
+     * The hull is floating rather than under way, and that is a real limitation
+     * rather than a choice. `shipInput` only moves a ship whose controller is
+     * enabled, which is Boat and Cinematic; and the chase rig re-derives its own
+     * pose every frame, so a pinned camera cannot survive Boat mode. A wake here
+     * would need the tour to happen to frame the island from astern, which it
+     * does not.
+     */
+    /**
+     * The aim point is 400 m out, **not** the island, and that is a constraint
+     * rather than a preference: `OrbitControls.maxDistance` is 1200 m, and
+     * `pin` drives the orbit rig, so aiming at the island 1493 m away silently
+     * clamped the camera 240 m *past* the ship on the way to it. The first cut
+     * of this shot photographed an empty sea with the island in it and no hull
+     * anywhere — the pin had been honoured and then overruled.
+     *
+     * So the target sits on a bearing 45% of the way from the ship toward the
+     * island, which puts the hull about 8 degrees left of the axis and the
+     * island's centre about 10 to the right: the ship just overlapping the
+     * island's near flank, with open water to its left.
+     */
+    camera: { position: [64, 15, 89], target: [-214, 23, -198] },
+    time: 36,
+    settleSteps: 90,
+  },
+  {
+    id: 'cinematic-surf',
+    title: 'The tour, in the surf',
+    purpose:
+      'The `surf-line` beat: the shore break from inside it, under a low sun. ' +
+      'The previous flight never came below 55 m over the island, so the whole ' +
+      'depth-driven surf zone was a few pixels of white in a wide.',
+    state: {
+      quality: 'high',
+      cameraMode: 'cinematic',
+      windSpeed: 15,
+      peakWavelength: 47,
+      cloudCoverage: 0.32,
+      preset: 'skyPro',
+    },
+    camera: null,
+    time: 58,
+    cinematicTime: 66,
+    settleSteps: 90,
+  },
+  {
+    id: 'cinematic-squall',
+    title: 'The tour, in a squall',
+    purpose:
+      'The `squall` beat at its wettest. This is the only shot in the list ' +
+      'that photographs the tour *changing the weather* — rain on the lens, ' +
+      'cloud closed over, the key light killed and the hull wet — none of ' +
+      'which the flight could do at all before, because it never touched ' +
+      '`Weather`.',
+    state: {
+      quality: 'high',
+      cameraMode: 'cinematic',
+      windSpeed: 15,
+      peakWavelength: 47,
+      cloudCoverage: 0.32,
+      preset: 'skyPro',
+    },
+    camera: null,
+    time: 76,
+    // The rain envelope peaks at 99 s; this is one second past it, so the shot
+    // cannot be quietly satisfied by a squall that arrives late.
+    cinematicTime: 100,
+    settleSteps: 90,
+  },
+  {
+    id: 'cinematic-night',
+    title: 'The tour, on the night watch',
+    purpose:
+      'The `night-watch` beat: moon glitter, the star field, and a hull lit by ' +
+      'nothing else. The whole night half of the atmosphere, which the ' +
+      "previous flight's 08:18-to-16:42 sun swing could not reach.",
+    state: {
+      quality: 'high',
+      cameraMode: 'cinematic',
+      windSpeed: 15,
+      peakWavelength: 47,
+      cloudCoverage: 0.32,
+      preset: 'skyPro',
+    },
+    camera: null,
+    time: 88,
+    cinematicTime: 117,
     settleSteps: 90,
   },
 ] as const;
@@ -485,6 +645,14 @@ export const MEASURED_NOISE_FLOOR: Readonly<Record<string, NoiseFloor>> = {
   'reef-dive': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
   'cinematic-reef': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
   'cinematic-landfall': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
+  // Placeholders until `MEASURE_NOISE=1` has been run against the new chain.
+  // Zeros mean the gate is `ABSOLUTE_FLOOR` alone, which is the correct
+  // behaviour for a shot whose noise has not yet been measured — strict, and
+  // therefore loud if it is wrong.
+  'ship-and-island': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
+  'cinematic-surf': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
+  'cinematic-squall': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
+  'cinematic-night': { meanDeltaE: 0.0, p95DeltaE: 0.0, fractionAbove: 0.0 },
 };
 
 /**

@@ -74,7 +74,10 @@ const MOONLIT: Shot = {
 };
 
 const GALLERY: readonly GalleryShot[] = [
-  canonical('clear-day-wide', 'hero'),
+  // The README's opening image. `clear-day-wide` used to be built into `hero`
+  // and the README referenced it nowhere, so the slot was published and unused.
+  canonical('ship-and-island', 'hero'),
+  canonical('clear-day-wide', 'clear-day'),
   canonical('storm', 'storm'),
   canonical('sunset', 'sunset'),
   { file: 'moonlit', shot: MOONLIT },
@@ -84,6 +87,14 @@ const GALLERY: readonly GalleryShot[] = [
   canonical('island-approach', 'island'),
   canonical('shore-break', 'shore'),
   canonical('reef-dive', 'reef'),
+  // The three beats the re-authored tour added. Each is captured by *running*
+  // the flight, not by copying its camera into an orbit shot — which for these
+  // three is the difference between the picture and a lie, since a night beat
+  // photographed under the preset's own sun is a noon frame at a night camera
+  // position.
+  canonical('cinematic-surf', 'surf'),
+  canonical('cinematic-squall', 'squall'),
+  canonical('cinematic-night', 'night'),
   // `waterline` is deliberately absent. The per-pixel split is a real capability
   // and the canonical shot regression-tests it, but the image it produces is a
   // pale wash that sells it badly — and publishing a weak picture to advertise a

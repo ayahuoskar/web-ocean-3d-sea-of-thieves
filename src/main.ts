@@ -1988,6 +1988,7 @@ class App {
           time = 0,
           settleSteps = 90,
           shipInput: { throttle: number; rudder: number } | null = null,
+          cinematicTime: number | null = null,
         ) => {
           const settleDt = 1 / 60;
           // Claim the clock before anything else, and settle any tier change
@@ -2032,10 +2033,20 @@ class App {
           // preset, and wetness dries on a 26 s constant, so no number of settle
           // steps would recover it. The seeds have to come from the tour when
           // the tour is what is being photographed.
-          this.director.resetCinematic(start);
+          // Two clocks, rewound together and from different origins.
+          //
+          // `start` is the *simulation* clock — the sea, the foam, the wake.
+          // The flight rides its own 166 s lap, and which second of that lap a
+          // shot wants is an independent choice: a caller can ask for a settled
+          // sea at t = 40 framed by the tour's night watch. Passing `null` keeps
+          // the old behaviour of running both from the same number, which is
+          // what every non-cinematic shot wants.
+          const cinematicStart =
+            cinematicTime === null ? start : cinematicTime - settleSteps * settleDt;
+          this.director.resetCinematic(cinematicStart);
           const tour =
             this.state.cameraMode === 'cinematic'
-              ? this.director.cinematicEnvironment(start)
+              ? this.director.cinematicEnvironment(cinematicStart)
               : null;
           if (tour) this.weather.setKind(tour.weatherKind);
           const resetRain =
@@ -2060,7 +2071,7 @@ class App {
           // left in the cube. For a night capture taken after a daylight one
           // that is the whole difference between the shot and a bug.
           if (this.state.cameraMode === 'cinematic') {
-            this.atmosphere.setParams(this.sunFromClock(this.director.cinematicEnvironment(start).hours));
+            this.atmosphere.setParams(this.sunFromClock(this.director.cinematicEnvironment(cinematicStart).hours));
             this.atmosphere.update(0);
             this.refreshTourEnvironment(true);
           }
