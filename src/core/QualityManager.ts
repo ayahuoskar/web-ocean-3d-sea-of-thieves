@@ -115,6 +115,19 @@ export interface QualitySettings {
    */
   bloom: 0 | 1;
   /**
+   * Taps in the depth-of-field gather.
+   *
+   * 0 is a bit-exact pass-through, and genuinely bit-exact rather than merely
+   * cheap: the gather sits behind a uniform-coherent branch, so at zero the
+   * output is the source texel untouched. The same construction `fogSteps: 0`
+   * and `godRaySteps: 0` already use.
+   *
+   * The taps are laid out on a golden-angle spiral, so raising this refines the
+   * bokeh rather than widening it — the radius comes from the aperture and the
+   * circle of confusion, never from the count.
+   */
+  dofSamples: number;
+  /**
    * Lens-rain droplet lattice count, 1..3. 0 disables the effect entirely.
    *
    * Each level adds a lattice and, above 1, extra texture reads for misting
@@ -194,6 +207,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     reflectionScale: 0.25,
     fogSteps: 0,
     bloom: 0,
+    dofSamples: 0,
     lensRainQuality: 1,
     wakeDisplacement: 0,
     propsDetail: 0.3,
@@ -219,6 +233,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     reflectionScale: 0.35,
     fogSteps: 12,
     bloom: 1,
+    dofSamples: 8,
     lensRainQuality: 2,
     wakeDisplacement: 0.75,
     propsDetail: 0.5,
@@ -242,6 +257,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     reflectionScale: 0.5,
     fogSteps: 24,
     bloom: 1,
+    dofSamples: 16,
     lensRainQuality: 3,
     wakeDisplacement: 1,
     propsDetail: 0.75,
@@ -265,6 +281,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     reflectionScale: 0.6,
     fogSteps: 40,
     bloom: 1,
+    dofSamples: 24,
     lensRainQuality: 3,
     wakeDisplacement: 1,
     propsDetail: 1,
@@ -288,6 +305,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     reflectionScale: 0.75,
     fogSteps: 56,
     bloom: 1,
+    dofSamples: 32,
     lensRainQuality: 3,
     wakeDisplacement: 1,
     propsDetail: 1,

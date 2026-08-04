@@ -62,6 +62,15 @@ export interface CameraDirectorOptions {
  * return is slow enough to read as the camera settling rather than as the game
  * taking the controls back, and it is suspended entirely while a drag is live.
  */
+/**
+ * Focus distance used where a mode has nothing to focus on, metres.
+ *
+ * Far enough that a wide lens at the apertures this project uses is effectively
+ * focused at infinity — so "no answer" renders as a sharp frame rather than as
+ * an arbitrary plane of sharpness somewhere in the middle of the sea.
+ */
+const DEFAULT_FOCUS_DISTANCE = 400;
+
 const CHASE_DISTANCE = 34;
 const CHASE_HEIGHT = 14;
 const CHASE_DISTANCE_MIN = 12;
@@ -204,6 +213,44 @@ export class CameraDirector {
    */
   get cinematicTimeOfDay(): number {
     return this.cinematic.timeOfDayHours;
+  }
+
+  /**
+   * Distance from the eye to whatever this mode is looking at, metres.
+   *
+   * Per mode, because "what is this shot about" is a different question in each
+   * one, and there is no single answer a lens could be focused on. Orbit and
+   * Cinematic both carry an explicit look point; the chase rig has the hull;
+   * Fly has neither, so it takes where the view ray meets the sea, which is what
+   * a viewer flying over water is almost always looking at.
+   *
+   * Closed-form in every mode, with no filtering against the previous frame.
+   * That is required rather than tidy: `DepthOfField` reads this every frame,
+   * and a focus that drifted toward its target over time would make a capture
+   * depend on how many frames preceded it — the property the whole visual
+   * harness rests on.
+   */
+  focusDistance(): number {
+    switch (this.mode) {
+      case 'orbit':
+        return Math.max(1, this.camera.position.distanceTo(this.orbit.target));
+      case 'cinematic':
+        return Math.max(1, this.camera.position.distanceTo(this.cinematicPose.target));
+      case 'boat':
+        return this.target
+          ? Math.max(1, this.camera.position.distanceTo(this.target.position))
+          : DEFAULT_FOCUS_DISTANCE;
+      case 'fly': {
+        this.camera.getWorldDirection(this.tmpVec);
+        // Looking level or up: nothing to focus on but the sky, which a wide
+        // lens at any sane aperture renders sharp anyway.
+        if (this.tmpVec.y > -0.02) return DEFAULT_FOCUS_DISTANCE;
+        const surface = this.surfaceHeight(this.camera.position.x, this.camera.position.z);
+        const drop = this.camera.position.y - surface;
+        if (drop <= 0) return DEFAULT_FOCUS_DISTANCE;
+        return THREE.MathUtils.clamp(drop / -this.tmpVec.y, 1, 4000);
+      }
+    }
   }
 
   setChaseTarget(target: CameraTarget | null): void {

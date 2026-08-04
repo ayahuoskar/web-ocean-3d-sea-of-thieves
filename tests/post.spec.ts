@@ -229,3 +229,46 @@ test.describe('output transform', () => {
     await page.evaluate(() => window.__ocean.setDitherLevels(1));
   });
 });
+
+test.describe('depth of field', () => {
+  test('is a pass-through at zero taps and softens off the focal plane', async ({ page }) => {
+    await bootOcean(page);
+    await setState(page, { preset: 'skyPro', quality: 'high', cameraMode: 'orbit' });
+    // Looking along the water rather than down at it, so the frame carries a
+    // real spread of distances: near foreground swell, the hull at the focal
+    // plane, and the horizon. A shot with everything at one distance cannot
+    // show a depth of field whether or not it works.
+    await setCamera(page, [-42, 12, 63], [0, 3, 0]);
+
+    const grab = async (samples: number, fNumber: number) => {
+      await page.evaluate(([s, n]) => window.__ocean.setDof(s, n), [samples, fNumber]);
+      await page.evaluate(() => window.__ocean.resetDeterministic(12, 90));
+      return frameHead(page, 262144);
+    };
+
+    // Zero taps must be bit-exact, not merely close: the gather sits behind a
+    // uniform-coherent branch, so at zero the source texel is returned
+    // untouched rather than summed with itself and divided by one.
+    const off = await grab(0, 5.6);
+    const offAgain = await grab(0, 1.4);
+    expect(off).toEqual(offAgain);
+
+    // A wide aperture must change the frame.
+    const wide = await grab(24, 1.4);
+    expect(wide).not.toEqual(off);
+
+    // And a narrow one must change it less than a wide one does. This is the
+    // assertion that distinguishes a real circle of confusion from any blur
+    // that merely responds to a knob: the CoC scales with aperture diameter, so
+    // f/16 has to sit between f/1.4 and no lens at all.
+    const narrow = await grab(24, 16);
+    const spread = (a: number[], b: number[]) => {
+      let sum = 0;
+      for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
+      return sum / a.length;
+    };
+    expect(spread(off, narrow)).toBeLessThan(spread(off, wide));
+
+    await page.evaluate(() => window.__ocean.setDof(16, 5.6));
+  });
+});

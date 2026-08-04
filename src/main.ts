@@ -41,6 +41,7 @@ import { VolumetricFog } from './post/VolumetricFog';
 import { LensRain } from './post/LensRain';
 import { ColorGrade } from './post/ColorGrade';
 import { SceneBloom } from './post/Bloom';
+import { DepthOfField } from './post/DepthOfField';
 import {
   OUTPUT_COLOR_SPACE,
   OUTPUT_TONE_MAPPING,
@@ -68,6 +69,8 @@ const _hullRadius = new THREE.Vector3(1, 1, 1);
 const _birdShade = new THREE.Color();
 const _meadowAmbient = new THREE.Color();
 const _meadowWind = new THREE.Vector2();
+/** Scratch for the drawing-buffer size, read on resize and at startup. */
+const _drawingBuffer = new THREE.Vector2();
 
 const boot = {
   root: document.getElementById('boot'),
@@ -144,6 +147,7 @@ class App {
   private lensRain!: LensRain;
   private colorGrade!: ColorGrade;
   private bloom!: SceneBloom;
+  private dof!: DepthOfField;
   private outputTransform!: OutputTransform;
   private particles!: UnderwaterParticles;
   private caustics!: Caustics;
@@ -482,7 +486,21 @@ class App {
     // depth-of-field gather is in this position that is up to 32 texture taps
     // paid for twice; resolving once and sampling a texture is strictly cheaper
     // from the first tap onward.
-    const bloomed = this.bloom.build(rtt(graded as THREE.Node));
+    // Depth of field first, because it is the only stage that is a property of
+    // the *lens* rather than of the light: everything after it — the bloom's
+    // spill, the flare's ghosts, the grade — happens to an image that has
+    // already been focused, which is the order a camera does it in. Blooming
+    // first and defocusing afterwards would smear a sharp glow across an
+    // out-of-focus background.
+    this.dof = new DepthOfField();
+    // Required, like the fog's and the underwater pass's: a post pass draws with
+    // the post-processor's own orthographic quad camera, so the scene camera has
+    // to be handed over explicitly or the depth buffer cannot be linearised.
+    this.dof.setCamera(this.camera);
+    this.dof.setFrameHeight(this.renderer.getDrawingBufferSize(_drawingBuffer).y);
+    const focused = this.dof.build(rtt(graded as THREE.Node), sceneDepth);
+
+    const bloomed = this.bloom.build(rtt(focused as THREE.Node));
 
     // Tone mapping, sRGB and the dither are ours now, not the renderer's.
     //
@@ -1019,6 +1037,12 @@ class App {
     // so it is one of the few effects here with nothing backend-specific to go
     // wrong. The stages that *do* read depth are gated below.
     this.bloom.setEnabled(quality.bloom === 1);
+    // WebGL2 gets no depth of field, and this is the fallback policy rather than
+    // an oversight. The gather takes a depth read per tap — up to 32 of them —
+    // and the depth-texture path is the least portable part of this renderer;
+    // the same reasoning already keeps refraction off that backend. A coherent
+    // sharp image beats a richer one with the silhouettes wrong.
+    this.dof.setSamples(this.backend === 'webgl' ? 0 : quality.dofSamples);
     this.water.setWakeDisplacement(quality.wakeDisplacement);
     // Instance counts only, and safe on a live scene: no geometry is rebuilt and
     // nothing allocates, so this is a tier knob rather than a reload. Null until
@@ -1380,6 +1404,12 @@ class App {
       this.atmosphere.setParams(this.sunFromClock(this.director.cinematicTimeOfDay));
     }
 
+    // The lens focuses on whatever this mode's shot is about. Closed-form in
+    // every mode — see `CameraDirector.focusDistance` — so a capture cannot
+    // depend on how many frames of focus-pulling preceded it.
+    this.dof.setFocusDistance(this.director.focusDistance());
+    this.dof.update();
+
     // Before `update`, which is what reads it to place the light and its target.
     // The shadowed region follows the viewer rather than sitting on the origin,
     // so the island 1.4 km out gets the same shadows the ship does.
@@ -1733,6 +1763,9 @@ class App {
   }
 
   private onResize = (): void => {
+    // The circle of confusion is measured on a sensor and drawn in pixels, so
+    // the conversion between them moves with the frame.
+    this.dof?.setFrameHeight(this.renderer.getDrawingBufferSize(_drawingBuffer).y);
     this.camera.aspect = window.innerWidth / window.innerHeight;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
@@ -1994,6 +2027,11 @@ class App {
          * renderer's own path.
          */
         setDitherLevels: (levels: number) => this.outputTransform.setDitherLevels(levels),
+        /** Test-only lens override: tap count and f-number. */
+        setDof: (samples: number, fNumber: number) => {
+          this.dof.setSamples(samples);
+          this.dof.setAperture(fNumber);
+        },
         /** Test-only bloom override, so a test can prove the stage contributes. */
         setBloomEnabled: (on: boolean) => this.bloom.setEnabled(on),
         /** Exact-pixel frame capture; see `App.capturePixels`. */
@@ -2036,6 +2074,7 @@ class App {
     // render target has to be released from this list or it is simply leaked.
     this.colorGrade?.dispose();
     this.bloom?.dispose();
+    this.dof?.dispose();
     this.outputTransform?.dispose();
     this.particles?.dispose();
     this.caustics?.dispose();

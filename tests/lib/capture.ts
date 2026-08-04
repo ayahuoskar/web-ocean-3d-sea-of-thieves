@@ -67,6 +67,8 @@ interface OceanHooks {
   capturePixels(): Promise<CapturedPixels>;
   /** Test-only dither amplitude in output levels; 0 disables. */
   setDitherLevels(levels: number): void;
+  /** Test-only lens override: gather tap count and f-number. */
+  setDof(samples: number, fNumber: number): void;
   /** Test-only bloom override. */
   setBloomEnabled(on: boolean): void;
   /** Test-only grade override. Colours are plain triples; see the hook's note. */
