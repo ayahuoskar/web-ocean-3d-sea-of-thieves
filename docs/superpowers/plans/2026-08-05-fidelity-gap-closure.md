@@ -120,3 +120,74 @@ take the cloud shade only, not the heightfield march.
 second); and the terrain shadow's two-octave caster sits up to three metres above
 the four-octave surface the mesh is built from, which put a hard band of
 self-shadow across the summit until the caster was sunk below it.
+
+---
+
+## Outcome, gap by gap
+
+| # | Gap | State | Where |
+|---|---|---|---|
+| 1 | Terrain has no relief; facets and stretched detail | **done** | `Seafloor.ts` — analytic-gradient `noised`, a six-octave shading bump with per-octave distance fade, whiteout triplanar detail |
+| 2 | Nothing on land shadowed or occluded | **done** | `Seafloor.ts` heightfield shadow march + octave-difference AO, through `core/lightOcclusion` |
+| 3 | Surface aliasing — blobs, stripes, speckle | **done** | `OceanMaterial.ts` — anisotropic slope-space specular AA; foam mask band-limited by the *sub-footprint* variance |
+| 4 | Cloud slab does not curve | **done** | `Clouds.ts` — spherical shell at 1500 km, `MAX_SPAN_FACTOR` and the wide horizon fade both retired |
+| 5 | No aerial perspective on anything but water | **done** | `sky/AerialPerspective.ts` as `scene.fogNode` |
+| 6 | Underwater over-fogged; caustics and shafts invisible | **done** | `UnderwaterPass.ts` absorption reach; caustics on every submerged surface |
+| 7 | No contact shadows or AO on small objects | **done** | `scene/groundShading.ts` contact term on `aoNode` |
+| 8 | Cloud lighting flat; coverage uniform | **done** | `Clouds.ts` — height-graded ambient, three-octave multi-scatter, 22 km weather field, unclamped forward lobe |
+| 9 | No god rays above water | **done** | `VolumetricFog.ts` occlusion term |
+| 10 | Refracted seafloor bleeds at mid distance | **done** | `OceanMaterial.ts` distance-faded refraction |
+| 11 | Near vegetation static; no leaf translucency | **done** | `groundShading.ts` `FoliageWind` + back-scatter; `Canopy.ts` stand variation |
+| 12 | Cloud shadow reaches only the water | **done** | terrain, canopy, meadow and props all take `Clouds.shadowNode()` |
+| 13 | Overcast desaturates the storm to monochrome | **done** | `Atmosphere.ts` — desaturation rather than replacement, in the dome *and* the fill |
+| 14 | Lens rain does not blur its backdrop | **done** | `LensRain.ts` differential blur |
+| 15 | Preetham is being fought | **partial** | see below |
+| 16 | IBL is a 128² sky-only capture | **done** | 256², coverage-graded, throttled on key-light movement |
+| 17 | Waves do not shoal or refract | **partial** | see below |
+
+### Gap 15 — Hosek–Wilkie was not adopted, and why
+
+The *observable* the gap names — "the gradient step near the horizon in
+`waves.png`" — is gone, and it was closed by the shared aerial perspective
+rather than by the sky model: the step was the sea and the dome meeting at the
+horizon with two different haze treatments between them, and there is now one.
+
+Adopting Hosek–Wilkie means transcribing the published RGB coefficient dataset,
+which is on the order of eighteen hundred numbers. There is no way to verify a
+transcription of that from inside this repository — a single wrong digit
+produces a sky that is subtly and confidently wrong — and the model's remaining
+symptoms here (`TWILIGHT_CURVE`, the `SKY_CHROMA` ceiling) are compensated and
+documented rather than actively failing. The analysis's own sequencing agrees:
+"Hosek–Wilkie now; Bruneton only if sunset and squall still fail after everything
+else here." They do not.
+
+### Gap 17 — the surf refracts, the swell does not
+
+Ranked last in the analysis, which also notes that no reference shader attempts
+it. What was done is the readable half: the surf sets now take their bearing
+from the local seabed gradient rather than from the wind, so breaking water
+arrives parallel to the beach and turns with the coast.
+
+What was not done is refracting the wave *field*. That means warping the domain
+the FFT cascades are sampled in — and that domain is also read on the CPU by the
+buoyancy solver and the prop placement, so a warp there is a change to the
+physics and to where every object sits, not only to the picture. Inside the surf
+zone, where the refraction would read, the resolved wave displacement is
+centimetres.
+
+## Deliberate departures from the analysis's proposals
+
+- **The heightfield is unchanged.** §3 proposes derivative-damped fbm and
+  analytic normals replacing `computeVertexNormals`, both of which move the
+  island's *shape* — and §11 spells out what that costs: every baseline
+  containing the island, the noise floors, and the tour's surf keys re-verified
+  against a new `shoreFraction`. The observable defects are shading-rate ones,
+  so they are fixed at shading rate: the extra octaves exist only where a viewer
+  can see them, and buoyancy, prop seating and the shoreline read the same four
+  octaves they always did.
+- **The cloud deck is not in the environment capture.** §9 proposes putting the
+  cloud mesh in `envScene`. The capture is six faces and the tour moves the sun
+  every frame, so that is a volumetric raymarch over a third of a million pixels
+  per frame for a term that is by construction a low-order spherical average.
+  The dome is graded by coverage instead, which supplies the same average, and
+  the capture is throttled on how far the key light has actually moved.

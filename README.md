@@ -329,9 +329,18 @@ Bugs found by measuring rather than looking, none of them visible to typecheck:
 
 ## Performance
 
-Frame work measures **0.49 / 3.09 / 6.52 ms** GPU p50 at Low / High / Max on WebGPU at
-1600 × 900 DPR 1, against a 16.7 ms budget. WebGL2 Low measures **2.06 ms** against 33.3 ms.
+Frame work measures **0.82 / 9.85 / 15.44 ms** GPU p50 at Low / High / Max on WebGPU at
+1600 × 900 DPR 1, against a 16.7 ms budget. WebGL2 Low measures **5.65 ms** against 33.3 ms.
 All seven benchmarked configurations pass, with no console errors during the sample.
+
+Those numbers are roughly three times what they were, and the trade is written down in
+[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md): the sky is a cloud layer wrapped on a sphere
+so the deck converges into the horizon instead of stopping in a band, every material shares
+one per-channel aerial perspective, the island marches its own shadow against the heightfield
+because a ±260 m shadow box cannot cover a kilometre of island, and shafts, caustics and
+contact darkening reach everything standing on the ground. Nearly all of the increase is in
+raymarches whose step counts are tier fields, which is why Ultra and Max could be brought
+back under budget by re-cutting four numbers.
 
 **Read that with care.** Automated Chromium throttles `requestAnimationFrame` independently
 of load — this project measured 1.1 "FPS" while spending 0.8 ms per frame, and the same

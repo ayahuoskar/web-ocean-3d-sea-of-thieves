@@ -59,11 +59,25 @@ type Node = any;
  * @param light The light to occlude. Only this light is affected.
  * @param factor `(worldPosition) => float` in 0..1. 1 is unoccluded.
  */
+/**
+ * Materials already wrapped, so a second call is a no-op rather than a squared
+ * occlusion factor.
+ *
+ * Every call site guards itself today, and that is exactly the arrangement that
+ * stops being true when a fourth one is added. Wrapping twice would multiply the
+ * shadow by itself, which reads as a plausible-but-too-dark hillside rather than
+ * as a bug.
+ */
+const wrapped = new WeakSet<THREE.Material>();
+
 export function occludeLight(
   material: THREE.NodeMaterial,
   light: THREE.Light,
   factor: Node,
 ): void {
+  if (wrapped.has(material)) return;
+  wrapped.add(material);
+
   const target = material as unknown as {
     lightsNode: Node;
     setupLighting: (builder: Node) => Node;

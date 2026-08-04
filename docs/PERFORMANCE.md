@@ -160,6 +160,55 @@ has already been burned once by treating the second as if it were the first.
 
 ## Results
 
+**Re-measured 2026-08-05, after the fidelity work.** The full matrix is in
+`bench-results/bench-2026-08-04T22-01-30-363Z.json`, with the ultra and max
+re-cut in `bench-2026-08-04T22-12-47-823Z.json`.
+
+| Configuration | GPU p50, before | after | budget | Verdict |
+|---|---|---|---|---|
+| WebGPU · Low | 0.49 | 0.82 | — | PASS |
+| WebGPU · Medium | 1.66 | 5.26 | — | PASS |
+| **WebGPU · High** | **3.09** | **9.85** | **16.7** | **PASS** |
+| WebGPU · Ultra | 4.21 | 12.15 | — | PASS |
+| WebGPU · Max | 6.52 | 15.44 | — | PASS |
+| **WebGL2 · Low** | **2.06** | **5.65** | **33.3** | **PASS** |
+| WebGL2 · High | 5.39 | 18.85 | — | PASS |
+
+**The frame roughly tripled and both gates still pass.** What it bought is in
+`docs/superpowers/plans/2026-08-05-fidelity-gap-closure.md`: a cloud layer
+wrapped on a sphere so the deck converges instead of stopping in a band, one
+per-channel aerial perspective on every material instead of three unrelated
+treatments and one absence, the island's own shadow marched against the
+heightfield because a +/-260 m shadow box cannot cover a kilometre of island,
+crepuscular rays through the deck, and caustics and contact darkening on
+everything standing on the ground.
+
+Three things about the shape of that increase are worth recording.
+
+**It is march-dominated and therefore tier-controlled.** Nearly all of it is in
+raymarches whose step counts are `QualitySettings` fields — `cloudSteps`,
+`fogSteps`, `godRaySteps` and the new `terrainShadowSteps`. Ultra and Max first
+measured 13.84 and 20.48 ms, over budget for Max, and re-cutting those four
+numbers alone brought them to 12.15 and 15.44 without a visible change: the
+cloud march integrates energy-conservingly, so fewer steps refine the texture
+rather than the amount.
+
+**The terrain shadow is gated on elevation**, so the sea — which is most of a
+typical frame — never enters that loop. The numbers above are the canonical wide
+shot, which contains no island at all; the island frames measure within noise of
+them.
+
+**Two of the reductions were free.** The cloud shadow's samples are a TSL `Loop`
+rather than an unrolled JavaScript one, so `mx_fractal_noise_float` is emitted
+once per consumer instead of three times, and the coarse evaluation the shadows
+and shafts share runs two octaves instead of four. Together they took the first
+frame of the scene from *minutes* back to seconds on the FXC shader path the
+Playwright configuration forces, and 10.85 ms to 9.85 at High.
+
+The earlier run is kept below for comparison.
+
+### Before the fidelity work
+
 Run of 2026-08-02, `bench-results/reference.json`. Full scene — ocean, sky,
 volumetric clouds, seafloor, ship, island, buoys, barrels, wake and the
 post-processing chain — at 1600 × 900, DPR 1, `skyPro` preset, camera pinned to

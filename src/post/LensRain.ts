@@ -592,8 +592,16 @@ export class LensRain {
         // samples on a circle *are* four ghosts once the weight is high enough to
         // see them. The second ring at 0.45 of the radius fills the middle of the
         // kernel, which is what turns it into something with a peak.
+        //
+        // **The branch is on the uniforms, not on `softWeight`.** `softWeight` is
+        // per-pixel — it carries the clumping field and the droplet coverage —
+        // and eight texture reads inside a non-uniform branch is exactly what the
+        // note at the top of this file says must never happen: WGSL's uniformity
+        // analysis rejects it and GLSL's implicit derivatives are undefined
+        // there. Gating on whether the *effect* is on and then weighting the
+        // result per pixel gives the same image with a coherent branch.
         const soft = vec3(src.rgb).toVar('lrSoft');
-        If(softWeight.greaterThan(0.002), () => {
+        If(this.uFog.add(this.uBackdropBlur).greaterThan(0.0001), () => {
           const r = vec2(this.uFogRadius.div(aspect), this.uFogRadius).toVar();
           const tap = (dx: number, dy: number): any =>
             colorNode.sample(suv.add(r.mul(vec2(dx, dy))).clamp(UV_INSET, 1 - UV_INSET)).rgb;

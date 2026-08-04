@@ -344,7 +344,11 @@ class App {
     this.seafloor = new Seafloor(4000);
     // And the cloud shade before anything asks the seafloor for its combined key
     // occlusion — the canopy does, at its own construction.
-    this.seafloor.setCloudShadow(this.clouds.shadowNode());
+    // Three octaves rather than four: the seafloor is shaded under the whole
+    // ocean as well as on the island, so it is closer to the water's cost profile
+    // than to a prop's. Three keeps features down to 455 m, which is a cloud
+    // rather than a weather system.
+    this.seafloor.setCloudShadow(this.clouds.shadowNode({ octaves: 3 }));
     this.scene.add(this.seafloor.mesh);
 
     // The foam buffer must exist before the water material too, and for the same
@@ -434,7 +438,18 @@ class App {
       quality.meadow,
       (worldPosition) => this.seafloor.heightNode(worldPosition),
       {
-        sunOcclusion: (worldPosition) => this.seafloor.keyShadowNode(worldPosition),
+        // Cloud shade only, for the same reason the dressing takes it: this is
+        // evaluated per *blade* vertex, and High plants thirty-eight thousand of
+        // them. A twenty-four-step heightfield march there is roughly two hundred
+        // texture fetches per vertex before the cloud term, which is a poor place
+        // to replicate a march the ground under it has already done.
+        //
+        // The visible cost is a terminator: grass inside the hill's own shadow
+        // stays lit while the ground it stands on darkens. The field is a 150 m
+        // square around the camera, so that boundary is only ever in frame when
+        // the viewer is standing on one — and the sward is a near-camera detail
+        // whose own self-shadow gradient dominates it at that range.
+        sunOcclusion: (worldPosition) => this.seafloor.cloudShadowNode(worldPosition),
       },
     );
     this.scene.add(this.meadow.object);
@@ -525,7 +540,7 @@ class App {
     // Max marches 56 of them, so the surface variant would be a hundred and
     // sixty-eight noise evaluations a pixel for a feature that is by nature
     // low-frequency and integrated along the ray anyway.
-    this.fog.setSunOcclusion(this.clouds.shadowNode({ samples: 1 }));
+    this.fog.setSunOcclusion(this.clouds.shadowNode({ samples: 1, octaves: 2 }));
 
     // Fog wraps the underwater pass, not the other way round.
     //
@@ -1115,7 +1130,14 @@ class App {
       reflectionNode: this.reflections?.node ?? null,
       // Same field the cloud march samples, so the shade lands under the cloud
       // that casts it rather than merely correlating with it.
-      cloudShadowNode: this.clouds.shadowNode(),
+      //
+      // Two samples and three octaves, which is the cheapest setting that still
+      // fixes the low-sun case. The sea is most of the frame at every tier and
+      // *all* of it on WebGL2 Low, where the cloud layer is not drawn at all —
+      // so this one call site is worth more than the rest put together. Measured:
+      // the full four-octave three-sample form costs WebGL2 Low about four
+      // milliseconds, on a shadow cast by clouds that tier never renders.
+      cloudShadowNode: this.clouds.shadowNode({ samples: 2, octaves: 3 }),
       ssrNode: this.ssr
         ? (worldPosition, worldNormal, fallback) =>
             this.ssr!.reflectionNode(worldPosition, worldNormal, fallback)
@@ -1337,6 +1359,12 @@ class App {
       return;
     }
     this.lastEnvElevation = elevation;
+    // `force` has to reach *both* throttles or it is not a force. This one is on
+    // sun elevation and lives here; `Atmosphere` has a second on how far the key
+    // direction has moved since it last captured, and a reset that happened to
+    // land inside it would otherwise silently keep the previous shot's
+    // irradiance.
+    if (force) this.atmosphere.invalidateEnvironment();
     this.atmosphere.updateEnvironment(this.renderer, this.scene);
   }
 
@@ -1621,6 +1649,13 @@ class App {
       this.weather.setKind(env.weatherKind);
       this.weather.setIntensity(env.rain);
       this.cinematicFog = env.fogDensity;
+      // Before the capture, not after it. The environment cube is graded by how
+      // cloudy the sky is, and this used to be copied across at the *end* of the
+      // update — so a capture triggered by the sun moving carried the new sun
+      // and the previous frame's coverage. On a shot boundary that is the
+      // previous *shot's* coverage, which is precisely the ordering dependence
+      // the deterministic harness exists to rule out.
+      this.atmosphere.setCloudCoverage(this.clouds.getParams().coverage);
       this.refreshTourEnvironment();
     } else {
       this.cinematicFog = 1;
@@ -1755,7 +1790,12 @@ class App {
     // Cloud tops are lit by the sky over them, and the environment capture has
     // to know how much of that sky is cloud.
     this.clouds.setSkyColors(this.atmosphere.zenithColor);
+    // Idempotent, and the tour has already done it before its own capture — this
+    // covers the free-camera path, where the coverage comes from the UI.
     this.atmosphere.setCloudCoverage(this.clouds.getParams().coverage);
+    // From the *scene* camera, so the planar reflector's mirrored camera cannot
+    // take the haze off the reflected island.
+    this.aerial.setEyeHeight(this.camera.position.y);
 
     // Rain reaches the water. Only rain does — snow settles far too slowly to
     // punch a ring into a surface, and driving this from `weather.intensity`

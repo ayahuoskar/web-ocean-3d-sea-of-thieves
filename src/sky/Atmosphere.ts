@@ -702,14 +702,19 @@ export class Atmosphere {
     // face it becomes a single blown-out texel that flickers as the sun moves.
     // Sky.js recommends hiding it for environment capture — do the same.
     const disc = this.uSunDiscVisible.value;
-    this.uSunDiscVisible.value = 0;
-    // And the deck goes *on* for the capture only: see the note in the sky node.
-    this.uEnvCloudAmount.value = this.cloudCoverage;
-
-    this.envCamera.update(renderer, this.envScene);
-
-    this.uSunDiscVisible.value = disc;
-    this.uEnvCloudAmount.value = 0;
+    try {
+      this.uSunDiscVisible.value = 0;
+      // And the deck goes *on* for the capture only: see the note in the sky node.
+      this.uEnvCloudAmount.value = this.cloudCoverage;
+      this.envCamera.update(renderer, this.envScene);
+    } finally {
+      // `finally`, because a cube update that threw would otherwise leave the
+      // dome permanently sunless and permanently overcast in the *view*, which
+      // is a far worse failure than the one that caused it and would look like
+      // a shading bug rather than like a lost frame.
+      this.uSunDiscVisible.value = disc;
+      this.uEnvCloudAmount.value = 0;
+    }
 
     // Force the PMREM chain used by PBR materials to be rebuilt from the new faces.
     this.envTarget.texture.needsPMREMUpdate = true;
@@ -723,10 +728,31 @@ export class Atmosphere {
     this.uTime.value = this.elapsed % 3600;
   }
 
-  /** Rewinds the animation clock, for reproducible captures. */
+  /**
+   * Rewinds the animation clock, for reproducible captures.
+   *
+   * **And invalidates the environment capture**, which is not decoration. The
+   * capture is throttled on how far the key light has moved since the last one,
+   * and that is a *history*: without clearing it, a reset that happened to land
+   * within the threshold of whatever the previous shot left behind would reuse
+   * that shot's irradiance. The visual harness runs sixteen shots in one page,
+   * so "whatever the previous shot left behind" is exactly the dependency the
+   * harness exists to rule out.
+   */
   resetClock(time = 0): void {
     this.elapsed = time;
     this.uTime.value = ((time % 3600) + 3600) % 3600;
+    this.invalidateEnvironment();
+  }
+
+  /**
+   * Forces the next `updateEnvironment` to capture, whatever the throttle says.
+   */
+  invalidateEnvironment(): void {
+    this.envDirty = true;
+    this.envForce = true;
+    // Not a real direction: nothing can be within the threshold of it.
+    this.envCapturedDir.set(0, -2, 0);
   }
 
   dispose(): void {

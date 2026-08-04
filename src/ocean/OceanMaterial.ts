@@ -281,6 +281,15 @@ const REFRACTION_FADE_FAR = 460;
 const SHORE_GRADIENT_EPSILON = 12;
 
 /**
+ * How far out, in break depths, the shore bearing is computed at all.
+ *
+ * Three, which is comfortably past where `bore` and `swash` can be non-zero, so
+ * the branch never cuts a term that would have shown. Everything beyond it keeps
+ * the wind bearing and never touches the heightfield.
+ */
+const SHORE_BEARING_REACH = 3;
+
+/**
  * Water thickness a backlit crest and a wave body present to the sun, metres.
  *
  * The crest figure is the one that matters. A wave tip is a thin sheet — light
@@ -1645,10 +1654,23 @@ export class OceanMaterial {
         // The gradient of *depth* points out to sea, so its negation points up
         // the beach. Two forward differences over twelve metres: wide enough to
         // average out the heightfield's own metre-scale relief, narrow enough to
-        // follow a coastline that turns. Behind the same depth test the whole
-        // block is, so only the shoreline strip pays for it.
+        // follow a coastline that turns.
+        //
+        // **Behind a real per-pixel branch**, and that distinction cost this a
+        // review finding. The `if (floorDepth !== null)` enclosing this block is
+        // a *TypeScript* condition — it decides what graph to build, not what a
+        // fragment executes — so without the `If` below, two full heightfield
+        // evaluations, thirty-two texture fetches and the whole structural
+        // island arithmetic ran for **every water fragment in the frame**, on a
+        // term that only exists inside the surf zone. On WebGL2 Low, where none
+        // of the raymarches run at all, that was most of the tier's cost.
+        //
+        // The branch is genuinely divergent, but the ocean is overwhelmingly
+        // uniform in it: a wavefront is either wholly in deep water or wholly in
+        // the surf. Every fetch inside uses explicit LOD 0, so no derivative is
+        // required and the divergence is safe as well as cheap.
         const shoreBearing = vec2(this.uWindAxis.x, this.uWindAxis.y).toVar();
-        {
+        If(seabed.lessThan(breakDepth.mul(SHORE_BEARING_REACH)), () => {
           const e = SHORE_GRADIENT_EPSILON;
           const dDepthX = floorDepth(worldPos.add(vec3(e, 0, 0)))
             .max(0)
@@ -1669,7 +1691,7 @@ export class OceanMaterial {
               slope.smoothstep(0.02, 0.12),
             ),
           );
-        }
+        });
 
         // Two harmonics at incommensurate wavelengths so the pattern does not
         // visibly repeat, and a low floor so the lulls are real gaps rather than

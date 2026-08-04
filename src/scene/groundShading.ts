@@ -82,11 +82,18 @@ export interface GroundShadingInputs {
  * right call, and the wrong conclusion, because both objections are about *how*
  * it was wired rather than about the term.
  *
- * This one is shadowed: it carries the same cloud shade the direct light does,
- * so a frond under a cloud stops glowing. It is tone-mapped for free, because
- * emissive is added to the outgoing radiance before the output transform rather
- * than after it. And it is weighted by the material's own albedo, so it is the
- * leaf's colour coming through rather than a wash.
+ * This one is shadowed by whatever occlusion its caller supplies, which for the
+ * island's planting is the **cloud deck** — the props deliberately take the
+ * cloud shade alone rather than the heightfield march, for the compile-time
+ * reason recorded at that call site. So a frond under a cloud stops glowing and
+ * a frond behind the hill does not; the emissive path also bypasses the ordinary
+ * shadow map, which would otherwise have caught it. That is a known limit of
+ * this term and not a claim it makes.
+ *
+ * It is tone-mapped for free, because emissive is added to the outgoing radiance
+ * before the output transform rather than after it. And it is weighted by the
+ * material's own albedo, so it is the leaf's colour coming through rather than a
+ * wash.
  *
  * The lobe is the standard forward-scatter form — `dot(V, -L)` raised to a
  * power, which peaks when the viewer is looking straight down the sun's own
@@ -108,16 +115,23 @@ const TRANSLUCENCY_GAIN = 0.55;
  * a viewer walking up the beach watched the far forest breathe and the palms in
  * front of them stand perfectly still.
  *
- * The constants below are `Canopy`'s, deliberately: the two systems hand over to
- * each other between 320 and 520 m, and a card that swayed on a different phase
- * from the tree it replaces would make the handover visible.
+ * The wavelength, speed and amplitude below are `Canopy`'s, deliberately: the two
+ * systems hand over to each other between 320 and 520 m and a tree that changed
+ * how far it travelled as it became a card would make the handover visible.
+ *
+ * They do **not** share a phase. `Canopy` adds a per-instance offset from its
+ * card seed, and a mesh has no equivalent constant available in the vertex stage
+ * without new plumbing — `positionGeometry` varies across the tree and
+ * `positionLocal` is post-instancing. What survives is an amplitude match and a
+ * phase difference, and at the 320 m where the handover starts, 0.9 m of crown
+ * travel subtends about two pixels: the pop is smaller than the thing popping.
  */
 const SWAY_WAVELENGTH = 90;
 const SWAY_K = (Math.PI * 2) / SWAY_WAVELENGTH;
 const SWAY_SPEED = 7;
 const SWAY_OMEGA = SWAY_K * SWAY_SPEED;
-/** Metres of crown travel at full wind. */
-const SWAY_MAX = 0.55;
+/** Metres of crown travel at full wind. `Canopy`'s number. */
+const SWAY_MAX = 0.9;
 /**
  * Model height over which the shear reaches full strength, in model units.
  *

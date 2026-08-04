@@ -871,8 +871,6 @@ function createSandNormalTexture(): THREE.DataTexture {
 export interface SeafloorOptions {
   /** Grid subdivisions per side. 256 gives ~15 m spacing over a 4 km extent. */
   segments?: number;
-  /** Metres of sand normal-map per tile. */
-  detailTiling?: number;
 }
 
 export class Seafloor {
@@ -912,13 +910,15 @@ export class Seafloor {
   constructor(extent: number, options: SeafloorOptions = {}) {
     this.extent = extent;
     const segments = options.segments ?? 256;
-    const detailTiling = options.detailTiling ?? 7;
 
     this.noiseTexture = createNoiseTexture();
     this.sandNormal = createSandNormalTexture();
-    // No `repeat`: the normal node below supplies its own world-space uv at two
-    // scales, and a repeat set here would be applied on top of them.
-    void detailTiling;
+    // No `repeat` on the sand map: the normal node supplies its own world-space
+    // uv at two scales through a triplanar projection, and a repeat set here
+    // would be applied on top of them. The `detailTiling` option that used to
+    // sit here was read, discarded with a `void`, and had been dead since the
+    // two-scale blend replaced the single tile — a knob that documents a
+    // behaviour the code no longer has is worse than no knob.
 
     this.nodes = buildNoiseNodes(this.noiseTexture);
     this.detailNode = this.nodes.detail(

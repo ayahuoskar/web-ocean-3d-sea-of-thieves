@@ -121,6 +121,14 @@ export class AerialPerspective {
   private readonly uSunDir = uniform(new THREE.Vector3(0, 1, 0));
   private readonly uSunColor: any = uniform(new THREE.Color(1, 1, 1));
   private readonly uSunGlow = uniform(0.5);
+  /**
+   * 1 when the real camera is in air, 0 when it is under water.
+   *
+   * Written from the scene camera rather than read from `cameraPosition`, so the
+   * planar reflection pass — which renders from a camera mirrored below the sea
+   * — does not lose its haze. See `airFraction`.
+   */
+  private readonly uEyeInAir = uniform(1);
 
   private readonly beta = new THREE.Vector3();
 
@@ -193,6 +201,16 @@ export class AerialPerspective {
     this.uSunGlow.value = Math.max(0, value);
   }
 
+  /**
+   * Where the *real* eye is relative to the surface, in metres. Call each frame
+   * with the scene camera's height; the reflection pass must not supply its own.
+   */
+  setEyeHeight(y: number): void {
+    // The same band `airFraction` used to apply to `cameraPosition.y`.
+    const t = Math.min(1, Math.max(0, (y + 1.5) / 2.1));
+    this.uEyeInAir.value = t * t * (3 - 2 * t);
+  }
+
   // -------------------------------------------------------------------------
 
   /**
@@ -204,13 +222,22 @@ export class AerialPerspective {
    * extinction already owns that path and would be charged for twice.
    */
   private airFraction(worldPosition: Node): Node {
-    // The camera's band straddles zero rather than sitting above it, because the
-    // waterline shot puts the eye eight centimetres *under* the surface with half
-    // the frame still in air. A band that only opened above sea level would take
-    // the haze off the sky in exactly the shot that photographs the boundary.
-    return smoothstep(-1.5, 1.5, worldPosition.y).mul(
-      smoothstep(-1.5, 0.6, cameraPosition.y),
-    );
+    // The eye's side of the surface is a **uniform**, not `cameraPosition.y`,
+    // and that is not a micro-optimisation — reading the node is wrong.
+    //
+    // The planar reflector renders the scene from a virtual camera mirrored
+    // below the mean sea plane, so `cameraPosition.y` is negative for the whole
+    // reflection pass. Gating on it closed the air fraction there and the
+    // island's *reflection* came out with none of the haze the island itself
+    // has, which is a visible inconsistency in exactly the frames the haze was
+    // added for. A mirrored camera is a rendering construction, not a submerged
+    // eye.
+    //
+    // The uniform is written from the real camera once a frame, so both passes
+    // agree. It straddles zero rather than sitting above it because the
+    // waterline shot puts the eye eight centimetres *under* the surface with
+    // half the frame still in air.
+    return smoothstep(-1.5, 1.5, worldPosition.y).mul(this.uEyeInAir);
   }
 
   private opticalDepth(distance: Node, rayDir: Node): Node {

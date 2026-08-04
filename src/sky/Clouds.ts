@@ -28,18 +28,31 @@ import type { AerialPerspective } from './AerialPerspective';
 /**
  * Raymarched volumetric cloud layer.
  *
- * The layer is a horizontal slab of procedural FBM density between `altitude`
- * and `altitude + thickness`. It is rendered on a camera-locked dome: the dome
- * only supplies view rays, the march itself happens in world space, so the dome
- * radius is unrelated to the cloud altitude.
+ * The layer is a **spherical shell** of procedural FBM density between
+ * `altitude` and `altitude + thickness`, wrapped on a planet of `PLANET_RADIUS`.
+ * That is what makes the deck converge into the horizon instead of stopping in a
+ * band, and it is what bounds a grazing ray's crossing without a clamp. It is
+ * rendered on a camera-locked dome: the dome only supplies view rays, the march
+ * itself happens in world space, so the dome radius is unrelated to the cloud
+ * altitude.
  *
  * Density is entirely procedural (`mx_fractal_noise_float`) — there is no 3D
- * noise texture to download and nothing to keep resident in VRAM.
+ * noise texture to download and nothing to keep resident in VRAM. Coverage is
+ * modulated by a 22 km weather field, so the sky has clear regions and dense
+ * ones rather than one threshold over the whole hemisphere.
  *
- * Lighting is single-scattering: a short secondary march toward the sun gives
- * per-sample transmittance (bright tops, dark bases), combined with a
- * Henyey–Greenstein lobe that produces the silver lining when looking near the
- * sun. Compare ref-default.png (scattered cumulus) and ref-storm.png (overcast).
+ * Lighting is a short secondary march toward the sun for optical depth, resolved
+ * through three **multiple-scattering** orders after Hillaire — each seeing less
+ * extinction, contributing less energy and scattering more isotropically than
+ * the last, which is what keeps a thick cloud's interior glowing instead of
+ * going flat grey. The ambient is graded between the sea-facing base and the sky
+ * the top sees. Compare ref-default.png (scattered cumulus) and ref-storm.png
+ * (overcast).
+ *
+ * **Supported camera range.** Rays at or below the horizon are marched as
+ * horizon rays (see `GRAZE_FLOOR`), so a camera *above* the layer cannot look
+ * down through it correctly. Nothing in this project flies to 1400 m; if
+ * something ever does, that floor is where to start.
  */
 
 export interface CloudParams {
@@ -196,18 +209,6 @@ const COVERAGE_QUANTILES: ReadonlyArray<readonly [number, number]> = [
   [0.95, 0.239],
   [1.0, -0.06],
 ];
-
-/**
- * Octaves the coarse density evaluation keeps.
- *
- * Two, against the four the drawn layer uses. The consumers are the ground
- * shadow and the god-ray march, and both are asking "is there cloud here" rather
- * than "what shape is it" — the shadow is a low-frequency feature by nature and
- * the shaft is an integral along a ray. Halving it halves the largest single
- * arithmetic cost in the fog march, which evaluates this once per cell for every
- * pixel on the screen.
- */
-const COARSE_OCTAVES = 2;
 
 /** Softness of the cloud edge in noise units. Crisper = puffier cumulus. */
 const EDGE_WIDTH = 0.1;
@@ -501,13 +502,16 @@ export class Clouds {
    * compile-time constant, which costs nothing here because it never varies
    * within a build.
    */
-  shadowNode(options: { samples?: number } = {}): (worldPosition: any) => any {
+  shadowNode(
+    options: { samples?: number; octaves?: number } = {},
+  ): (worldPosition: any) => any {
     const shadowSamples = Math.max(1, Math.round(options.samples ?? 3));
+    const octaves = Math.max(1, Math.round(options.octaves ?? 4));
 
     return (worldPosition: any) => {
       const p = vec3(worldPosition).toVar('cloudShadowP');
 
-      // Three samples through the layer, not one, and this is the fix for a
+      // Several samples through the layer, not one, and this is the fix for a
       // defect the previous implementation documented but did not solve: with
       // one sample the walk had to be floored on the sun's elevation, and below
       // about 14 degrees the floored distance stops reaching the slab at all —
@@ -539,11 +543,11 @@ export class Clouds {
         const level = this.uAltitude.add(this.uThickness.mul(fraction));
         const t = level.sub(p.y).mul(invSunY).max(0);
         const hit = p.add(this.uSunDir.mul(t));
-        // `softness` 1 and `coarse`: the shadow is a low-frequency feature by
-        // nature, and at full softness the erosion octave's *contribution* is
-        // already multiplied by zero — so skipping the call is free in the image
-        // and saves a three-octave 3D noise in every material that shades ground.
-        acc.addAssign(this.densityAt(hit, float(1), weather, true));
+        // `softness` 1: the shadow is a low-frequency feature by nature and the
+        // erosion octave would only alias across the sea surface. At full
+        // softness its contribution is already zero, so declining to evaluate it
+        // costs nothing and saves a three-octave 3D noise per consumer.
+        acc.addAssign(this.densityAt(hit, float(1), weather, octaves));
       });
 
       // Beer-Lambert along the *sun path* through the layer, not down its
@@ -630,18 +634,19 @@ export class Clouds {
   }
 
   /**
-   * @param coarse Skips the erosion octave and evaluates the base field at
-   *   `COARSE_OCTAVES` instead of four.
+   * @param baseOctaves Non-null selects the *coarse* evaluation: the erosion
+   *   octave is skipped entirely and the base field runs at this many octaves
+   *   instead of four. Null is the full field the layer is drawn from.
    *
-   *   `softness` already fades the erosion octave's *contribution* to zero, but
-   *   the noise call still happens — and for a consumer sampling this from
-   *   inside another raymarch, the call is the entire cost. A build-time flag is
-   *   the only way to actually not pay it. The base field is cut for the same
-   *   reason and with the same argument: what a shadow or a shaft needs is where
-   *   the cloud is, which is the first two octaves; the rest is silhouette
-   *   detail that is integrated along the ray before anyone sees it.
+   *   Skipping the erosion octave is free in the image for any caller passing
+   *   `softness` 1, because at full softness its contribution is already
+   *   multiplied by zero — but the noise call still happens, and a build-time
+   *   flag is the only way not to pay for it. Cutting the *base* octaves is not
+   *   free: it makes the field blobbier, so it is a choice each caller makes
+   *   against its own cost. A shadow evaluated once per pixel can afford four;
+   *   one evaluated inside another raymarch cannot.
    */
-  private densityAt(p: any, softness: any, weather: any, coarse = false): any {
+  private densityAt(p: any, softness: any, weather: any, baseOctaves: number | null = null): any {
     const h = this.heightFraction(p);
 
     // Flat base, rounded top — the cumulus profile in ref-default.png. Raising
@@ -651,7 +656,7 @@ export class Clouds {
     const profile = smoothstep(0.0, 0.12, h).mul(smoothstepDown(h, 0.42, 1.0));
 
     const q = p.sub(this.uWindOffset).mul(NOISE_SCALE);
-    const base = mx_fractal_noise_float(q, coarse ? COARSE_OCTAVES : 4, 2.0, 0.5, 1.0)
+    const base = mx_fractal_noise_float(q, baseOctaves ?? 4, 2.0, 0.5, 1.0)
       .mul(0.5)
       .add(0.5);
 
@@ -666,7 +671,7 @@ export class Clouds {
     // What the eye actually reads as weather is the silhouette changing —
     // billows growing and eroding in place — and that is a second offset through
     // the noise field rather than a faster one along the wind.
-    const detail = coarse
+    const detail = baseOctaves !== null
       ? null
       : mx_fractal_noise_float(
           q.mul(4.3).add(vec3(7.3, 2.1, 5.7)).add(this.uEvolution),
