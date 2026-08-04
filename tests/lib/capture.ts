@@ -69,6 +69,8 @@ interface OceanHooks {
   setDitherLevels(levels: number): void;
   /** Test-only lens override: gather tap count and f-number. */
   setDof(samples: number, fNumber: number): void;
+  /** Test-only flare override. */
+  setFlareEnabled(on: boolean): void;
   /** Test-only bloom override. */
   setBloomEnabled(on: boolean): void;
   /** Test-only grade override. Colours are plain triples; see the hook's note. */

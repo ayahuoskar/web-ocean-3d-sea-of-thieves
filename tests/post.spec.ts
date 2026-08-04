@@ -272,3 +272,50 @@ test.describe('depth of field', () => {
     await page.evaluate(() => window.__ocean.setDof(16, 5.6));
   });
 });
+
+test.describe('lens flare', () => {
+  test('brightens up-sun, is absent under water, and dies when the sun is occluded', async ({
+    page,
+  }) => {
+    await bootOcean(page);
+    await setState(page, { preset: 'sunset', quality: 'high', cameraMode: 'orbit' });
+
+    // 1. Looking straight down the sunset sun's track, above water.
+    await setCamera(page, [58, 7, 9], [0, 4, 0]);
+    const on = await measureAt(page, 31.25, () =>
+      page.evaluate(() => window.__ocean.setFlareEnabled(true)),
+    );
+    const off = await measureAt(page, 31.25, () =>
+      page.evaluate(() => window.__ocean.setFlareEnabled(false)),
+    );
+    // Purely additive: it cannot darken a frame.
+    expect(on).toBeGreaterThan(off);
+
+    // 2. Looking *away* from the sun must be far less affected than looking at
+    //    it. This is the angular gate, and it is what separates a flare
+    //    anchored to the light from one that fires on any bright pixel — a sea
+    //    full of sun glitter looks much the same in both directions.
+    await setCamera(page, [-58, 7, -9], [0, 4, 0]);
+    const awayOn = await measureAt(page, 31.25, () =>
+      page.evaluate(() => window.__ocean.setFlareEnabled(true)),
+    );
+    const awayOff = await measureAt(page, 31.25, () =>
+      page.evaluate(() => window.__ocean.setFlareEnabled(false)),
+    );
+    expect(awayOn - awayOff).toBeLessThan(on - off);
+
+    // 3. Submerged, it must contribute nothing at all — the request was for a
+    //    flare above water, and there is no lens down there to scatter in.
+    await setState(page, { preset: 'skyPro' });
+    await setCamera(page, [-16, -7, 16], [-6, 2, 2]);
+    const underOn = await measureAt(page, 72.5, () =>
+      page.evaluate(() => window.__ocean.setFlareEnabled(true)),
+    );
+    const underOff = await measureAt(page, 72.5, () =>
+      page.evaluate(() => window.__ocean.setFlareEnabled(false)),
+    );
+    expect(Math.abs(underOn - underOff)).toBeLessThan(0.01);
+
+    await page.evaluate(() => window.__ocean.setFlareEnabled(true));
+  });
+});

@@ -42,6 +42,7 @@ import { LensRain } from './post/LensRain';
 import { ColorGrade } from './post/ColorGrade';
 import { SceneBloom } from './post/Bloom';
 import { DepthOfField } from './post/DepthOfField';
+import { LensFlare } from './post/LensFlare';
 import {
   OUTPUT_COLOR_SPACE,
   OUTPUT_TONE_MAPPING,
@@ -148,6 +149,7 @@ class App {
   private colorGrade!: ColorGrade;
   private bloom!: SceneBloom;
   private dof!: DepthOfField;
+  private lensFlare!: LensFlare;
   private outputTransform!: OutputTransform;
   private particles!: UnderwaterParticles;
   private caustics!: Caustics;
@@ -502,6 +504,15 @@ class App {
 
     const bloomed = this.bloom.build(rtt(focused as THREE.Node));
 
+    // Flare after the bloom and before the grade: it is light arriving at the
+    // sensor through the glass, so it belongs with the other things the lens
+    // does to light, and it must be *graded* rather than sitting on top of the
+    // grade. Purely additive and it never re-samples the image, so unlike the
+    // depth of field it imposes no resolve of its own.
+    this.lensFlare = new LensFlare();
+    this.lensFlare.setCamera(this.camera);
+    const flared = this.lensFlare.build(bloomed, sceneDepth);
+
     // Tone mapping, sRGB and the dither are ours now, not the renderer's.
     //
     // `outputColorTransform` is switched off below and `OutputTransform` does
@@ -519,7 +530,7 @@ class App {
     this.outputTransform = new OutputTransform();
     this.post.outputColorTransform = false;
     this.post.outputNode = this.outputTransform.build(
-      this.lensRain.build(rtt(this.colorGrade.build(bloomed) as THREE.Node)),
+      this.lensRain.build(rtt(this.colorGrade.build(flared) as THREE.Node)),
       OUTPUT_TONE_MAPPING,
       OUTPUT_COLOR_SPACE,
     ) as THREE.Node;
@@ -1043,6 +1054,10 @@ class App {
     // the same reasoning already keeps refraction off that backend. A coherent
     // sharp image beats a richer one with the silhouettes wrong.
     this.dof.setSamples(this.backend === 'webgl' ? 0 : quality.dofSamples);
+    // Kept on WebGL2: the occlusion disc is eight depth taps, which is the same
+    // read the volumetric fog already performs there, so nothing new is being
+    // asked of the backend.
+    this.lensFlare.setEnabled(quality.lensFlare === 1);
     this.water.setWakeDisplacement(quality.wakeDisplacement);
     // Instance counts only, and safe on a live scene: no geometry is rebuilt and
     // nothing allocates, so this is a tier knob rather than a reload. Null until
@@ -1602,6 +1617,20 @@ class App {
     // because it needs `submersion`, which is only known once the camera has
     // been resolved against the surface — the effect suppresses itself as the
     // viewer goes under, since there is no lens above water to bead on.
+    // The flare's source is the *live key light*, and that distinction is the
+    // whole of it.
+    //
+    // `Atmosphere` owns one directional light and retargets it to the moon once
+    // the sun is down, overwriting its colour with `MOON_LIGHT_COLOR` — while
+    // `atmosphere.sunColor` goes on reporting the solar extinction colour at
+    // every hour of the night. So the pair (`sunDirection`, `sunColor`) is the
+    // obvious thing to hand over and is wrong after dark twice over: it would
+    // anchor the flare where the sun is not, and paint it warm on a blue moon.
+    // `_keyDirection` is already derived from `sunLight.position` further up, so
+    // it follows the retarget; the colour has to come from the same object.
+    this.lensFlare.setSource(_keyDirection, key.color, key.intensity / 3.4);
+    this.lensFlare.setSubmersion(submersion);
+
     this.lensRain.setSubmersion(submersion);
     // Screen-space "down" for the droplets, leaned by the wind.
     //
@@ -2027,6 +2056,8 @@ class App {
          * renderer's own path.
          */
         setDitherLevels: (levels: number) => this.outputTransform.setDitherLevels(levels),
+        /** Test-only flare override. */
+        setFlareEnabled: (on: boolean) => this.lensFlare.setEnabled(on),
         /** Test-only lens override: tap count and f-number. */
         setDof: (samples: number, fNumber: number) => {
           this.dof.setSamples(samples);
@@ -2075,6 +2106,7 @@ class App {
     this.colorGrade?.dispose();
     this.bloom?.dispose();
     this.dof?.dispose();
+    this.lensFlare?.dispose();
     this.outputTransform?.dispose();
     this.particles?.dispose();
     this.caustics?.dispose();

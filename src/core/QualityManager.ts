@@ -128,6 +128,14 @@ export interface QualitySettings {
    */
   dofSamples: number;
   /**
+   * Whether the sun/moon lens flare is drawn, 0 or 1.
+   *
+   * An enable rather than a strength, for the same reason `bloom` is: how strong
+   * a flare reads is a property of the lens the whole project is photographed
+   * through, not of how fast the machine is.
+   */
+  lensFlare: 0 | 1;
+  /**
    * Lens-rain droplet lattice count, 1..3. 0 disables the effect entirely.
    *
    * Each level adds a lattice and, above 1, extra texture reads for misting
@@ -208,6 +216,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     fogSteps: 0,
     bloom: 0,
     dofSamples: 0,
+    lensFlare: 0,
     lensRainQuality: 1,
     wakeDisplacement: 0,
     propsDetail: 0.3,
@@ -234,6 +243,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     fogSteps: 12,
     bloom: 1,
     dofSamples: 8,
+    lensFlare: 1,
     lensRainQuality: 2,
     wakeDisplacement: 0.75,
     propsDetail: 0.5,
@@ -258,6 +268,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     fogSteps: 24,
     bloom: 1,
     dofSamples: 16,
+    lensFlare: 1,
     lensRainQuality: 3,
     wakeDisplacement: 1,
     propsDetail: 0.75,
@@ -282,6 +293,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     fogSteps: 40,
     bloom: 1,
     dofSamples: 24,
+    lensFlare: 1,
     lensRainQuality: 3,
     wakeDisplacement: 1,
     propsDetail: 1,
@@ -306,6 +318,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     fogSteps: 56,
     bloom: 1,
     dofSamples: 32,
+    lensFlare: 1,
     lensRainQuality: 3,
     wakeDisplacement: 1,
     propsDetail: 1,
