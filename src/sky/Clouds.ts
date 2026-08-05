@@ -99,6 +99,38 @@ const MAX_STEPS = 96;
 const LIGHT_STEPS = 4;
 
 /**
+ * Base octaves the sun march evaluates density at, with the erosion octave
+ * skipped entirely — against four octaves plus erosion for the layer itself.
+ *
+ * This is what `densityAt` has always documented should happen here and did not:
+ * "a shadow evaluated once per pixel can afford four; one evaluated inside
+ * another raymarch cannot". This one is inside another raymarch — `LIGHT_STEPS`
+ * samples at every one of `uSteps` steps — and it was taking the full seven
+ * octaves, 72 times a pixel at High.
+ *
+ * **Worth 39% of the cloud layer**, 5.23 ms to 3.19, on a frame that was 12.31.
+ * The layer is the single most expensive thing in the frame, so this is the
+ * largest remaining lever that does not restructure anything.
+ *
+ * **It is a look change and was accepted as one**, on the pictures rather than
+ * on the numbers. Nine of the twenty-one visual baselines moved and were
+ * regenerated; `sunset` moved most, at mean dE94 0.284 against a 0.167 limit
+ * with a peak of 46.9, because a low sun gives the longest path through the deck
+ * and so the most integration for a coarser field to disagree about. Two of the
+ * nine — `waterline` and `near-water-detail` — were inside their mean and pixel
+ * limits and failed on p95 alone.
+ *
+ * What it costs is the fine structure of a cloud's *self-shadowing*. What it
+ * does not cost is the silhouette, which still comes from the full field in the
+ * outer march, and which is what the eye actually reads a cloud by. The reason
+ * the interior survives coarsening is that this accumulates optical depth toward
+ * the sun and then feeds it through `exp` — an integral of the field rather than
+ * a sample of it, and integrating a blobbier field lands close to the same
+ * number.
+ */
+const LIGHT_OCTAVES = 2;
+
+/**
  * Radius the cloud layer is wrapped on, metres.
  *
  * The layer used to be a flat slab, and a flat slab is why the sky stopped: the
@@ -790,9 +822,25 @@ export class Clouds {
           If(d.greaterThan(0.002), () => {
             // --- optical depth toward the sun -------------------------------
             const lightAcc = float(0).toVar('cloudLightAcc');
+            // The coarse field, which is what `densityAt` documents this caller
+            // should have been using all along: "a shadow evaluated once per
+            // pixel can afford four octaves; one evaluated inside another
+            // raymarch cannot". This one is evaluated inside another raymarch —
+            // LIGHT_STEPS samples at every one of `uSteps` march steps — and it
+            // was taking the full four-octave base plus the three-octave erosion
+            // field, seven octaves of noise, 72 times a pixel at High.
+            //
+            // Two octaves and no erosion is 2 against 7. What it costs is the
+            // fine structure of a cloud's *self-shadowing*, and that is the one
+            // place the loss does not read: this accumulates optical depth
+            // toward the sun and is then fed through `exp`, so it is an integral
+            // of the field rather than a sample of it, and integrating a
+            // blobbier field gives nearly the same number. The silhouette, which
+            // is what the eye actually reads, still comes from the full field in
+            // the outer march.
             Loop(LIGHT_STEPS, ({ i }: any) => {
               const lp = p.add(this.uSunDir.mul(this.uLightStep.mul(float(i).add(1.0))));
-              lightAcc.addAssign(this.densityAt(lp, softness, weather));
+              lightAcc.addAssign(this.densityAt(lp, softness, weather, LIGHT_OCTAVES));
             });
             const opticalDepth = lightAcc
               .mul(this.uLightStep)

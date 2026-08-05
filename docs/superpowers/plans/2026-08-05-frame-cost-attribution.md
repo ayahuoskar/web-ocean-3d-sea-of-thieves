@@ -372,6 +372,53 @@ produced a sea whose Jacobian folded over 66% of the surface. `ocean.spec`'s
 sea-state assertion caught it, which is the argument for having a numeric
 assertion on the field and not only pictures.
 
+### The cloud light march, and a look change taken on purpose
+
+With the transform down to 2.55 ms the cloud layer was the frame's largest item
+by a wide margin — 5.23 ms of 12.31, **42%**. The waste was in the innermost
+loop: the march toward the sun evaluated the *full* seven-octave density field
+(four-octave base plus three-octave erosion) at `LIGHT_STEPS` samples for every
+one of `uSteps` steps, 72 times a pixel at High. `densityAt`'s own documentation
+already said it should not: "a shadow evaluated once per pixel can afford four;
+one evaluated inside another raymarch cannot."
+
+Two octaves and no erosion: **cloud layer 5.23 -> 3.19 ms, frame 12.31 -> 10.48,
+about 95 FPS against 81.**
+
+**This one changes the image, and was accepted on the pictures rather than on the
+numbers.** Nine of twenty-one baselines moved; they were reviewed side by side at
+full resolution before anything was regenerated:
+
+| shot | mean dE94 | limit | pixels dE>2.5 | limit |
+|---|---|---|---|---|
+| sunset | 0.284 | 0.167 | 1.10% | 0.71% |
+| underwater | 0.182 | 0.142 | 1.33% | 0.60% |
+| shore-break | 0.178 | 0.100 | 0.50% | 0.15% |
+| island-approach | 0.156 | 0.100 | 0.32% | 0.15% |
+| ship-and-island | 0.121 | 0.114 | 0.25% | ok |
+| clear-day-wide | 0.116 | 0.100 | 0.33% | 0.15% |
+| cinematic-surf | 0.102 | 0.100 | 0.03% | ok |
+| waterline | ok | — | ok | — |
+| near-water-detail | ok | — | ok | — |
+
+`sunset` moves most because a low sun gives the longest path through the deck and
+so the most integration for a coarser field to disagree about. The last two are
+inside both their mean and pixel limits and failed on p95 alone, so "nine shots
+broken" overstates it: two clearly moved, three are marginal, four barely.
+
+What it costs is the fine structure of a cloud's **self-shadowing**. What it does
+not cost is the silhouette, which still comes from the full field in the outer
+march and is what the eye reads a cloud by. The interior survives coarsening
+because this accumulates optical depth toward the sun and feeds it through `exp`
+— an integral of the field rather than a sample of it.
+
+Far-field stability is untouched: `gallery-jitter` reads 2.845 / 2.967 / 3.110 at
+High / Ultra / Max against 2.846 / 2.967 / 3.111 before, which is noise.
+
+**The gallery in `docs/images` was deliberately not regenerated** and is one look
+change behind. Nothing depends on it; it is worth a pass next time something else
+needs rendering.
+
 ### Still available, in order
 
 **Mixed-radix-4** takes the stage count from 7/8/9 to 4/4/5 at 128/256/512,
