@@ -155,9 +155,23 @@ below are that search's output, and they are square to within 0.3%.
 | ultra | 384×576 | 613×360 | 0.0280r → 0.0175r | 1.60× | 99.8% |
 | max | 512×768 | 817×481 | 0.0209r → 0.0131r | 1.60× | 99.9% |
 
-Vertex count and triangle count are unchanged, so the cost is unchanged. What it
-buys is a 1.6× shorter wavelength surviving the band-limit at every distance and
-every tier — which is precisely the detail item 1 would otherwise remove.
+The true counts fall slightly — the grid builds `(R+1)·S + 1` vertices and
+`S·(2R+1)` triangles, and trading segments for rings at fixed `R·S` lowers both
+by 0.1% to 0.5%. What it buys is a 1.6× shorter wavelength surviving the
+band-limit at every distance and every tier.
+
+**It does not buy back the detail item 1 removes, and an earlier draft of this
+section claimed it would.** Measured three ways — see
+`docs/superpowers/plans/2026-08-05-waterline-measurements.md` — it recovers about
+2% of the near-field detail figure, which is nothing, and it costs 5–7% more
+far-field shimmer and 8–10% more temporal change on High, Ultra and Max.
+
+The mechanism is understood and is not a fault: a finer mesh means the band-limit
+removes *less*, because `cascadeReach` fades a cascade at a distance inversely
+proportional to vertex spacing. Squaring High's grid moves the ripple cascade's
+fade from 40–80 m out to 65–131 m, so the extra shimmer is extra wave geometry
+being carried rather than extra noise — a distinction `gallery-jitter` cannot
+make, as its own header states. Kept on that basis, with the cost recorded.
 
 What it spends is horizon smoothness: at High the outer ring becomes a 275-gon
 instead of a 448-gon, and at 24 km its chord sags `r(1 − cos(π/S))` = 1.57 m.

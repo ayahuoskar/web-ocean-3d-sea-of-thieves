@@ -23,6 +23,17 @@ export interface QualitySettings {
    * wavelength at every distance and every tier. See `squareGrid` in
    * `ocean/meshSampling`, which derives them, and the test that pins them.
    *
+   * **What that does not buy is a quieter image, and it was expected to.**
+   * Measured across three trees, squaring recovers about 2% of the near-field
+   * detail the vertex band-limit costs — nothing — while raising far-field
+   * shimmer 5-7% and temporal change 8-10% on High, Ultra and Max. The reason is
+   * that a finer mesh makes the band-limit remove *less*: `cascadeReach` fades a
+   * cascade at a distance inversely proportional to vertex spacing, so this moves
+   * High's ripple fade from 40-80 m out to 65-131 m. The extra energy is wave
+   * geometry genuinely carried further, not noise — which is a distinction
+   * `gallery-jitter` cannot draw. Figures in
+   * `docs/superpowers/plans/2026-08-05-waterline-measurements.md`.
+   *
    * It is very slightly *cheaper*, not free: trading segments for rings at a
    * fixed `rings * segments` lowers both the true vertex count `(R+1)*S + 1` and
    * the triangle count `S*(2R+1)` by 0.1% to 0.5%.
