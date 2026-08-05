@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { DEFAULT_MESH_OPTIONS, OceanMesh } from '../src/ocean/OceanMesh';
 import {
   SAMPLES_PER_WAVELENGTH,
   geometryLod,
@@ -86,6 +87,25 @@ test.describe('geometry LOD', () => {
     // already over-sampled; a negative level is not a thing to request.
     expect(geometryLod(0, 0.0375, 0.0625)).toBe(0);
     expect(geometryLod(0.01, 0.0375, 0.0625)).toBe(0);
+  });
+
+  test('is what the mesh itself reports', () => {
+    // `undefined` material, so `THREE.Mesh` supplies its own default rather
+    // than being handed a null it would later try to dispose.
+    const mesh = new OceanMesh(undefined as never, {
+      radialSegments: 288,
+      angularSegments: 448,
+    });
+    expect(mesh.spacingPerMetre).toBeCloseTo(
+      vertexSpacingPerMetre(
+        288,
+        448,
+        DEFAULT_MESH_OPTIONS.innerRadius,
+        DEFAULT_MESH_OPTIONS.outerRadius,
+      ),
+      6,
+    );
+    mesh.dispose();
   });
 
   test('reproduces the fade distances that were tuned by eye', () => {

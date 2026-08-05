@@ -1,4 +1,5 @@
 import * as THREE from 'three/webgpu';
+import { vertexSpacingPerMetre } from './meshSampling';
 
 export interface OceanMeshOptions {
   /** Vertices along the radial axis. */
@@ -31,16 +32,30 @@ export const DEFAULT_MESH_OPTIONS: OceanMeshOptions = {
  * with it: the wave field is sampled in world space, so a rotating grid would
  * make the tessellation pattern swim through the waves.
  *
- * Vertex positions are unit-space; the world radius is applied in the vertex
- * shader so that changing view distance never requires rebuilding the buffer.
+ * Vertex positions are world metres about the mesh origin, and the mesh origin
+ * is snapped to the camera every frame — so a vertex's own XZ length is its
+ * ground distance from the viewer, which is what the vertex stage's level of
+ * detail is computed from.
  */
 export class OceanMesh {
   readonly geometry: THREE.BufferGeometry;
   readonly mesh: THREE.Mesh;
+  /**
+   * Metres of vertex spacing per metre of ground distance — the worse of the
+   * two axes. The vertex stage needs it to decide how much of the wave field
+   * this mesh is entitled to be displaced by; see `ocean/meshSampling`.
+   */
+  readonly spacingPerMetre: number;
   private readonly options: OceanMeshOptions;
 
   constructor(material: THREE.Material, options: Partial<OceanMeshOptions> = {}) {
     this.options = { ...DEFAULT_MESH_OPTIONS, ...options };
+    this.spacingPerMetre = vertexSpacingPerMetre(
+      this.options.radialSegments,
+      this.options.angularSegments,
+      this.options.innerRadius,
+      this.options.outerRadius,
+    );
     this.geometry = buildRadialGrid(this.options);
     this.mesh = new THREE.Mesh(this.geometry, material);
     this.mesh.frustumCulled = false; // it is always centred on the viewer
