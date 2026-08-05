@@ -166,15 +166,16 @@ re-cut in `bench-2026-08-04T22-12-47-823Z.json`.
 
 | Configuration | GPU p50, before | after | budget | Verdict |
 |---|---|---|---|---|
-| WebGPU · Low | 0.49 | 0.82 | — | PASS |
-| WebGPU · Medium | 1.66 | 5.26 | — | PASS |
-| **WebGPU · High** | **3.09** | **9.85** | **16.7** | **PASS** |
-| WebGPU · Ultra | 4.21 | 12.15 | — | PASS |
-| WebGPU · Max | 6.52 | 15.44 | — | PASS |
-| **WebGL2 · Low** | **2.06** | **5.65** | **33.3** | **PASS** |
-| WebGL2 · High | 5.39 | 18.85 | — | PASS |
+| WebGPU · Low | 0.49 | 0.86 | — | PASS |
+| WebGPU · Medium | 1.66 | 5.35 | — | PASS |
+| **WebGPU · High** | **3.09** | **8.26** | **16.7** | **PASS** |
+| WebGPU · Ultra | 4.21 | 13.01 | — | PASS |
+| WebGPU · Max | 6.52 | 13.72 | — | PASS |
+| **WebGL2 · Low** | **2.06** | **7.36** | **33.3** | **PASS** |
+| WebGL2 · High | 5.39 | 20.80 | — | PASS |
 
-**The frame roughly tripled and both gates still pass.** What it bought is in
+**The frame roughly tripled at High and both gates still pass, with more than
+twice the budget to spare.** What it bought is in
 `docs/superpowers/plans/2026-08-05-fidelity-gap-closure.md`: a cloud layer
 wrapped on a sphere so the deck converges instead of stopping in a band, one
 per-channel aerial perspective on every material instead of three unrelated
@@ -187,11 +188,20 @@ Three things about the shape of that increase are worth recording.
 
 **It is march-dominated and therefore tier-controlled.** Nearly all of it is in
 raymarches whose step counts are `QualitySettings` fields — `cloudSteps`,
-`fogSteps`, `godRaySteps` and the new `terrainShadowSteps`. Ultra and Max first
-measured 13.84 and 20.48 ms, over budget for Max, and re-cutting those four
-numbers alone brought them to 12.15 and 15.44 without a visible change: the
-cloud march integrates energy-conservingly, so fewer steps refine the texture
-rather than the amount.
+`fogSteps`, `godRaySteps` and the new `terrainShadowSteps`. Every tier above Low
+was re-cut on measurement rather than on taste, and the cuts are invisible for a
+structural reason: the cloud and fog marches integrate their segments
+energy-conservingly, so the step count refines a cloud's *texture* and not how
+much of it there is.
+
+High first measured 10.46 ms and passed this gate while failing the *suite's*
+own delivered-frame-rate assertion at 49.6 FPS against a 55 floor; 24 steps to 18
+on both marches took it to 8.26 and satisfied both. Max first measured 20.48,
+then 16.67 after one cut — which is inside a 16.7 budget by 0.2% and therefore
+not inside it at all — and now sits at 13.72. `gallery-jitter` was re-run after
+each cut: the far-field shimmer figures moved by under 0.5% and stayed inside
+their ceilings, which is the evidence that fewer steps cost texture rather than
+stability.
 
 **The terrain shadow is gated on elevation**, so the sea — which is most of a
 typical frame — never enters that loop. The numbers above are the canonical wide
