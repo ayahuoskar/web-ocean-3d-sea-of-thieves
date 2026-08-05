@@ -32,6 +32,8 @@ interface OceanHooks {
   backend: 'webgpu' | 'webgl';
   scene: { getObjectByName(name: string): { visible: boolean } | undefined };
   setRainOverride(intensity: number | null): void;
+  /** Forces foam and surf strength together; `null` returns them to the weather. */
+  setFoamOverride(strength: number | null): void;
   director: {
     snapToTarget(): void;
     currentMode: string;

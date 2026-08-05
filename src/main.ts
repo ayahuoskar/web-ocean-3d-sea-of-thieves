@@ -255,6 +255,17 @@ class App {
   /** Test-only rain rate override; null means the weather system decides. */
   private rainOverride: number | null = null;
   /**
+   * Test-only master on foam and surf strength, or `null` for the weather's own.
+   *
+   * Exists to answer a question a single frame cannot. At a sea-level camera
+   * every wave face is at grazing incidence, where Fresnel drives reflectance
+   * toward one and the water legitimately returns the pale sky — so white in
+   * such a frame is not evidence of foam, and tuning foam on the strength of it
+   * would be tuning the wrong term. Differencing a frame against one with both
+   * forced to zero separates them.
+   */
+  private foamOverride: number | null = null;
+  /**
    * The tour's multiplier on the preset's volumetric fog. 1 outside Cinematic.
    *
    * A field rather than a second `fog.setParams` call, because the density is
@@ -1491,7 +1502,9 @@ class App {
       foamThreshold: foamThreshold * 0.62,
       foamSoftness: 0.42,
     });
-    this.water.setFoamStrength(Math.max(0.35, Math.min(1.2, Math.sqrt(whitecapRatio))));
+    this.water.setFoamStrength(
+      this.foamOverride ?? Math.max(0.35, Math.min(1.2, Math.sqrt(whitecapRatio))),
+    );
     // Sky and horizon come from the atmosphere, not from preset constants.
     //
     // The first argument used to be the *sun* colour, which is not the sky by
@@ -1805,7 +1818,7 @@ class App {
     this.water.setRain(raining, elapsed);
     // The shore break runs off the same clock the rest of the sea does, so a
     // deterministic rewind puts the surf sets back where they were.
-    this.water.setSurf(elapsed);
+    this.water.setSurf(elapsed, this.foamOverride ?? 1);
     // Agitation: heavy rain whitens a sea surface on its own, independently of
     // whether the waves are steep enough to break.
     this.wake.setRainAgitation(raining);
@@ -2355,6 +2368,25 @@ class App {
          */
         setRainOverride: (intensity: number | null) => {
           this.rainOverride = intensity;
+        },
+        /**
+         * Forces foam and surf strength together, or `null` to hand both back to
+         * the weather system. Zero is the "no foam anywhere" reference frame that
+         * separates whitecaps from the sky the water is reflecting.
+         */
+        setFoamOverride: (strength: number | null) => {
+          this.foamOverride = strength;
+          // Re-applied immediately, and this is not optional.
+          //
+          // The surf master is written every frame, but the foam strength is
+          // written by `applyPreset`, which runs on a *state change* rather than
+          // per frame. So setting the field alone left the uniform holding its
+          // old value until something unrelated happened to change the state,
+          // and the override read as inert — foam 0 and foam 3 produced
+          // bit-identical frames. `false` skips the environment capture, which
+          // is the expensive half of `applyPreset` and cannot be affected by
+          // this.
+          this.applyPreset(false);
         },
         /**
          * Test-only grade override.

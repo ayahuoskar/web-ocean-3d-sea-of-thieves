@@ -201,6 +201,35 @@ baseline.
 Either way item 1 changes the surface foam sits on, so tuning foam ahead of it
 would be tuning against a surface that is about to be replaced.
 
+### The measurement, and its answer
+
+`tests/foam-attribution.spec.ts`, against a positive control:
+
+| shot | water pixels moving when foam is forced off | mean move |
+|---|---|---|
+| storm (control) | **63.1%** | 28.3 levels |
+| waterline | **0.1%** | 0.02 levels |
+
+**It is reflection. No foam change is made**, which was named as a legitimate
+outcome before the measurement rather than after it.
+
+Two things had to be fixed before that number could be believed, and both are
+recorded because either would have produced a confident wrong answer:
+
+1. **The override was inert.** `setFoamOverride` set a field that only
+   `applyPreset` reads back to the uniform, and `applyPreset` runs on a state
+   change rather than per frame — so foam 0 and foam 3 rendered bit-identically.
+   The first run of this measurement read "0.0%, peak 1" and that was the dead
+   hook, not the sea.
+2. **The control needed its own scene.** Raising `windSpeed` under a calm preset
+   does not reliably produce whitecaps, so a control that only changed the wind
+   also read zero. The storm shot, which unambiguously has foam, is what proves
+   the instrument before the quiet frame is asked anything.
+
+The general lesson is the one this work keeps re-learning: a measurement that
+can only return "nothing happened" is indistinguishable from a broken
+instrument, and needs a control that makes something happen.
+
 ## Verification
 
 `tests/gallery-jitter.spec.ts` is the gate, and specifically its `DETAIL_FLOOR`

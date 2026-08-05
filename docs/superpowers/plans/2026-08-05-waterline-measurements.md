@@ -73,6 +73,35 @@ does not exist today and adding it would be a change to what every historical
 number in that file means, so it is recorded here as the open question rather
 than smuggled in.
 
+## Foam: is the white foam, or the sky?
+
+`tests/foam-attribution.spec.ts`. Fraction of water pixels moving by more than 8
+levels when foam and surf are forced to zero:
+
+| shot | moving | mean move | peak |
+|---|---|---|---|
+| storm (positive control) | 63.1% | 28.30 | 95 |
+| waterline | **0.1%** | 0.02 | 20 |
+
+**The waterline shot is one part in a thousand foam.** Its pallor is Fresnel
+reflection of the sky at a grazing camera, exactly as suspected, so **no foam
+term was changed** — which the spec named in advance as a legitimate outcome.
+
+Two false readings came first and are worth recording:
+
+- **The hook was dead.** `setFoamOverride` set a field that only `applyPreset`
+  reads back to the uniform, and `applyPreset` runs on state change rather than
+  per frame. Foam 0 and foam 3 rendered bit-identically. Measured directly on the
+  storm shot once fixed: mean water luma 151.37 at foam 0, 179.00 at default,
+  192.50 at foam 3.
+- **The first control was confounded.** It raised `windSpeed` to 20 under the
+  calm `skyPro` preset and still read 0.0%, because that does not reliably
+  produce whitecaps. Changing the control to a different *scene* — the storm
+  shot — is what made it discriminate.
+
+Had either gone unnoticed, this would have reported "no foam here" for the wrong
+reason and the conclusion would have been right by accident.
+
 ## Not caused by this work
 
 `tests/ocean.spec.ts` "the bird flock renders, and the tier scales it" fails at
