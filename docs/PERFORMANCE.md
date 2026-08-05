@@ -160,19 +160,28 @@ has already been burned once by treating the second as if it were the first.
 
 ## Results
 
-**Re-measured 2026-08-05, after the fidelity work.** The full matrix is in
-`bench-results/bench-2026-08-04T22-01-30-363Z.json`, with the ultra and max
-re-cut in `bench-2026-08-04T22-12-47-823Z.json`.
+**Re-measured 2026-08-05, after the wave transform was folded into one atlas.**
+Full matrix in `bench-results/bench-2026-08-05T18-34-24-131Z.json`. All seven
+configurations pass; both gates pass.
 
-| Configuration | GPU p50, before | after | budget | Verdict |
-|---|---|---|---|---|
-| WebGPU · Low | 0.49 | 0.86 | — | PASS |
-| WebGPU · Medium | 1.66 | 5.35 | — | PASS |
-| **WebGPU · High** | **3.09** | **8.26** | **16.7** | **PASS** |
-| WebGPU · Ultra | 4.21 | 13.01 | — | PASS |
-| WebGPU · Max | 6.52 | 13.72 | — | PASS |
-| **WebGL2 · Low** | **2.06** | **7.36** | **33.3** | **PASS** |
-| WebGL2 · High | 5.39 | 20.80 | — | PASS |
+| Configuration | GPU p50, after fidelity | now | delivered | budget | Verdict |
+|---|---|---|---|---|---|
+| WebGPU · Low | 0.86 | 0.79 | 250 | — | PASS |
+| WebGPU · Medium | 5.35 | 5.25 | 120 | — | PASS |
+| **WebGPU · High** | **8.26** | **8.07** | **84** | **16.7** | **PASS** |
+| WebGPU · Ultra | 13.01 | 12.90 | 52 | — | PASS |
+| WebGPU · Max | 13.72 | 13.55 | 48 | — | PASS |
+| **WebGL2 · Low** | **7.36** | **7.59** | **143** | **33.3** | **PASS** |
+| WebGL2 · High | 20.80 | 21.85 | 35 | — | PASS |
+
+**Read the GPU column and the delivered column against each other.** The
+transform fold removed about 4.2 ms from the delivered frame at High — 61 FPS to
+81, measured with `scripts/profile-frame.mjs` — and moved GPU p50 by 0.19 ms.
+Both numbers are correct. The saving was CPU-side command submission, which
+timestamp queries do not measure, and it is the clearest demonstration available
+of what this gate can and cannot see. See the Cost model section.
+
+The earlier fidelity-work comparison is kept below.
 
 **The frame roughly tripled at High and both gates still pass, with more than
 twice the budget to spare.** What it bought is in
@@ -348,16 +357,39 @@ Where the frame goes, and the lever for each.
 | Volumetric clouds | `cloudSteps` × screen pixels | `cloudSteps`, 0 disables |
 | Underwater god rays | `godRaySteps` × screen pixels, only when submerged | `godRaySteps`, 0 disables |
 
-At 256² with three cascades the transform runs 96 fullscreen passes per frame —
-about 6.3 M trivial fragment invocations, against roughly 2 M for a single 1080p
-raster pass. The transform is deliberately *not* the bottleneck; surface shading
-is, which is why the quality tiers move mesh density and post effects more
-aggressively than they move `fftSize`.
+**This section used to claim the transform was deliberately not the bottleneck,
+and that surface shading was. That was wrong, and the way it was wrong is worth
+keeping.**
 
-The measured render-pass counts agree: 36 passes at Low (one cascade), 113 at
-High (three cascades at 256²), 125 at Max (three at 512²). The jump from High to
-Max costs 2.4× the GPU time for 12 extra passes, so it is the 512² transform, the
-denser surface mesh and the 4096² shadow map paying, not the pass count.
+The reasoning was that 96 fullscreen passes at 256² are only ~6.3 M trivial
+fragment invocations against ~2 M for one 1080p raster pass — true, and
+irrelevant, because the cost was never the fragments. Measured against delivered
+frame rate, the transform was **40% of the frame**, and stubbing it dropped the
+frame's *CPU* update phase from 5.7 ms to 0.22. A fullscreen render pass costs
+about **53 microseconds** here near enough regardless of what it draws — measured
+directly by adding 96 empty ones — and the transform was issuing 108 of them.
+Command submission, not arithmetic.
+
+Folding the spectra pairs and then the cascades into one atlas took it to 23
+passes and the transform from 7.24 ms to 2.55 ms; see
+`docs/superpowers/plans/2026-08-05-frame-cost-attribution.md`.
+
+**Why this document could assert the opposite for so long is the important
+part**, and it is a property of the gate above rather than of anyone's judgement:
+`npm run bench` measures GPU p50 through timestamp queries, and GPU timestamps
+cannot see CPU-side command submission. The same work that took the delivered
+frame from ~61 to ~81 FPS moved GPU p50 at High from 8.26 ms to 8.07 — under
+2%. A metric that cannot observe a cost will report that the cost is not there.
+
+Two consequences worth carrying:
+
+- **Pass count is a first-class cost here**, alongside texels and triangles. The
+  table above prices work per pixel and per triangle and says nothing about how
+  many passes it takes; at 53 microseconds each that omission was worth 5.7 ms.
+- **GPU p50 is the right budget gate and the wrong diagnostic.** It is a real,
+  reproducible property of the renderer and the brief's budgets are stated in
+  it. It just cannot tell you where a frame goes. That is what
+  `scripts/profile-frame.mjs` is for.
 
 ## Adaptive quality
 
