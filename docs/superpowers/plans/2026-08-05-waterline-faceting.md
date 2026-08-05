@@ -256,6 +256,19 @@ export function geometryLod(
 }
 ```
 
+**Correction to `squareGrid`, found by running it.** The closed form above is
+wrong enough to matter and the committed implementation does not use it as
+written. It solves `L/R = 2*pi/S`, but the radial spacing is really
+`exp(L/R) - 1` — about 1% larger at these ring counts — so it lands 0.7% off the
+best pair and leaves the two axes a full percent apart, which is precisely the
+state the function exists to remove.
+
+The committed version keeps that expression as a **seed** and searches ±10%
+around it for the pair with the smallest worse axis, taking `floor(budget/R)` so
+the budget is never exceeded. Consequences for the steps above: the expected
+pair is **469×275, not 466×277**, and the squareness bound is **0.001, not
+0.01**. See `src/ocean/meshSampling.ts` as committed.
+
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```
@@ -263,7 +276,7 @@ npx playwright test --project=chromium-webgpu tests/meshSampling.spec.ts
 npm run typecheck
 ```
 
-Expected: 7 passed; typecheck clean.
+Expected: 8 passed; typecheck clean.
 
 - [ ] **Step 5: Commit**
 
@@ -746,11 +759,15 @@ Set these values, and put the explanation on the `meshRings` field's doc comment
 
 | tier | meshRings | meshSegments |
 |---|---|---|
-| low | 204 | 121 |
-| medium | 305 | 181 |
-| high | 466 | 277 |
-| ultra | 611 | 362 |
-| max | 814 | 483 |
+| low | 206 | 119 |
+| medium | 308 | 179 |
+| high | 469 | 275 |
+| ultra | 613 | 360 |
+| max | 817 | 481 |
+
+These are `squareGrid`'s output, not the closed form's — see the note in Task 1
+Step 3. Regenerate them rather than trusting this table if the bounds change:
+`squareGrid(meshRings * meshSegments, 0.6, 24000)` for each tier's old pair.
 
 Amend the `meshRings` doc comment to:
 
@@ -762,14 +779,14 @@ Amend the `meshRings` doc comment to:
    * Radial spacing is `ln(24000/0.6) / meshRings` per metre of distance and
    * angular is `2*pi / meshSegments`; a wave survives displacement only if both
    * resolve it, so the coarser axis governs and over-sampling the finer one is
-   * vertices spent on nothing. These pairs are square to within 2% — see
+   * vertices spent on nothing. These pairs are square to within 0.3% — see
    * `squareGrid` in `ocean/meshSampling` — which at unchanged vertex and
    * triangle count buys a 1.6x shorter surviving wavelength at every distance
    * and every tier.
    *
    * What it spends is the horizon ring's smoothness: at High the outer ring is
-   * a 277-gon rather than a 448-gon, and at 24 km its chord sags 1.54 m, which
-   * subtends 6.4e-5 rad against 9.7e-4 rad for a pixel at 720 lines over a 40
+   * a 275-gon rather than a 448-gon, and at 24 km its chord sags 1.57 m, which
+   * subtends 6.5e-5 rad against 9.7e-4 rad for a pixel at 720 lines over a 40
    * degree field. Fifteen times under a pixel, from any camera height.
    */
   meshRings: number;

@@ -134,26 +134,36 @@ At fixed vertex count `V = R·S`, the worst axis is minimised when the two agree
 
 ```
 L = ln(outerRadius / innerRadius) = 10.6
-S = 2πR / L  ⇒  R = sqrt(V / 0.593)
+S = 2πR / L  ⇒  R = sqrt(V · L / 2π)
 ```
 
-| tier | now (R×S) | squared | worst-axis spacing | gain |
-|---|---|---|---|---|
-| low | 128×192 | 204×121 | 0.0863r → 0.0533r | 1.62× |
-| medium | 192×288 | 305×181 | 0.0567r → 0.0354r | 1.60× |
-| high | 288×448 | 466×277 | 0.0375r → 0.0230r | 1.63× |
-| ultra | 384×576 | 611×362 | 0.0280r → 0.0175r | 1.60× |
-| max | 512×768 | 814×483 | 0.0209r → 0.0131r | 1.60× |
+**That closed form is a seed, not the answer**, and this was found by running it
+rather than by deriving it. It solves `L/R = 2π/S`, but `L/R` is only the
+first-order approximation to a radial spacing that is really `exp(L/R) − 1` —
+about 1% larger at these ring counts. So the radial axis is slightly worse than
+the closed form believes, the true optimum sits a few rings further along, and
+the seed's own answer leaves the two axes a full percent apart — which is the
+state the whole exercise exists to remove. `squareGrid` therefore searches ±10%
+around the seed and takes the pair with the smallest worse axis. The values
+below are that search's output, and they are square to within 0.3%.
+
+| tier | now (R×S) | squared | worst-axis spacing | gain | budget used |
+|---|---|---|---|---|---|
+| low | 128×192 | 206×119 | 0.0863r → 0.0528r | 1.64× | 99.7% |
+| medium | 192×288 | 308×179 | 0.0567r → 0.0351r | 1.62× | 99.7% |
+| high | 288×448 | 469×275 | 0.0375r → 0.0229r | 1.64× | 100.0% |
+| ultra | 384×576 | 613×360 | 0.0280r → 0.0175r | 1.60× | 99.8% |
+| max | 512×768 | 817×481 | 0.0209r → 0.0131r | 1.60× | 99.9% |
 
 Vertex count and triangle count are unchanged, so the cost is unchanged. What it
 buys is a 1.6× shorter wavelength surviving the band-limit at every distance and
 every tier — which is precisely the detail item 1 would otherwise remove.
 
-What it spends is horizon smoothness: the outer ring becomes a 277-gon instead
-of a 448-gon, and at 24 km its chord sags `r(1 − cos(π/S))` = 1.54 m. Seen from
-that range it subtends 6.4×10⁻⁵ rad, against 9.7×10⁻⁴ rad for one pixel at 720
-lines over a 40° vertical field. Fifteen times under a pixel, from any camera
-height.
+What it spends is horizon smoothness: at High the outer ring becomes a 275-gon
+instead of a 448-gon, and at 24 km its chord sags `r(1 − cos(π/S))` = 1.57 m.
+Seen from that range it subtends 6.5×10⁻⁵ rad, against 9.7×10⁻⁴ rad for one
+pixel at 720 lines over a 40° vertical field. Fifteen times under a pixel, from
+any camera height.
 
 ### 3. Foam, measured before it is changed
 
