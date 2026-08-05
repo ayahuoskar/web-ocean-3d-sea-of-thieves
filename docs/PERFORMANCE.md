@@ -343,7 +343,7 @@ Where the frame goes, and the lever for each.
 | Spectrum evolution | `fftSize²` × cascades × 2 | quality tier |
 | IFFT butterfly passes | `fftSize²` × log2(fftSize) × 2 × cascades × 2 | quality tier |
 | Output assembly + mipmaps | `fftSize²` × cascades × 2 | quality tier |
-| Ocean surface raster | `meshRings` × `meshSegments` triangles, then fragment cost at screen resolution | quality tier, pixel-ratio slider |
+| Ocean surface raster | `meshSegments` × (2·`meshRings` + 1) triangles, then fragment cost at screen resolution | quality tier, pixel-ratio slider |
 | Sky dome | one fullscreen-ish pass | negligible |
 | Volumetric clouds | `cloudSteps` × screen pixels | `cloudSteps`, 0 disables |
 | Underwater god rays | `godRaySteps` × screen pixels, only when submerged | `godRaySteps`, 0 disables |
