@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { Fn, float, ivec2, texture, textureLoad, uniform, uv, vec2, vec4 } from 'three/tsl';
+import { Fn, float, int, ivec2, select, texture, textureLoad, uniform, uv, vec2, vec4 } from 'three/tsl';
 import { butterflyPassNode, cMul, createFFTResources, type FFTResources } from './FFT';
 import {
   CASCADES,
@@ -41,16 +41,21 @@ interface PingPong {
 interface Cascade {
   config: CascadeConfig;
   h0: THREE.DataTexture;
-  pairA: PingPong;
-  pairB: PingPong;
+  /**
+   * One ping-pong of double-width targets: pair A in `x < size`, pair B beyond.
+   *
+   * It was two independent ping-pongs stepped by two sets of passes. They are
+   * transformed identically at identical size, so that paid the per-pass cost
+   * twice for one pass of work — and a pass here costs ~53 microseconds however
+   * little it draws. See `butterflyPassNode`.
+   */
+  pair: PingPong;
   /** RGBA: xyz = displacement, w = foam/folding mask. */
   displacement: THREE.RenderTarget;
   /** RG = surface slope, B = Jacobian, A = |slope|^2 for variance recovery. */
   derivatives: THREE.RenderTarget;
-  evolveA: THREE.NodeMaterial;
-  evolveB: THREE.NodeMaterial;
-  butterflyA: THREE.NodeMaterial[];
-  butterflyB: THREE.NodeMaterial[];
+  evolve: THREE.NodeMaterial;
+  butterfly: THREE.NodeMaterial[];
   assembleDisplacement: THREE.NodeMaterial;
   assembleDerivatives: THREE.NodeMaterial;
 }
@@ -262,11 +267,8 @@ export class OceanSimulation {
     const previousTarget = this.renderer.getRenderTarget();
 
     for (const cascade of this.cascades) {
-      this.runPass(cascade.evolveA, cascade.pairA.read);
-      this.runPass(cascade.evolveB, cascade.pairB.read);
-
-      this.runFFT(cascade.pairA, cascade.butterflyA);
-      this.runFFT(cascade.pairB, cascade.butterflyB);
+      this.runPass(cascade.evolve, cascade.pair.read);
+      this.runFFT(cascade.pair, cascade.butterfly);
 
       this.runPass(cascade.assembleDisplacement, cascade.displacement);
       this.runPass(cascade.assembleDerivatives, cascade.derivatives);
@@ -321,22 +323,18 @@ export class OceanSimulation {
       generateInitialSpectrum(size, config, this.params, 1337 + index * 977),
     );
 
-    const pairA = makePingPong(size);
-    const pairB = makePingPong(size);
+    const pair = makePingPong(size);
 
     return {
       config,
       h0,
-      pairA,
-      pairB,
+      pair,
       displacement: makeOutputTarget(size),
       derivatives: makeOutputTarget(size),
-      evolveA: this.createEvolveMaterial(h0, config, 'A'),
-      evolveB: this.createEvolveMaterial(h0, config, 'B'),
-      butterflyA: this.createButterflyMaterials(pairA),
-      butterflyB: this.createButterflyMaterials(pairB),
-      assembleDisplacement: this.createAssembleMaterial(pairA, pairB, config, 'displacement'),
-      assembleDerivatives: this.createAssembleMaterial(pairA, pairB, config, 'derivatives'),
+      evolve: this.createEvolveMaterial(h0, config),
+      butterfly: this.createButterflyMaterials(pair),
+      assembleDisplacement: this.createAssembleMaterial(pair, config, 'displacement'),
+      assembleDerivatives: this.createAssembleMaterial(pair, config, 'derivatives'),
     };
   }
 
@@ -360,10 +358,23 @@ export class OceanSimulation {
     return materials;
   }
 
+  /**
+   * Evolves `h0(k)` to `h(k, t)` and derives all four packed spectra in one pass
+   * across the whole double-width target.
+   *
+   * It was two passes, one per pair, and everything up to and including `h`
+   * itself was computed identically in both — the dispersion, the trig, the
+   * mirrored-conjugate combination. This computes `h` once per texel and selects
+   * which pair's derived spectra to emit from the texel's half.
+   *
+   * Both halves' arithmetic is evaluated and one is discarded, which is the
+   * honest cost of the fold: a `select` is not a branch. It buys a pass, and a
+   * pass is ~53 microseconds against a few dozen ALU operations on 65 000
+   * texels, so the trade is not close.
+   */
   private createEvolveMaterial(
     h0: THREE.DataTexture,
     config: CascadeConfig,
-    pair: 'A' | 'B',
   ): THREE.NodeMaterial {
     const size = this.size;
     const deltaK = (2 * Math.PI) / config.tileSize;
@@ -375,16 +386,21 @@ export class OceanSimulation {
 
     material.fragmentNode = Fn(() => {
       const coord = ivec2(
-        float(size).mul(uv().x).floor().toInt(),
+        float(size * 2).mul(uv().x).floor().toInt(),
         float(size).mul(uv().y).floor().toInt(),
       ).toVar();
 
+      // Which half, and the wavenumber coordinate within it. `h0` is one
+      // transform wide, so it is always read at the local x.
+      const inB = coord.x.greaterThanEqual(int(size));
+      const localX = coord.x.sub(select(inB, int(size), int(0))).toVar();
+
       const half = float(size * 0.5);
-      const kx = float(coord.x).sub(half).mul(deltaK).toVar();
+      const kx = float(localX).sub(half).mul(deltaK).toVar();
       const kz = float(coord.y).sub(half).mul(deltaK).toVar();
       const kLen = vec2(kx, kz).length().max(1e-6).toVar();
 
-      const spectrum = textureLoad(h0, coord).toVar();
+      const spectrum = textureLoad(h0, ivec2(localX, coord.y)).toVar();
       const h0k = vec2(spectrum.x, spectrum.y).toVar();
       // Conjugate of h0(-k); the mirrored half was baked in at generation time.
       const h0MinusKConj = vec2(spectrum.z, spectrum.w.negate()).toVar();
@@ -405,35 +421,38 @@ export class OceanSimulation {
       // Multiplying a complex value by i is a component swap with a sign flip.
       const iH = vec2(h.y.negate(), h.x).toVar();
 
-      if (pair === 'A') {
-        // c0 = h + i * spectrum(dDx/dz), where dDx/dz has spectrum (kx kz / |k|) h
-        const dxdz = h.mul(nx).mul(nz).mul(kLen).toVar();
-        const c0 = vec2(h.x.sub(dxdz.y), h.y.add(dxdz.x)).toVar();
-        // Dx has spectrum -i (kx/|k|) h, Dz has spectrum -i (kz/|k|) h
-        const dx = iH.mul(nx).negate().toVar();
-        const dz = iH.mul(nz).negate().toVar();
-        const c1 = vec2(dx.x.sub(dz.y), dx.y.add(dz.x)).toVar();
-        return vec4(c0.x, c0.y, c1.x, c1.y);
-      }
+      // --- pair A ---------------------------------------------------------
+      // c0 = h + i * spectrum(dDx/dz), where dDx/dz has spectrum (kx kz / |k|) h
+      const aDxdz = h.mul(nx).mul(nz).mul(kLen).toVar();
+      const aC0 = vec2(h.x.sub(aDxdz.y), h.y.add(aDxdz.x)).toVar();
+      // Dx has spectrum -i (kx/|k|) h, Dz has spectrum -i (kz/|k|) h
+      const aDx = iH.mul(nx).negate().toVar();
+      const aDz = iH.mul(nz).negate().toVar();
+      const aC1 = vec2(aDx.x.sub(aDz.y), aDx.y.add(aDz.x)).toVar();
 
+      // --- pair B ---------------------------------------------------------
       // c0 = dDy/dx + i dDy/dz, both with spectrum i k h
       const slopeX = iH.mul(kx).toVar();
       const slopeZ = iH.mul(kz).toVar();
-      const c0 = vec2(slopeX.x.sub(slopeZ.y), slopeX.y.add(slopeZ.x)).toVar();
+      const bC0 = vec2(slopeX.x.sub(slopeZ.y), slopeX.y.add(slopeZ.x)).toVar();
 
       // c1 = dDx/dx + i dDz/dz, with spectra (kx^2/|k|) h and (kz^2/|k|) h
       const ddxdx = h.mul(kx.mul(kx).div(kLen)).toVar();
       const ddzdz = h.mul(kz.mul(kz).div(kLen)).toVar();
-      const c1 = vec2(ddxdx.x.sub(ddzdz.y), ddxdx.y.add(ddzdz.x)).toVar();
-      return vec4(c0.x, c0.y, c1.x, c1.y);
+      const bC1 = vec2(ddxdx.x.sub(ddzdz.y), ddxdx.y.add(ddzdz.x)).toVar();
+
+      return select(
+        inB,
+        vec4(bC0.x, bC0.y, bC1.x, bC1.y),
+        vec4(aC0.x, aC0.y, aC1.x, aC1.y),
+      );
     })();
 
     return material;
   }
 
   private createAssembleMaterial(
-    pairA: PingPong,
-    pairB: PingPong,
+    pair: PingPong,
     config: CascadeConfig,
     output: 'displacement' | 'derivatives',
   ): THREE.NodeMaterial {
@@ -454,8 +473,11 @@ export class OceanSimulation {
       // out with an alternating sign across the lattice. Undo it here.
       const parity = float(coord.x.add(coord.y).mod(2)).mul(-2).add(1).toVar();
 
-      const a = textureLoad(pairA.read.texture, coord).mul(parity).toVar();
-      const b = textureLoad(pairB.read.texture, coord).mul(parity).toVar();
+      // Pair B sits one transform-width to the right in the same texture.
+      const a = textureLoad(pair.read.texture, coord).mul(parity).toVar();
+      const b = textureLoad(pair.read.texture, ivec2(coord.x.add(int(size)), coord.y))
+        .mul(parity)
+        .toVar();
 
       const lambda = choppiness.mul(config.choppiness).toVar();
 
@@ -499,18 +521,14 @@ export class OceanSimulation {
   private releaseCascades(): void {
     for (const cascade of this.cascades) {
       cascade.h0.dispose();
-      cascade.pairA.read.dispose();
-      cascade.pairA.write.dispose();
-      cascade.pairB.read.dispose();
-      cascade.pairB.write.dispose();
+      cascade.pair.read.dispose();
+      cascade.pair.write.dispose();
       cascade.displacement.dispose();
       cascade.derivatives.dispose();
-      cascade.evolveA.dispose();
-      cascade.evolveB.dispose();
+      cascade.evolve.dispose();
       cascade.assembleDisplacement.dispose();
       cascade.assembleDerivatives.dispose();
-      for (const m of cascade.butterflyA) m.dispose();
-      for (const m of cascade.butterflyB) m.dispose();
+      for (const m of cascade.butterfly) m.dispose();
     }
     this.cascades.length = 0;
   }
@@ -521,7 +539,7 @@ function makeTarget(
   filter: THREE.MagnificationTextureFilter,
   wrap: THREE.Wrapping,
 ): THREE.RenderTarget {
-  return new THREE.RenderTarget(size, size, {
+  return new THREE.RenderTarget(size * 2, size, {
     type: THREE.FloatType,
     format: THREE.RGBAFormat,
     minFilter: filter,
@@ -586,6 +604,11 @@ function makeOutputTarget(size: number): THREE.RenderTarget {
   return target;
 }
 
+/**
+ * A ping-pong of double-width targets. Pair A occupies `x < size`, pair B the
+ * rest; both are `size` tall. Total memory is unchanged — two targets of
+ * `2*size x size` against the four `size x size` this replaces.
+ */
 function makePingPong(size: number): PingPong {
   return {
     read: makeTarget(size, THREE.NearestFilter, THREE.ClampToEdgeWrapping),

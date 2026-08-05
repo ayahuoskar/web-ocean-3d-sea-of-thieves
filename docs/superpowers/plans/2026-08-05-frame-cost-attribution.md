@@ -279,90 +279,84 @@ and 512 take mixed radix — three or four radix-4 stages plus one radix-2 — w
 takes the stage count from 7/8/9 to **4/4/5**, a larger proportional cut at 128
 than at 256. It is deferred behind the pair fold, not ruled out.
 
-## The frozen path, and where implementing it stopped
+## The fold, landed as an atlas
 
-An independent review changed the plan before a line was written, on two points
-that measurement alone would not have caught.
+Both spectra pairs now live side by side in one double-width ping-pong — pair A
+in `x < size`, pair B beyond it — and one set of passes steps both. Per cascade
+that is 1 evolve + 16 butterfly + 2 assemble = **19 passes against 36**, so the
+transform went from 108 render passes a frame to 57.
 
-**Radix-4 cannot be applied as stated.** `fftSize` is `128 | 256 | 512` and only
-256 is a power of four. Low and Medium run 128 and Max runs 512, so
-`stages = log4(size)` is simply invalid there and both would need a mixed
-radix-2/radix-4 stage order with a matching mixed-radix digit reversal. That
-turns a contained change into three cases.
+**Measured: the transform fell from 7.24 ms to 4.54 ms, and the frame baseline
+from 16.49-17.02 ms to 14.47 ms — about 69 FPS against 61.** The saving is
+2.70 ms and the model predicted 2.70: 51 fewer passes at the 53 microseconds a
+pass costs here. Three significant figures, which is the strongest evidence that
+the per-pass cost model is right and not a coincidence of one measurement.
 
-**Folding the pairs is the better first move** and it dominates radix-4 on every
-axis: it leaves the transform mathematics *completely* untouched, it works at all
-three sizes, and it folds more than the butterfly — the two evolve passes and the
-two assemble passes collapse as well, because both pairs are computed from the
-same `h(k, t)`.
+Verified: **21 of 21 visual baselines pass**, so the sea is pixel-identical; the
+CPU-side butterfly test passes at every tier size; `ocean.spec`'s sea-state
+assertion is back in range; and the WebGL2 fallback renders with zero console
+errors and inside its frame budget. Memory is unchanged — two targets of
+`2N x N` replace four of `N x N`.
 
-So the frozen order is: **fold the pairs into one multiple-render-target pass,
-then reconsider radix-4** (mixed-radix) only if the frame still needs it.
+### Why an atlas and not a multiple-render-target
 
-### The test that has to come first, and does
+MRT was the first choice and it is the cleaner expression: one pass, two colour
+attachments, no index arithmetic. It was implemented and reverted, because
+**three.js silently writes nothing** through it on this path.
 
-`tests/fft.spec.ts`. The butterfly's correctness lives entirely in a table of
-twiddle factors and read indices generated on the CPU, so the table can be
-*executed* on the CPU and compared against a brute-force O(N^2) inverse DFT
-written from the definition. No GPU, 6 seconds, every size the tiers can ask for.
+The evidence, in the order it was gathered:
 
-**It was verified by breaking the code, not by watching it pass.** Re-introducing
-the historical twiddle bug — the exponent taken over the group width rather than
-the half-span, which the source comment records — fails 7 of its 8 assertions.
-That check also caught a defect in the test itself: the first version of the
-stage-0 assertion checked that the twiddle had unit magnitude and no imaginary
-part, and the bug *passed* it, because `W^(N/2) = -1` is also real and also unit
-magnitude. Asserting the signed value instead is what makes it bite. A test that
-checks the magnitude of a number whose sign is the defect is not a test.
-
-### Implementing the fold: blocked in three.js, with evidence
-
-The change itself is small and was written: one ping-pong of two-attachment
-targets per cascade, attachment 0 named `pairA` and attachment 1 `pairB`, with
-`butterflyPassNode` and the evolve pass emitting `mrt({ pairA, pairB })`. It
-type-checks and builds, the API surface is all present — `mrt` is exported from
-`three/tsl`, `new RenderTarget(n, n, { count: 2 })` yields two textures, and
-`MRTNode.setup` resolves each key through `getTextureIndex` against
-`textures[i].name`.
-
-**It renders a mirror-flat sea, and the attachments are never written.** The
-evidence, in order:
-
-- `ocean.spec`'s sea-state assertion reports `peakHeight` of exactly **0** with
+- `ocean.spec`'s sea-state assertion reported `peakHeight` of exactly **0** with
   zero non-finite values — a zeroed field, not a corrupted one.
-- A runtime probe reads both attachments of the ping-pong back as exactly 4096
-  over 64x64, which is `(0, 0, 0, 1)` in every texel: the clear value.
-- The texture count is 2 and the names are `["pairA", "pairB"]` on both the read
-  and write targets, so the lookup has something to find.
-- **No WebGPU validation errors and no warnings** relating to MRT — the pass runs
-  and silently writes nothing.
-- Both spellings fail identically: `material.fragmentNode = mrt(...)`, and
-  `material.mrtNode = mrt(...)` with `fragmentNode` left null, which is the one
-  `NodeMaterial.setup` actually consults (it reads `this.mrtNode` only inside the
-  `fragmentNode === null` branch).
-- **A constant fails too.** Writing `vec4(7,7,7,7)` and `vec4(9,9,9,9)` through
-  `mrtNode` leaves both attachments at the clear value. That rules out the node
-  graph and the wave maths entirely: three.js is not honouring MRT for these
-  offscreen `QuadMesh` passes driven by `renderer.setRenderTarget()`.
+- Both attachments read back as exactly 4096 over 64x64: `(0, 0, 0, 1)` in every
+  texel, the clear value.
+- Texture count was 2 and the names were `["pairA", "pairB"]` on both ends of the
+  ping-pong, so `getTextureIndex` had something to match.
+- **No WebGPU validation errors and no MRT-related warnings.**
+- Both spellings failed identically — `material.fragmentNode = mrt(...)` and
+  `material.mrtNode = mrt(...)` with `fragmentNode` null, which is the one
+  `NodeMaterial.setup` actually consults.
+- **A constant failed too.** `vec4(7,7,7,7)` through `mrtNode` left both
+  attachments at the clear value, which rules out the node graph and the wave
+  mathematics entirely.
 
-The work was reverted rather than left in. Three attempts failing the same silent
-way is the signal to stop and question the approach, not to try a fourth.
+Three attempts failing the same silent way is the signal to change approach
+rather than try a fourth. The atlas needs no capability beyond a wider texture,
+which both backends already had.
 
-**What the next attempt should establish first**, before touching
-`OceanSimulation` again: a minimal standalone reproduction — one `QuadMesh`, one
-two-attachment `RenderTarget`, one `mrtNode` writing constants — and whether it
-writes. If it does not, MRT via `setRenderTarget` is unavailable on this path and
-the fold has to be done by *atlasing* instead: put pair B beside pair A in a
-single double-width target and offset the read indices, which needs no MRT and
-no new three.js capability. If it does write, the difference between that
-reproduction and `OceanSimulation` is the bug.
+### The seam, and what guards it
+
+Atlasing moves the risk into index arithmetic, which is exactly where this file
+has been bitten before. Two rules carry it:
+
+- The butterfly's axis index is the position *within* a half, and horizontal
+  reads are offset back into the fragment's own half. Reading across the seam
+  would mix two unrelated transforms.
+- Vertical reads keep the fragment's own column, which already carries the
+  offset, so they need no adjustment at all.
+
+`tests/fft.spec.ts` guards the table those indices come from — it executes the
+butterfly on the CPU against a brute-force inverse DFT and is mutation-verified
+against the twiddle bug this project shipped once. It does not cover the seam
+itself; the 21 visual baselines do, and a seam error is not subtle.
+
+### Still available, in order
+
+**Mixed-radix-4** takes the stage count from 7/8/9 to 4/4/5 at 128/256/512,
+halving the butterfly passes again: 57 to roughly 33, worth about another
+1.3 ms. 128 and 512 need a radix-2 stage alongside the radix-4 ones, so it is
+three cases rather than one, and the CPU test would have to grow a mixed-radix
+reference before it could be trusted.
+
+**Collapsing the butterfly materials** is worth about 0.7 ms — material identity
+measured 7 of the 60 microseconds a pass costs. `TextureNode.value` is mutable
+and `NodeSampledTexture.update` picks the swap up with no pipeline rebuild, so
+two materials could replace the current per-stage set.
 
 ## What is worth doing next, in order
 
-1. **Fold the two spectra pairs into one pass.** 108 render passes to 57, no
-   change to the mathematics, ~2.4-3.5 ms. Blocked on three.js MRT as described
-   above; the atlas route needs no new capability. `tests/fft.spec.ts` already
-   guards the transform either way.
+1. ~~Fold the two spectra pairs into one pass.~~ **Done** — landed as an atlas,
+   2.70 ms, 21 of 21 baselines unchanged. See above.
 2. **Cheapen the nested light march.** Raised by an outside review and it is
    the best-argued item here: `Clouds.ts` already documents that nested callers
    cannot afford full density, yet every one of the 4 light samples per march

@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { Fn, float, int, ivec2, uniform, textureLoad, uv, vec2, vec4 } from 'three/tsl';
+import { Fn, float, int, ivec2, select, uniform, textureLoad, uv, vec2, vec4 } from 'three/tsl';
 
 /**
  * Cooley–Tukey radix-2 IFFT executed as ping-ponged fullscreen passes.
@@ -114,6 +114,25 @@ export function createFFTResources(size: number): FFTResources {
 /**
  * Builds the node graph for one butterfly pass. `direction` 0 = horizontal
  * (transform along x), 1 = vertical.
+ *
+ * **Both spectra pairs live side by side in one double-width target**, pair A in
+ * `x < size` and pair B in `x >= size`, and one pass steps both. That is a
+ * performance change with no effect on the mathematics: the two pairs are
+ * independent transforms of identical size that read the same butterfly row at
+ * the same stage, so running them as two passes paid the per-pass cost twice for
+ * one pass of work.
+ *
+ * Measured, that cost is the whole story. A fullscreen pass costs about 53
+ * microseconds in this engine near enough regardless of what it draws — 96 extra
+ * passes measured 5.09 ms — and the transform issues 108 of them, which is the
+ * 5.7 ms the frame's CPU update phase loses when the simulation is stubbed. It
+ * is command submission, not arithmetic on 65 000 texels, so halving the pass
+ * count is worth close to half the transform.
+ *
+ * An atlas rather than a multiple-render-target, and that is not a preference:
+ * MRT was tried first and silently wrote nothing here — attachments left at
+ * their clear value, no validation error, and a constant `vec4` failing exactly
+ * as the real graph did. The atlas needs no capability beyond a wider texture.
  */
 export function butterflyPassNode(
   resources: FFTResources,
@@ -126,24 +145,35 @@ export function butterflyPassNode(
   return Fn(() => {
     // Integer texel coordinate of the fragment being written. `screenCoordinate`
     // is not dependable across backends for offscreen targets of arbitrary size,
-    // so derive it from uv against the known target size instead.
+    // so derive it from uv against the known target size instead. The target is
+    // twice as wide as the transform.
     const coord = ivec2(
-      float(size).mul(uv().x).floor().toInt(),
+      float(size * 2).mul(uv().x).floor().toInt(),
       float(size).mul(uv().y).floor().toInt(),
     ).toVar();
 
-    // The transform axis index selects which row of the butterfly texture to use.
-    const axis = direction === 0 ? coord.x : coord.y;
+    // Which half this fragment belongs to, as an x offset. Written as a subtract
+    // rather than a modulo so no integer division appears in the inner loop.
+    const inB = coord.x.greaterThanEqual(int(size));
+    const halfOffset = select(inB, int(size), int(0)).toVar();
+    const localX = coord.x.sub(halfOffset).toVar();
+
+    // The transform axis index selects which row of the butterfly texture to
+    // use, and it is the index *within* a half — the two halves are separate
+    // transforms that must not read across the seam.
+    const axis = direction === 0 ? localX : coord.y;
 
     const bf = textureLoad(butterfly, ivec2(stageUniform.toInt(), axis)).toVar();
     const twiddle = vec2(bf.x, bf.y).toVar();
     const idxA = bf.z.toInt().toVar();
     const idxB = bf.w.toInt().toVar();
 
+    // Horizontal reads are offset back into this fragment's own half; vertical
+    // reads stay in the same column, which already carries the offset.
     const coordA =
-      direction === 0 ? ivec2(idxA, coord.y) : ivec2(coord.x, idxA);
+      direction === 0 ? ivec2(halfOffset.add(idxA), coord.y) : ivec2(coord.x, idxA);
     const coordB =
-      direction === 0 ? ivec2(idxB, coord.y) : ivec2(coord.x, idxB);
+      direction === 0 ? ivec2(halfOffset.add(idxB), coord.y) : ivec2(coord.x, idxB);
 
     const a = textureLoad(sourceTexture, coordA).toVar();
     const b = textureLoad(sourceTexture, coordB).toVar();
