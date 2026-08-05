@@ -527,6 +527,7 @@ class App {
     this.particles = new UnderwaterParticles(quality.underwaterParticles);
     this.scene.add(this.particles.object);
 
+
     this.caustics = new Caustics();
     // Rebuilds the sand shader once, so it happens here at setup and never in a
     // frame path.
@@ -2131,6 +2132,32 @@ class App {
         ssr: this.ssr,
         sampler: this.sampler,
         atmosphere: this.atmosphere,
+        /**
+         * The cloud layer, so `scripts/profile-frame.mjs` can vary its step
+         * count without going through a tier change.
+         *
+         * A tier moves twenty other things at once, which is exactly what an
+         * attribution measurement must not do — the whole point is to change one
+         * variable. `setParams({ steps })` costs a uniform write and no
+         * recompile, so the frames either side of it are comparable.
+         */
+        clouds: this.clouds,
+        /**
+         * The post chain, exposed for `scripts/profile-frame.mjs` only.
+         *
+         * Each of these has a step count, a tap count or an enable that can be
+         * moved without a recompile, which is the property the attribution
+         * harness needs — a tier change would move twenty things at once and
+         * measure none of them. They are read-only handles; nothing here writes
+         * through them outside the profiler.
+         */
+        post: {
+          fog: this.fog,
+          bloom: this.bloom,
+          dof: this.dof,
+          lensRain: this.lensRain,
+          underwater: this.underwater,
+        },
         loop: this.loop,
         backend: this.backend,
         wake: this.wake,
