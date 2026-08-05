@@ -456,6 +456,64 @@ const SCENARIOS = `
         return () => { rain.setQuality(3); };
       },
     },
+    // --- what a render pass costs, and whether the material matters ---------
+    // These two ADD work rather than removing it, so their delta is negative and
+    // its magnitude is the cost of the work added. They settle the question the
+    // rest of the transform plan hangs on: is the ~50 us per fullscreen pass the
+    // *pass boundary* — setRenderTarget, end/begin, the render-object machinery
+    // — or is it the fact that 96 distinct materials are cycled through?
+    //
+    // Non-destructive by construction. The extra passes run *before* the real
+    // update, writing into pairA.write, which the real update's first
+    // butterfly pass then overwrites from a freshly evolved pairA.read. The
+    // wave field the frame displaces from is unchanged.
+    {
+      label: 'plus 96 passes / one material',
+      note: 'the same material and target 96 extra times. Magnitude of the delta / 96 is the per-pass floor',
+      apply: () => {
+        const sim = ocean.simulation;
+        const first = sim?.cascades?.[0];
+        if (!first || typeof sim.runPass !== 'function') return null;
+        const was = sim.update.bind(sim);
+        const material = first.butterflyA[0];
+        const target = first.pairA.write;
+        sim.update = (t) => {
+          for (let i = 0; i < 96; i++) sim.runPass(material, target);
+          was(t);
+        };
+        return () => { sim.update = was; };
+      },
+    },
+    {
+      label: 'plus 96 passes / 96 materials',
+      note: 'the same 96 extra passes, cycled across every even-stage material in the scene. Against the row '
+        + 'above this says whether material identity costs anything once the pipelines are cached',
+      apply: () => {
+        const sim = ocean.simulation;
+        const first = sim?.cascades?.[0];
+        if (!first || typeof sim.runPass !== 'function') return null;
+        // Even-index stages only. Odd stages bind pair.write as their source,
+        // and writing into the target they read is a WebGPU validation error —
+        // "includes writable usage and another usage in the same synchronization
+        // scope". Even stages read pair.read, so writing to pairA.write is
+        // safe for every one of them.
+        const materials = [];
+        for (const cascade of sim.cascades) {
+          for (const list of [cascade.butterflyA, cascade.butterflyB]) {
+            for (let i = 0; i < list.length; i += 2) materials.push(list[i]);
+          }
+        }
+        if (materials.length < 8) return null;
+        const was = sim.update.bind(sim);
+        const target = first.pairA.write;
+        sim.update = (t) => {
+          for (let i = 0; i < 96; i++) sim.runPass(materials[i % materials.length], target);
+          was(t);
+        };
+        return () => { sim.update = was; };
+      },
+    },
+
     // --- deciding between amortising and cutting the pass count -------------
     // Per cascade per frame the simulation runs 2 evolve passes, 2*(2*log2 N)
     // butterfly passes and 2 assemble passes — 36 at 256 squared, so 108 for

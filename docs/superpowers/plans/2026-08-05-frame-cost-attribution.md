@@ -236,6 +236,49 @@ of *command submission* per fullscreen pass — that is the difference between a
 comparable *within* a run, which is why the harness pairs a fresh baseline with
 every scenario. Cross-run absolute figures are not evidence.
 
+## What a render pass costs, measured directly
+
+The transform's cost was inferred to be per-pass. This measures the pass itself,
+by *adding* work rather than removing it: run 96 extra fullscreen passes before
+the real update, into a target the real update immediately overwrites, so the
+wave field is untouched and only the cost moves.
+
+| added | delivered Δ | per pass |
+|---|---|---|
+| 96 passes, one material reused | 5.09 ms | **53 us** |
+| 96 passes, 48 distinct materials cycled | 5.73 ms | **60 us** |
+
+**A fullscreen render pass costs about 53 microseconds in this engine**, near
+enough regardless of what it draws. The transform issues 108 of them, which is
+5.7 ms — and the frame's CPU update phase, measured independently by stubbing
+`OceanSimulation.update`, falls from ~5.7 ms to 0.22 ms. Two unrelated routes to
+the same number. The transform's cost is its pass count, fully.
+
+**And material identity is a minor term, which kills a hypothesis of mine.** The
+theory was that cycling 96 distinct `NodeMaterial`s through `quad.material`
+before each pass was driving the cost through pipeline and bind-group churn.
+Measured, it is 7 us of the 60 — **13%**. An independent review predicted exactly
+this and gave the mechanism: programs are cached by generated shader text and
+pipelines by program plus state, so 96 graphs differing only in direction and
+texture identity collapse to about two pipelines; and reusing one material cannot
+remove per-pass state encoding anyway, because each target switch starts a new
+pass and state deduplication only operates *within* one.
+
+Collapsing the 96 materials to two is therefore worth roughly 0.7 ms rather than
+the bulk — cheap and safe (`TextureNode.value` is mutable and
+`NodeSampledTexture.update` picks the swap up with no pipeline rebuild), but a
+side-win, not the fix.
+
+**The fix has to remove passes.** At 53 us each: halving 108 to 57 is worth
+~2.7 ms; folding the pairs *and* mixed-radix-4 together would reach roughly 33
+passes and ~4 ms, on a frame that is currently 16.
+
+One correction to this document's earlier reasoning: radix-4 was dismissed here
+because only 256 of the three tier sizes is a power of four. That is wrong. 128
+and 512 take mixed radix — three or four radix-4 stages plus one radix-2 — which
+takes the stage count from 7/8/9 to **4/4/5**, a larger proportional cut at 128
+than at 256. It is deferred behind the pair fold, not ruled out.
+
 ## The frozen path, and where implementing it stopped
 
 An independent review changed the plan before a line was written, on two points
