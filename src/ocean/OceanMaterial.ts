@@ -5,6 +5,7 @@ import {
   cameraPosition,
   float,
   linearDepth,
+  log2,
   mix,
   normalize,
   positionLocal,
@@ -24,6 +25,7 @@ import {
   varyingProperty,
 } from 'three/tsl';
 import { smoothstepDownClamped } from '../core/tslMath';
+import { FOOTPRINT_SPACINGS } from './meshSampling';
 
 export interface WaterAppearance {
   /** Colour of light that survives deep transmission — the "body" of the water. */
@@ -60,10 +62,30 @@ export const DEFAULT_APPEARANCE: WaterAppearance = {
   foamSoftness: 0.55,
 };
 
-export interface OceanMaterialInputs {
+/**
+ * Everything about the cascade set the surface needs, as one object.
+ *
+ * Grouped because it is supplied twice — once when the graph is built and again
+ * by `setCascades` after a tier change rebuilds the simulation — and the two
+ * sites silently disagreeing is a class of bug this file has already had once.
+ * `OceanSimulation.fields` produces it, so neither site assembles it by hand.
+ */
+export interface CascadeFields {
   displacementTextures: THREE.Texture[];
   derivativeTextures: THREE.Texture[];
   tileSizes: number[];
+  /** Longest wavelength each cascade carries, metres. See `cascadeReach`. */
+  maxWavelengths: number[];
+  /**
+   * Texels per side of each cascade's output.
+   *
+   * With `tileSizes` this gives metres per texel, which is what the vertex
+   * stage needs to turn a vertex spacing into a mip level.
+   */
+  resolution: number;
+}
+
+export interface OceanMaterialInputs extends CascadeFields {
   /**
    * Optional: a node returning the seafloor's depth below y=0 at a world
    * position. Supplying it switches the transmission term from a view-angle
@@ -326,6 +348,24 @@ export class OceanMaterial {
   private readonly derivativeNodes: any[] = [];
   private readonly uTileSizes: any[] = [];
   private readonly uCascadeWeights: any[] = [];
+  /** Metres per texel of each cascade's field. See `setCascades`. */
+  private readonly uTexelMetres: any[] = [];
+  /**
+   * Longest wavelength each cascade carries, metres.
+   *
+   * The band edge past which the low-pass has nothing left to pass, so it is
+   * where the cascade stops displacing geometry. See `cascadeReach`.
+   */
+  private readonly uMaxWavelengths: any[] = [];
+  /**
+   * Metres of vertex spacing per metre of ground distance, from the mesh.
+   *
+   * Zero is the safe default rather than a plausible one: it makes the level of
+   * detail zero everywhere, so a caller that forgets `setVertexSpacing` gets the
+   * behaviour this material had before the band-limit existed instead of a sea
+   * silently flattened into a sheet.
+   */
+  private readonly uVertexSpacing = uniform(0);
 
   // --- appearance ----------------------------------------------------------
   private readonly uDeepColor = uniform(new THREE.Color(DEFAULT_APPEARANCE.deepColor));
@@ -643,19 +683,30 @@ export class OceanMaterial {
    * option, since a sampler with no texture is a validation error even when its
    * result is multiplied away.
    */
-  setCascades(
-    displacementTextures: THREE.Texture[],
-    derivativeTextures: THREE.Texture[],
-    tileSizes: number[],
-  ): void {
+  setCascades(fields: CascadeFields): void {
+    const { displacementTextures, derivativeTextures, tileSizes, maxWavelengths } = fields;
     const active = Math.min(displacementTextures.length, MAX_CASCADES);
     for (let i = 0; i < MAX_CASCADES; i++) {
       const source = Math.min(i, active - 1);
       this.displacementNodes[i].value = displacementTextures[source];
       this.derivativeNodes[i].value = derivativeTextures[source];
       this.uTileSizes[i].value = tileSizes[source];
+      this.uTexelMetres[i].value = tileSizes[source] / fields.resolution;
+      this.uMaxWavelengths[i].value = maxWavelengths[source];
       this.uCascadeWeights[i].value = i < active ? 1 : 0;
     }
+  }
+
+  /**
+   * Tells the surface how finely the mesh it is drawn on samples the world.
+   *
+   * Must be called whenever that mesh is built or rebuilt — a tier change does
+   * both. Getting it wrong does not fail loudly: too small displaces geometry
+   * by waves the mesh cannot resolve and the surface facets, too large flattens
+   * the sea into a sheet.
+   */
+  setVertexSpacing(spacingPerMetre: number): void {
+    this.uVertexSpacing.value = Math.max(0, spacingPerMetre);
   }
 
   private build(inputs: OceanMaterialInputs): void {
@@ -675,6 +726,8 @@ export class OceanMaterial {
       this.displacementNodes.push(texture(displacementTextures[source]) as any);
       this.derivativeNodes.push(texture(derivativeTextures[source]) as any);
       this.uTileSizes.push(uniform(tileSizes[source]));
+      this.uTexelMetres.push(uniform(tileSizes[source] / inputs.resolution));
+      this.uMaxWavelengths.push(uniform(inputs.maxWavelengths[source]));
       this.uCascadeWeights.push(uniform(i < displacementTextures.length ? 1 : 0));
     }
 
@@ -711,18 +764,61 @@ export class OceanMaterial {
 
       const displacement = vec3(0).toVar();
 
-      // Fade the highest-frequency cascades out with distance. Beyond a few
-      // hundred metres their wavelength is well under a pixel, and keeping them
-      // only produces aliasing that no amount of MSAA will fix.
+      // Displace by exactly as much of the field as this mesh can carry, and
+      // not one wave more.
+      //
+      // A vertex-stage texture read has no derivatives, so it compiles to LOD 0
+      // and takes the sharpest mip however far apart the vertices are. That is
+      // the whole of the faceting the sea-level shot showed: the ripple cascade
+      // runs down to 5 cm wavelengths and was displacing geometry whose vertices
+      // are 20 cm apart at five metres and 75 cm apart at twenty, so every
+      // triangle landed on an unrelated phase and isolated vertices spiked into
+      // pyramids.
+      //
+      // The mip is chosen so its footprint is two vertex spacings, which puts a
+      // box filter's first null exactly on the mesh's Nyquist wavelength. See
+      // `FOOTPRINT_SPACINGS`; `geometryLod` there is these lines in testable
+      // form and is the specification if the two ever drift.
+      //
+      // The fixed-metre table this replaces had the right idea and could not act
+      // on it, because absolute distances cannot know the tier's mesh density —
+      // the same 18-55 m ripple ramp served a 128 ring mesh and a 512 ring one
+      // whose spacings differ fourfold. The level knows, because spacing is what
+      // it is computed from.
+      //
+      // **But the table's far end had to come back, and this is the second
+      // version of this loop.** The first deleted the fade outright, on the
+      // argument that a cascade puts itself out once the level runs past the
+      // last mip and the sampler clamps to the 1x1 level — the mean of a field
+      // whose DC amplitude is zero by construction. True, and it happens far
+      // later than the reasoning assumed: the ripple cascade does not reach its
+      // 1x1 level until 213 m, long after its longest 6 m wave stops being
+      // resolvable, so in between it kept contributing sidelobe — 38% of that
+      // wave at 55 m and -18% at 100 m, sign-inverted, on a mesh with no hope of
+      // resolving it. `cascadeReach` cuts each cascade over the interval where
+      // the footprint crosses its own longest wavelength, which is where the
+      // band's best-surviving component goes from 64% to exactly nulled.
+      //
+      // The mip chains cost nothing extra. `makeOutputTarget` has always built
+      // them — see its header on why the derivative field needs them — and until
+      // now the displacement field's chain was generated every frame for a
+      // consumer that only existed in the fragment stage.
+      const footprint = groundDistance
+        .mul(this.uVertexSpacing)
+        .mul(FOOTPRINT_SPACINGS)
+        .toVar();
       for (let i = 0; i < cascadeCount; i++) {
+        const lod = log2(footprint.div(this.uTexelMetres[i]).max(1)).toVar();
+        const reach = smoothstepDownClamped(
+          footprint.div(this.uMaxWavelengths[i]),
+          0.5,
+          1,
+        ).toVar();
         const sample = this.displacementNodes[i]
           .sample(worldXZ.div(this.uTileSizes[i]))
+          .level(lod)
           .toVar();
-        displacement.addAssign(
-          sample.xyz
-            .mul(cascadeGeometryFade(groundDistance, i, cascadeCount))
-            .mul(this.uCascadeWeights[i]),
-        );
+        displacement.addAssign(sample.xyz.mul(reach).mul(this.uCascadeWeights[i]));
       }
 
       displacement.mulAssign(this.uDisplacementScale);
@@ -1999,23 +2095,22 @@ const valueNoise = /*@__PURE__*/ Fn(([p]: [any]) => {
  * Geometry and shading need *different* LOD curves, and conflating them is what
  * makes naive ocean meshes sparkle.
  *
- * Geometry can only carry a wave if the local vertex spacing resolves it. On the
- * radial grid spacing grows in proportion to radius (~0.034r at the default
- * density), so each cascade must stop displacing vertices once its wavelength
- * approaches that spacing — otherwise every triangle lands on a random phase of
- * the wave and the surface breaks into noise.
+ * Geometry can only carry a wave if the local vertex spacing resolves it, and
+ * that limit is now enforced where it belongs — in the vertex stage, as a mip
+ * level computed from the spacing itself. See the displacement loop in `build`
+ * and `ocean/meshSampling`.
+ *
+ * The fixed-metre table that used to stand here is gone. It had the right idea
+ * and could not act on it: expressed in absolute distances, it knew nothing
+ * about the tier's mesh density, so the same 18-55 m ripple ramp served a 128
+ * ring mesh and a 512 ring one whose spacings differ by four times. The level
+ * knows, because spacing is what it is computed from.
  *
  * Shading has no such limit: the derivative textures are mipmapped, so the
  * fragment stage samples them correctly at any distance. Normals therefore carry
  * the detail far beyond where the geometry has flattened out, which is exactly
  * how real distant water reads — a smooth sheet with fine specular structure.
  */
-const CASCADE_GEOMETRY_FADE_METRES: [number, number][] = [
-  [900, 2600], // swell
-  [110, 300], // chop
-  [18, 55], // ripple
-];
-
 const CASCADE_SHADING_FADE_METRES: [number, number][] = [
   [Infinity, Infinity], // swell: always on
   [1400, 3000],
@@ -2033,11 +2128,6 @@ function fadeFrom(
   if (!Number.isFinite(start)) return float(1);
   // smoothstep rises 0 -> 1 with distance, so invert it to get a fade-out.
   return float(1).sub(distance.smoothstep(start, end)).clamp(0, 1);
-}
-
-/** Vertex-stage weight: how much this cascade displaces geometry. */
-function cascadeGeometryFade(distance: any, index: number, count: number): any {
-  return fadeFrom(CASCADE_GEOMETRY_FADE_METRES, distance, index, count);
 }
 
 /** Fragment-stage weight: how much this cascade contributes to normals and foam. */

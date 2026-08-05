@@ -6,13 +6,34 @@ export interface QualitySettings {
   /** Number of spectral cascades composited into the surface. */
   cascades: 1 | 2 | 3;
   /**
-   * Concentric rings in the radial ocean grid. This is the single strongest
-   * lever on surface fidelity: vertex spacing scales as radius / meshRings, and
-   * a cascade can only displace geometry out to where its wavelength still
-   * exceeds that spacing.
+   * Concentric rings in the radial ocean grid. The single strongest lever on
+   * surface fidelity: vertex spacing scales as radius / meshRings, and a cascade
+   * can only displace geometry out to where its wavelength still exceeds that
+   * spacing.
+   *
+   * **It is the worse of the two mesh axes that pulls that lever**, and these
+   * pairs were re-proportioned on that basis. Radial spacing is
+   * `exp(ln(24000/0.6) / meshRings) - 1` per metre of distance and angular is
+   * `2*pi / meshSegments`; a wave survives displacement only if both resolve it,
+   * so the coarser axis governs and over-sampling the finer one is vertex budget
+   * spent on nothing. Every tier was previously 2.6 to 3.4 times out of square in
+   * the same direction — far too many segments, far too few rings.
+   *
+   * They are now square to within 0.3%, which buys a 1.6x shorter surviving
+   * wavelength at every distance and every tier. See `squareGrid` in
+   * `ocean/meshSampling`, which derives them, and the test that pins them.
+   *
+   * It is very slightly *cheaper*, not free: trading segments for rings at a
+   * fixed `rings * segments` lowers both the true vertex count `(R+1)*S + 1` and
+   * the triangle count `S*(2R+1)` by 0.1% to 0.5%.
+   *
+   * What it spends is the horizon ring's smoothness. At High the outer ring is a
+   * 275-gon rather than a 448-gon, and at 24 km its chord sags 1.57 m — which
+   * subtends 6.5e-5 rad, against 9.7e-4 rad for one pixel at 720 lines over a 40
+   * degree vertical field. Fifteen times under a pixel, from any camera height.
    */
   meshRings: number;
-  /** Segments around the circle. */
+  /** Segments around the circle. See `meshRings` for how the two are balanced. */
   meshSegments: number;
   /**
    * Resolution of the sun's shadow map, per side. 0 disables shadow rendering
@@ -225,8 +246,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
   low: {
     fftSize: 128,
     cascades: 1,
-    meshRings: 128,
-    meshSegments: 192,
+    meshRings: 206,
+    meshSegments: 119,
     shadowMapSize: 512,
     terrainShadowSteps: 0,
     cloudSteps: 0,
@@ -253,8 +274,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
   medium: {
     fftSize: 128,
     cascades: 2,
-    meshRings: 192,
-    meshSegments: 288,
+    meshRings: 308,
+    meshSegments: 179,
     shadowMapSize: 1024,
     terrainShadowSteps: 12,
     cloudSteps: 12,
@@ -281,8 +302,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
   high: {
     fftSize: 256,
     cascades: 3,
-    meshRings: 288,
-    meshSegments: 448,
+    meshRings: 469,
+    meshSegments: 275,
     shadowMapSize: 2048,
     terrainShadowSteps: 20,
     cloudSteps: 18,
@@ -307,8 +328,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
   ultra: {
     fftSize: 256,
     cascades: 3,
-    meshRings: 384,
-    meshSegments: 576,
+    meshRings: 613,
+    meshSegments: 360,
     shadowMapSize: 2048,
     terrainShadowSteps: 28,
     cloudSteps: 34,
@@ -333,8 +354,8 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
   max: {
     fftSize: 512,
     cascades: 3,
-    meshRings: 512,
-    meshSegments: 768,
+    meshRings: 817,
+    meshSegments: 481,
     shadowMapSize: 4096,
     terrainShadowSteps: 28,
     cloudSteps: 34,

@@ -392,6 +392,9 @@ class App {
       radialSegments: quality.meshRings,
       angularSegments: quality.meshSegments,
     });
+    // How much of the wave field this mesh is entitled to be displaced by. Must
+    // follow every mesh construction; see `OceanMaterial.setVertexSpacing`.
+    this.water.setVertexSpacing(this.oceanMesh.spacingPerMetre);
     this.scene.add(this.oceanMesh.mesh);
 
     boot.set(0.7, 'Building atmosphere…');
@@ -1118,9 +1121,7 @@ class App {
    */
   private buildWaterMaterial(): OceanMaterial {
     return new OceanMaterial({
-      displacementTextures: this.simulation.displacementTextures,
-      derivativeTextures: this.simulation.derivativeTextures,
-      tileSizes: this.simulation.tileSizes,
+      ...this.simulation.fields,
       floorDepthNode: (worldPosition) => this.seafloor.depthNode(worldPosition),
       foam: {
         texture: this.wake.texture,
@@ -1162,11 +1163,7 @@ class App {
     // framebuffer for refraction, each rebuild leaked the backdrop texture that
     // came with it — measured at forty textures over eight tier changes, which
     // the leak test caught.
-    this.water.setCascades(
-      this.simulation.displacementTextures,
-      this.simulation.derivativeTextures,
-      this.simulation.tileSizes,
-    );
+    this.water.setCascades(this.simulation.fields);
     // The foam buffer reads the same fields to find breaking crests.
     this.wake.setCascades(this.simulation.derivativeTextures, this.simulation.tileSizes);
     // The height field the underwater pass traces against is re-pointed by
@@ -1180,6 +1177,8 @@ class App {
       radialSegments: quality.meshRings,
       angularSegments: quality.meshSegments,
     });
+    // The tier changed the ring count, so the spacing changed with it.
+    this.water.setVertexSpacing(this.oceanMesh.spacingPerMetre);
     this.scene.add(this.oceanMesh.mesh);
 
     this.clouds.setParams({ steps: quality.cloudSteps });

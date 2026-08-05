@@ -176,6 +176,46 @@ export class OceanSimulation {
     return this.cascades.map((c) => c.config.tileSize);
   }
 
+  /**
+   * Texels per side of every cascade's output.
+   *
+   * Published because a tile size alone does not say how finely the field is
+   * sampled, and the surface needs metres per texel to choose a mip level to
+   * displace geometry from. See `ocean/meshSampling`.
+   */
+  get resolution(): number {
+    return this.size;
+  }
+
+  /** Longest wavelength each cascade carries, metres. See `cascadeReach`. */
+  get maxWavelengths(): number[] {
+    return this.cascades.map((c) => c.config.maxWavelength);
+  }
+
+  /**
+   * Everything the surface needs to know about the cascade set, as one object.
+   *
+   * The surface takes this both when its graph is built and again after a tier
+   * change re-points it. Handing over one object rather than a list of
+   * positional arguments is what stops the two sites drifting — the graph was
+   * once built from inputs one of which the re-point silently never supplied.
+   */
+  get fields(): {
+    displacementTextures: THREE.Texture[];
+    derivativeTextures: THREE.Texture[];
+    tileSizes: number[];
+    maxWavelengths: number[];
+    resolution: number;
+  } {
+    return {
+      displacementTextures: this.displacementTextures,
+      derivativeTextures: this.derivativeTextures,
+      tileSizes: this.tileSizes,
+      maxWavelengths: this.maxWavelengths,
+      resolution: this.resolution,
+    };
+  }
+
   get activeCascadeCount(): number {
     return this.cascades.length;
   }
