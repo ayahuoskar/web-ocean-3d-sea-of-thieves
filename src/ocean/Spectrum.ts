@@ -190,8 +190,19 @@ function mulberry32(seed: number): () => number {
   };
 }
 
-export function createSpectrumTexture(size: number, data: Float32Array): THREE.DataTexture {
-  const texture = new THREE.DataTexture(data, size, size, THREE.RGBAFormat, THREE.FloatType);
+/**
+ * `h0(k)` for every cascade side by side: `columns * size` wide, `size` tall.
+ *
+ * One texture rather than one per cascade so a single evolution pass can serve
+ * all of them — see `OceanSimulation.build`. Cascade `c` occupies the columns
+ * `[c * size, (c + 1) * size)`.
+ */
+export function createSpectrumTexture(
+  size: number,
+  columns: number,
+  data: Float32Array,
+): THREE.DataTexture {
+  const texture = new THREE.DataTexture(data, size * columns, size, THREE.RGBAFormat, THREE.FloatType);
   texture.minFilter = THREE.NearestFilter;
   texture.magFilter = THREE.NearestFilter;
   texture.wrapS = THREE.RepeatWrapping;

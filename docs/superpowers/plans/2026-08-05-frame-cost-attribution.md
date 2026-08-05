@@ -340,6 +340,38 @@ butterfly on the CPU against a brute-force inverse DFT and is mutation-verified
 against the twiddle bug this project shipped once. It does not cover the seam
 itself; the 21 visual baselines do, and a seam error is not subtle.
 
+### And then every cascade, in the same atlas
+
+The butterfly reads nothing cascade-specific — only the ping-pong texture and
+the twiddle table — so running it once per cascade paid the per-pass cost three
+times for one pass of work, exactly as the two pairs had. The atlas therefore
+widened again: `2 * cascadeCount` slots, slot `2c` being cascade c's pair A and
+slot `2c + 1` its pair B, with the initial spectra in a matching
+`cascadeCount * size` texture so one evolution serves them all.
+
+Per frame that is **1 evolve + 16 butterfly + 6 assemble = 23 passes against the
+original 108.** Only the unpacking stays per cascade, because only it writes
+somewhere different.
+
+| | passes | transform | frame | delivered |
+|---|---|---|---|---|
+| before | 108 | 7.24 ms | 16.5-17.0 ms | ~61 FPS |
+| pairs folded | 57 | 4.54 ms | 14.47 ms | ~69 FPS |
+| cascades folded | **23** | **2.55 ms** | **12.31 ms** | **~81 FPS** |
+
+The transform is down 65% and the frame by about 4.2 ms, with 21 of 21 visual
+baselines unchanged at every step.
+
+One thing this cost, and it is worth stating plainly: the seam arithmetic is now
+load-bearing in three places rather than one — the butterfly's slot offset, the
+evolution's cascade-to-spectrum-column mapping, and the unpack's base offset.
+The first version of the cascade fold got exactly this wrong, generalising the
+simulation to N slots while leaving `butterflyPassNode` on the two-slot
+arithmetic where the offset could only ever be 0 or `size`. It did not error; it
+produced a sea whose Jacobian folded over 66% of the surface. `ocean.spec`'s
+sea-state assertion caught it, which is the argument for having a numeric
+assertion on the field and not only pictures.
+
 ### Still available, in order
 
 **Mixed-radix-4** takes the stage count from 7/8/9 to 4/4/5 at 128/256/512,

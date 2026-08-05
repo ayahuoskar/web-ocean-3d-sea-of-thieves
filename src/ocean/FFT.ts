@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { Fn, float, int, ivec2, select, uniform, textureLoad, uv, vec2, vec4 } from 'three/tsl';
+import { Fn, float, int, ivec2, uniform, textureLoad, uv, vec2, vec4 } from 'three/tsl';
 
 /**
  * Cooley–Tukey radix-2 IFFT executed as ping-ponged fullscreen passes.
@@ -115,12 +115,14 @@ export function createFFTResources(size: number): FFTResources {
  * Builds the node graph for one butterfly pass. `direction` 0 = horizontal
  * (transform along x), 1 = vertical.
  *
- * **Both spectra pairs live side by side in one double-width target**, pair A in
- * `x < size` and pair B in `x >= size`, and one pass steps both. That is a
- * performance change with no effect on the mathematics: the two pairs are
- * independent transforms of identical size that read the same butterfly row at
- * the same stage, so running them as two passes paid the per-pass cost twice for
- * one pass of work.
+ * **Every cascade's spectra live side by side in one atlas**, `slots` columns
+ * of `size` across — slot `2c` is cascade c's pair A and slot `2c + 1` its pair
+ * B — and one pass steps all of them. That is a
+ * performance change with no effect on the mathematics: every slot is an
+ * independent transform of identical size reading the same butterfly row at the
+ * same stage, and the butterfly reads nothing cascade-specific at all, so
+ * running them separately paid the per-pass cost once per slot for one pass of
+ * work.
  *
  * Measured, that cost is the whole story. A fullscreen pass costs about 53
  * microseconds in this engine near enough regardless of what it draws — 96 extra
@@ -139,6 +141,7 @@ export function butterflyPassNode(
   sourceTexture: THREE.Texture,
   stageUniform: any,
   direction: 0 | 1,
+  slots: number,
 ) {
   const { size, butterfly } = resources;
 
@@ -148,19 +151,24 @@ export function butterflyPassNode(
     // so derive it from uv against the known target size instead. The target is
     // twice as wide as the transform.
     const coord = ivec2(
-      float(size * 2).mul(uv().x).floor().toInt(),
+      float(size * slots).mul(uv().x).floor().toInt(),
       float(size).mul(uv().y).floor().toInt(),
     ).toVar();
 
-    // Which half this fragment belongs to, as an x offset. Written as a subtract
-    // rather than a modulo so no integer division appears in the inner loop.
-    const inB = coord.x.greaterThanEqual(int(size));
-    const halfOffset = select(inB, int(size), int(0)).toVar();
-    const localX = coord.x.sub(halfOffset).toVar();
+    // Which slot this fragment belongs to, as an x offset. Derived in float and
+    // floored rather than by integer division, which is spelled differently on
+    // the two backends this compiles to.
+    const slotOffset = float(coord.x)
+      .div(float(size))
+      .floor()
+      .mul(size)
+      .toInt()
+      .toVar();
+    const localX = coord.x.sub(slotOffset).toVar();
 
     // The transform axis index selects which row of the butterfly texture to
-    // use, and it is the index *within* a half — the two halves are separate
-    // transforms that must not read across the seam.
+    // use, and it is the index *within* a slot — every slot is a separate
+    // transform and none may read across the seam.
     const axis = direction === 0 ? localX : coord.y;
 
     const bf = textureLoad(butterfly, ivec2(stageUniform.toInt(), axis)).toVar();
@@ -171,9 +179,9 @@ export function butterflyPassNode(
     // Horizontal reads are offset back into this fragment's own half; vertical
     // reads stay in the same column, which already carries the offset.
     const coordA =
-      direction === 0 ? ivec2(halfOffset.add(idxA), coord.y) : ivec2(coord.x, idxA);
+      direction === 0 ? ivec2(slotOffset.add(idxA), coord.y) : ivec2(coord.x, idxA);
     const coordB =
-      direction === 0 ? ivec2(halfOffset.add(idxB), coord.y) : ivec2(coord.x, idxB);
+      direction === 0 ? ivec2(slotOffset.add(idxB), coord.y) : ivec2(coord.x, idxB);
 
     const a = textureLoad(sourceTexture, coordA).toVar();
     const b = textureLoad(sourceTexture, coordB).toVar();
