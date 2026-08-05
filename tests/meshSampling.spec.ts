@@ -98,12 +98,21 @@ test.describe('geometry LOD', () => {
    * itself. These assertions are on the actual sinc response, so a wrong factor
    * cannot pass them.
    */
-  test('nulls the mesh Nyquist wavelength exactly', () => {
+  test('nulls the mesh Nyquist wavelength, for a wave along a texture axis', () => {
     const spacing = 0.75;
     const f = FOOTPRINT_SPACINGS * spacing;
 
-    // Nyquist for a grid of this spacing is 2*spacing, and it is annihilated.
+    // Nyquist for a grid of this spacing is 2*spacing, and it is nulled.
     expect(Math.abs(boxResponse(f, 2 * spacing))).toBeLessThan(1e-9);
+
+    // **But only along an axis, and the test name says so for a reason.** A mip
+    // is a separable 2D kernel, so a wave crossing at 45 degrees presents
+    // sqrt(2) times its wavelength to each axis and survives at ~12.8% rather
+    // than being nulled. That is the honest bound on this whole model, it came
+    // from an independent review, and it is asserted here so nobody re-derives
+    // the constant from the axis-aligned case alone and concludes it is exact.
+    const diagonal = boxResponse(f, 2 * spacing * Math.SQRT2) ** 2;
+    expect(diagonal).toBeCloseTo(0.128, 3);
 
     // Everything shorter than Nyquist — the content that would alias — is held
     // in the sidelobes, whose worst case is 22%.
@@ -258,5 +267,17 @@ test.describe('quality tiers', () => {
         s: derived.angularSegments,
       });
     }
+  });
+});
+
+test.describe('squareGrid contract', () => {
+  test('rejects a budget it cannot serve rather than exceeding it', () => {
+    // Below 6 there is no pair satisfying R >= 2, S >= 3, and a non-finite
+    // budget makes the search bound non-finite. Both used to fall through to
+    // the initialised 2x3 — which spends 6 vertices whatever it was given.
+    expect(() => squareGrid(5, INNER, OUTER)).toThrow(RangeError);
+    expect(() => squareGrid(Number.POSITIVE_INFINITY, INNER, OUTER)).toThrow(RangeError);
+    expect(() => squareGrid(Number.NaN, INNER, OUTER)).toThrow(RangeError);
+    expect(() => squareGrid(6, INNER, OUTER)).not.toThrow();
   });
 });

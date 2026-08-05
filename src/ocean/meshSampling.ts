@@ -28,11 +28,27 @@
  *   lambda = 8s               0.900
  *
  * So this is not a brick wall and must not be described as one. It is a filter
- * that annihilates the aliasing wavelength, holds everything else the mesh
- * cannot carry under 22%, and passes most of what it can. An earlier version of
- * this comment claimed a box of width `f` "suppresses wavelengths below `2f`",
- * which put the cutoff at twice the wavelength where it really sits and would
- * have justified any factor at all.
+ * that nulls the aliasing wavelength, holds everything else the mesh cannot
+ * carry under 22%, and passes most of what it can. An earlier version of this
+ * comment claimed a box of width `f` "suppresses wavelengths below `2f`", which
+ * put the cutoff at twice the wavelength where it really sits and would have
+ * justified any factor at all.
+ *
+ * **The table above is the one-dimensional ideal, and the GPU's filter is
+ * neither.** Two further caveats, both from an independent review, and both
+ * reasons to read `2` as very well motivated rather than as exact:
+ *
+ * - A mip is a *separable 2D* kernel, so the null lands on the Nyquist
+ *   wavelength only for waves running along a texture axis. A wave crossing at
+ *   45 degrees presents `sqrt(2)` times its wavelength to each axis, and at
+ *   Nyquist retains `sinc(pi/sqrt(2))^2` — about **12.8%**, not zero.
+ * - A fractional level blends two mip levels, so the effective kernel is a mix
+ *   of two box widths rather than one.
+ *
+ * Neither changes the choice. 12.8% of an unresolvable wave is a long way from
+ * the 100% the vertex stage was passing before any of this, and no other
+ * footprint has a better claim. What they change is that "annihilates Nyquist
+ * exactly" is a statement about the model in this file, not about the shader.
  */
 export const FOOTPRINT_SPACINGS = 2;
 
@@ -89,6 +105,11 @@ export function vertexSpacingPerMetre(
  * so the few hundred thousand comparisons at the largest tier are not worth
  * trading for a bound that needs a proof.
  *
+ * Degenerate budgets are rejected rather than silently mis-served: below 6 there
+ * is no pair satisfying `R >= 2, S >= 3` at all, and a non-finite budget would
+ * make the loop bound non-finite too. Both would otherwise return the initial
+ * `2 x 3` — which exceeds the budget it was given, quietly.
+ *
  * `floor` on the segment count is what keeps `R*S` inside the budget. Note that
  * `R*S` is a *surrogate* for cost rather than the mesh's true size: the grid
  * builds `(R+1)*S + 1` vertices and `S*(2R+1)` triangles. Holding the surrogate
@@ -101,6 +122,11 @@ export function squareGrid(
   innerRadius: number,
   outerRadius: number,
 ): { radialSegments: number; angularSegments: number } {
+  if (!Number.isFinite(vertexBudget) || vertexBudget < 6) {
+    throw new RangeError(
+      `squareGrid needs a finite vertex budget of at least 6, got ${vertexBudget}`,
+    );
+  }
   const l = Math.log(outerRadius / innerRadius);
 
   let radialSegments = 2;
@@ -191,11 +217,27 @@ export function geometryLod(
  * 55 m, and -18% at 100 m, sign-inverted, on a mesh that cannot resolve it.
  * The old table ended at 55 m for a reason.
  *
- * So the fade comes back, derived rather than tuned. It runs over the interval
- * where the footprint crosses the cascade's own longest wavelength: at half of
- * it the band's best-surviving component is at 64%, at all of it that component
- * is exactly nulled and everything left is sidelobe. Cutting there is the
- * boundary the physics draws.
+ * So the fade comes back, derived rather than tuned — though **the derivation
+ * below is the second one written here**, because a review pointed out that the
+ * first did not hold.
+ *
+ * The interval is best read in samples per wavelength rather than in filter
+ * response, and then it is the same criterion `FOOTPRINT_SPACINGS` uses. Since
+ * the footprint is `2s` by construction, `footprint = 0.5 * maxWavelength` means
+ * the band's longest wave spans **four vertex spacings**, and
+ * `footprint = maxWavelength` means it spans **two** — Nyquist. So the cascade
+ * fades out exactly as its best-resolved component walks from the point where a
+ * crest is still a curve to the point where the mesh cannot represent it at all.
+ *
+ * What the first version claimed instead was that this interval is where the
+ * band's longest wave goes from 64% response to nulled, and that cutting there
+ * is "the boundary the physics draws". The first half is arithmetically true and
+ * the second does not follow: the mip is already attenuating that wave, so
+ * multiplying by this ramp attenuates it twice — at three quarters of the way
+ * along, an ideal box leaves 30% and this ramp takes it to 15%. That is
+ * deliberate, because a cascade whose best content is below four samples per
+ * wavelength should be leaving, but it is a choice about where to stop trusting
+ * a band and not a boundary handed down by the filter.
  *
  * It lands close to the table it replaces — for High as previously proportioned,
  * ripple 40-80 m against a tuned 18-55, chop 160-320 against 110-300 — while

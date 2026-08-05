@@ -151,6 +151,28 @@ const TEMPORAL_CEILING: Record<string, number> = {
  */
 const DETAIL_FLOOR = 0.4;
 
+/**
+ * **What these two bands cannot tell you, recorded where it will be needed.**
+ *
+ * Detail is measured in the NEAR band and shimmer in the FAR one, so there is no
+ * far-field detail figure — and that is exactly the quantity needed to separate
+ * "the far field carries more real wave geometry" from "the far field is
+ * noisier". The two look identical to `highFreq`.
+ *
+ * It came up for real. Squaring the tier mesh proportions raised far-field
+ * `highFreq` by 5-7% on High, Ultra and Max while recovering ~2% of near-field
+ * detail; the change was kept on the argument that a finer mesh band-limits
+ * *less*, so the extra energy is geometry rather than sparkle — but this file
+ * cannot confirm that, and the figures are in
+ * `docs/superpowers/plans/2026-08-05-waterline-measurements.md` rather than
+ * settled here.
+ *
+ * The fix is a `detail` figure over the FAR band alongside the existing one. It
+ * is deliberately not added here: every ceiling above is denominated in absolute
+ * luminance levels and re-cutting the metric would rewrite what all of them
+ * historically meant, which is a change worth making on its own.
+ */
+
 test('the far field does not shimmer, and the near field keeps its detail', async ({ page }) => {
   test.setTimeout(600_000);
   await bootOcean(page);

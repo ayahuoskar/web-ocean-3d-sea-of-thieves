@@ -266,6 +266,11 @@ class App {
    */
   private foamOverride: number | null = null;
   /**
+   * Foam strength the weather last derived, so the override can be lifted
+   * without re-running `applyPreset` to find out what it was.
+   */
+  private weatherFoamStrength = 1;
+  /**
    * The tour's multiplier on the preset's volumetric fog. 1 outside Cinematic.
    *
    * A field rather than a second `fog.setParams` call, because the density is
@@ -1502,9 +1507,8 @@ class App {
       foamThreshold: foamThreshold * 0.62,
       foamSoftness: 0.42,
     });
-    this.water.setFoamStrength(
-      this.foamOverride ?? Math.max(0.35, Math.min(1.2, Math.sqrt(whitecapRatio))),
-    );
+    this.weatherFoamStrength = Math.max(0.35, Math.min(1.2, Math.sqrt(whitecapRatio)));
+    this.water.setFoamStrength(this.foamOverride ?? this.weatherFoamStrength);
     // Sky and horizon come from the atmosphere, not from preset constants.
     //
     // The first argument used to be the *sun* colour, which is not the sky by
@@ -2376,17 +2380,25 @@ class App {
          */
         setFoamOverride: (strength: number | null) => {
           this.foamOverride = strength;
-          // Re-applied immediately, and this is not optional.
+          // Written straight through, and both halves of that matter.
           //
-          // The surf master is written every frame, but the foam strength is
-          // written by `applyPreset`, which runs on a *state change* rather than
-          // per frame. So setting the field alone left the uniform holding its
-          // old value until something unrelated happened to change the state,
-          // and the override read as inert — foam 0 and foam 3 produced
-          // bit-identical frames. `false` skips the environment capture, which
-          // is the expensive half of `applyPreset` and cannot be affected by
-          // this.
-          this.applyPreset(false);
+          // **It must be written now.** The surf master is set every frame, but
+          // foam strength is set by `applyPreset`, which runs on a *state
+          // change* rather than per frame. Setting the field alone left the
+          // uniform holding its old value until something unrelated happened to
+          // change state, and the override read as completely inert — foam 0 and
+          // foam 3 rendered bit-identically, which a measurement with no control
+          // would have reported as "there is no foam here".
+          //
+          // **And it must not go through `applyPreset`,** which is what the
+          // first fix did. That re-applies the atmosphere, the clouds, the
+          // weather, every spectrum texture, the wake's breaking parameters, the
+          // exposure, the bloom and the colour grade — so a hook that claims to
+          // move one uniform would silently reset any other override a test had
+          // set, `setGrade` and `setBloomEnabled` included. An independent review
+          // caught that; `weatherFoamStrength` is cached instead so lifting the
+          // override needs nothing recomputed.
+          this.water.setFoamStrength(strength ?? this.weatherFoamStrength);
         },
         /**
          * Test-only grade override.
