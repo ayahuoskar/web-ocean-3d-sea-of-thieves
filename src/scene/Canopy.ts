@@ -42,10 +42,10 @@ import { ISLAND } from './Seafloor';
  * into a texture and pick the nearest view at runtime. That is the right answer
  * when the impostor has to hold up at fifty metres, and it is a build step, an
  * atlas, a licence question and an octahedral lookup. These are never seen
- * closer than 320 m, where a tree is under thirty pixels and its silhouette is a
- * blob with a broken edge — so the card is a blob with a broken edge, generated
- * in the shader from the instance's own seed. No asset, no atlas, no sampler,
- * and nothing to keep in step with the models when they change.
+ * closer than 90 m, where a clump is a blob with a broken edge — so the card is
+ * a blob with a broken edge, generated in the shader from the instance's own
+ * seed. No asset, no atlas, no sampler, and nothing to keep in step with the
+ * models when they change.
  *
  * **Placement is the terrain's, not a table's.** Like `IslandMeadow`, this is
  * handed `Seafloor`'s heightfield as a TSL node and asks it directly: a card
@@ -83,16 +83,44 @@ const CARD_HEIGHT = 12;
 const CARD_VARIATION = 0.42;
 
 /**
+ * How far a card's *proportions* may depart from `CARD_WIDTH:CARD_HEIGHT`.
+ *
+ * `CARD_VARIATION` scales both axes together, so every card was the same ellipse
+ * at a different size — and a field of one shape at one aspect is the strongest
+ * of the bubble-wrap cues, stronger than either tone or size, because the eye
+ * reads repeated *outline* long before it reads repeated colour. Applied as a
+ * factor on the width and its reciprocal on the height, so a card's area is
+ * unchanged and the field's coverage does not move with this number: it varies
+ * squat stands against columnar ones and nothing else.
+ */
+const CARD_ASPECT_VARIATION = 0.34;
+
+/**
  * Where the cards take over from the meshes, in metres from the camera.
  *
- * They must not be visible where a real tree is, or the same clump is drawn
- * twice — once as geometry and once as a card floating through it. `Props`
- * switches its last LOD at 420 m, so the cards fade in over 320 to 520 m: they
- * are already carrying the silhouette by the time the meshes have thinned, and
- * they are gone before a viewer is close enough to see that they are flat.
+ * These were 320 and 520, and that was the single worst-looking thing about the
+ * island: fly toward it and a bald crescent opened across the whole near half of
+ * the landmass, travelling with the camera. From 750 m out — a routine approach —
+ * everything from the near shore to past the summit was bare ground, because the
+ * fade is per *card*, on the card's own distance, so what it cuts is a disc
+ * around the viewer rather than a state the island is in.
+ *
+ * The old numbers were reasoned from the wrong quantity. They were set against
+ * `Props`' *last* LOD switch at 420 m on the argument that the meshes take the
+ * silhouette back over inside it — but the meshes are ~110 trees over 0.8 km²,
+ * an accent layer two hundred times sparser than this field, and 420 m is where
+ * they are at their *coarsest*, not where they are dense. There was never
+ * anything on the other side of that handover to hand over to.
+ *
+ * What actually decides the near edge is when a card stops passing for canopy,
+ * and that is an angle rather than a distance: a card is about 19 m across, so
+ * it subtends 6° at 180 m and 12° at 90 m. Past 6° the flat sheet is still
+ * reading as a crown; by 12° it is reading as a sheet. Hence 90 to 180 — and
+ * inside 90 m the viewer is in among the trees, where the meshes are at LOD0 and
+ * are the only honest answer.
  */
-const FADE_IN_NEAR = 320;
-const FADE_IN_FAR = 520;
+const FADE_IN_NEAR = 90;
+const FADE_IN_FAR = 180;
 
 /**
  * Elevation band, matching `Seafloor`'s vegetation ramp and treeline.
@@ -426,8 +454,16 @@ export class IslandCanopy {
       const flat = normalize(vec3n(toCamera.x, 0, toCamera.z).add(vec3(1e-4, 0, 0))) as Node;
       const right = normalize(vec3n(flat.z.negate(), 0, flat.x)) as Node;
 
-      const width = size.mul(CARD_WIDTH);
-      const height = size.mul(CARD_HEIGHT);
+      // Proportions, from a hash of the two draws the instance already carries.
+      // A third random per card would mean a wider instance buffer for one
+      // scalar; the seed's own components are independent, so a hash of them is
+      // as good a draw and costs nothing per instance.
+      const aspect = fract(sin(seed.z.mul(74.7).add(seed.w.mul(219.3))).mul(21942.31))
+        .sub(0.5)
+        .mul(2 * CARD_ASPECT_VARIATION)
+        .add(1);
+      const width = size.mul(CARD_WIDTH).mul(aspect);
+      const height = size.mul(CARD_HEIGHT).div(aspect);
 
       // Sway, as a shear at the top of the card. One travelling wave across the
       // island so neighbouring clumps move together — a canopy moves in gusts,
