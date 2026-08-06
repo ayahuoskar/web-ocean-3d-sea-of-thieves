@@ -171,15 +171,22 @@ Drop the camera below the surface in any mode to trigger the underwater state.
   one wave face that happens to line the half-vector up
 - **Snell's window and total internal reflection** on the underside: the whole sky compressed
   into a 48.6-degree disc, the underwater scene mirrored around it
+- A meniscus at the waterline — rim highlight and lens pull where a ray crosses the surface
+  within half a metre of the eye — and a per-preset refractive warp of the submerged image, so
+  a storm looks through a disturbed lens and a glassy sunset does not
 - Planar reflection of ship, props and clouds, sampled at a roughness- and distance-driven mip
   level rather than as a mirror, faded out at the frame edge and at grazing angles
 - Persistent foam: breaking crests and the ship's wake deposit into one world-anchored buffer
   that decays over seconds, rather than a mask recomputed every frame
-- JONSWAP directional spectrum with live wind-speed and peak-wavelength control
-- Three spectral cascades (512 m / 128 m / 16 m tiles) — swell, chop and ripple with no
+- JONSWAP spectrum with live wind-speed and peak-wavelength control, spread by the Hasselmann
+  frequency-dependent directional model — so the dominant sea tracks the wind while the ripples
+  are close to omnidirectional, which is what stops a wave field reading as corduroy
+- Blendable standing waves, for sheltered water that bobs rather than sweeping through
+- Three spectral cascades (1024 m / 128 m / 16 m tiles) — swell, chop and ripple with no
   visible tiling
 - Jacobian-derived whitecaps: foam appears where the surface genuinely folds, biased toward
-  crests and broken up with world-space noise
+  crests, streaked along the wind and broken up with world-space noise, with a second
+  lower-rate deposit on wind-facing faces that persistence carries over the crest
 - Fresnel sky reflection, Beer–Lambert transmission, subsurface scattering on backlit
   crests, GGX sun specular
 - Shallow-water tint driven by real seafloor depth
@@ -296,6 +303,17 @@ checks:
 | Crest amplitude, cascade 0 | **±1.4 m** | same (gate: `0.4 m … 12 m`) |
 | Surface below the break threshold (J < 0.14) | **5.5%** | one-off histogram of the Jacobian readback; drives the deposit rate |
 
+> These three were measured against the previous fixed-exponent directional
+> spread and have **not** been re-measured since it became frequency dependent.
+> They have certainly moved: at an unchanged deposit rate the new spectrum
+> rendered 0.60–0.67 of the old whitecap coverage at every wind speed from 6 to
+> 24 m/s, which is only possible if less of the surface is reaching the fold
+> threshold. The two gated figures still pass their gates by a wide margin —
+> that is what `produces a physically plausible sea state` checks, and it does —
+> but the exact percentages above are stale. Left labelled rather than replaced
+> with numbers nobody has read off the GPU, which is the whole point of the
+> notes below.
+
 > This table previously quoted "whitecap coverage 4.6%, asserted by
 > `produces a physically plausible sea state`". That test reads displacement
 > Jacobians and asserts only `foldedPercent < 8`; it never reads the foam buffer
@@ -356,8 +374,10 @@ Full methodology, cost model and the honest list of what remains unmeasured:
 
 ## Known limitations
 
-- **No temporal antialiasing or reconstruction.** Every stochastic effect here — the fog march,
-  the cloud march, the shaft march, the specular lobe — resolves spatially within one frame.
+- **No temporal antialiasing or reconstruction.** Geometry is multisampled at 4x and the output
+  carries a spatial FXAA resolve at 0.3, but every stochastic effect here — the fog march, the
+  cloud march, the shaft march, the specular lobe — still resolves spatially within one frame.
+  A spatial filter can soften a shading stair-step; it cannot supply the samples that made it.
   This remains the largest single thing between the current image and a shipping one: it is
   what would let every march trade samples for frames. It is *not* what the far-field shimmer
   turned out to need — that was an under-filtered anisotropic sampler, and fixing it where it
@@ -389,7 +409,7 @@ Full methodology, cost model and the honest list of what remains unmeasured:
   response, no finite depth, and no propagation of history at the group velocity.
 - **Foam reads as broad ribboning**, not sparse multiscale bubbles and streaks. The rendered
   coverage *is* now measured against Monahan's `W = 3.84e-6 U^3.41` and tracks it to within a
-  factor of three from 6 to 24 m/s (0.26 / 0.28 / 3.42 / 13.97 / 14.76 % against 0.17 / 0.69 /
+  factor of three from 6 to 24 m/s (0.27 / 0.30 / 4.94 / 11.92 / 12.33 % against 0.17 / 0.69 /
   3.93 / 12.39 / 19.54) — so the amount of foam is right and its *structure* is not.
 - **Cloud shadow is a one-sample approximation.** It traces to the middle of the slab along the
   sun path and attenuates by density times path length — the same field the clouds are drawn

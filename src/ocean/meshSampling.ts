@@ -212,10 +212,16 @@ export function geometryLod(
  * mip, which is the mean of a field whose DC amplitude `Spectrum` sets to zero.
  * All of that is true. What it misses is *where* that happens. The 1x1 level of
  * the ripple cascade is reached at 213 m, not at the ~40 m where its longest
- * 6 m wave stops being resolvable — so between those two distances the cascade
- * goes on contributing, and what it contributes is sidelobe: 38% of that wave at
+ * wave stops being resolvable — so between those two distances the cascade goes
+ * on contributing, and what it contributes is sidelobe: 38% of that wave at
  * 55 m, and -18% at 100 m, sign-inverted, on a mesh that cannot resolve it.
  * The old table ended at 55 m for a reason.
+ *
+ * Those figures were measured when the ripple cascade topped out at 6 m; its
+ * band now ends at 3 m, so the crossover sits nearer than they say. They are
+ * left as they were measured rather than rewritten to numbers nobody has
+ * checked — the derivation below reads `maxWavelength` from the cascade config,
+ * so the *behaviour* tracked the change even though this paragraph did not.
  *
  * So the fade comes back, derived rather than tuned — though **the derivation
  * below is the second one written here**, because a review pointed out that the
