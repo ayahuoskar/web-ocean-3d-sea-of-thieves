@@ -89,6 +89,19 @@ export class Loop {
   }
 
   /**
+   * True once `start()` has been called and `stop()` has not.
+   *
+   * Distinct from `isPaused`: a paused loop is running and choosing not to
+   * advance, while a loop that has never started cannot draw a frame at all.
+   * Work that must not be interrupted by a render only needs to stop the loop
+   * when there is one — see `loadSceneContent`, which does that dance during
+   * gameplay and skips it entirely when it runs behind the boot overlay.
+   */
+  get isRunning(): boolean {
+    return this.running;
+  }
+
+  /**
    * Detaches the simulation from wall clock.
    *
    * While paused the rAF callback keeps firing but neither advances time nor

@@ -158,6 +158,9 @@ const LOD_SWITCH_METRES = [120, 420];
  */
 const LOD_REFRESH_DISTANCE = 25;
 
+/** Shared empty result, so the common case allocates nothing. */
+const EMPTY_MESHES: THREE.InstancedMesh[] = [];
+
 const BUOY_COUNT = 5;
 const BARREL_COUNT = 6;
 const ROCK_COUNT = 34;
@@ -853,6 +856,16 @@ export class Props {
    * alternative — sorting per frame — would cost a megabyte of matrix upload
    * every frame to answer a question whose answer changes about once a second.
    */
+  /**
+   * LOD meshes whose pipeline has been built, and those still waiting.
+   *
+   * A `Set` rather than a flag on the mesh so nothing has to be cleaned up when
+   * a tier change disposes and rebuilds the field — the meshes go, and the sets
+   * go with them.
+   */
+  private readonly compiled = new Set<THREE.InstancedMesh>();
+  private readonly uncompiled = new Set<THREE.InstancedMesh>();
+
   updateLod(cameraPosition: THREE.Vector3): void {
     if (this.disposed) return;
 
@@ -893,11 +906,81 @@ export class Props {
         for (const mesh of lod.levels[level]) {
           mesh.count = counts[level];
           mesh.instanceMatrix.needsUpdate = true;
+
+          // A level holding no instances is hidden rather than left visible with
+          // a count of zero, and that is a *boot time* decision rather than a
+          // drawing one — an empty instanced draw costs almost nothing.
+          //
+          // `compileAsync` walks `traverseVisible` and does not look at `count`,
+          // so every level of every kind used to have its pipeline built during
+          // the boot prewarm, including the two thirds that cannot put a
+          // triangle on screen from where the camera starts. Measured: 177
+          // pipelines and ~52 s, against 73 pipelines and ~41 s once the
+          // undrawable levels are hidden.
+          //
+          // Why this is worth doing at the level of visibility rather than by
+          // compiling a subset: three.js keys a render object's cache on the
+          // InstancedMesh's own uuid (`getDynamicCacheKey`, added by
+          // mrdoob/three.js#29066 so two meshes of equal count cannot share
+          // matrices), so every InstancedMesh gets its own pipeline whatever its
+          // material. Sharing material objects therefore buys nothing — measured
+          // directly: aliasing the LOD materials took 176 distinct materials to
+          // 79 and left the pipeline count at 177. The count of *meshes compiled*
+          // is the only quantity that moves.
+          const wanted = counts[level] > 0;
+          if (wanted && !this.compiled.has(mesh)) {
+            // Never drawn before, so its pipeline does not exist yet. Drawing it
+            // now is the inline gameplay compile this project rules out, so it
+            // stays hidden until `takeUncompiledLevels` has been honoured.
+            this.uncompiled.add(mesh);
+            mesh.visible = false;
+          } else {
+            mesh.visible = wanted;
+          }
         }
       }
 
       lod.dealtAt.copy(cameraPosition);
       lod.dealt = true;
+    }
+  }
+
+  /**
+   * Levels that have become drawable but whose pipelines have never been built.
+   *
+   * Returned once and then forgotten: the caller owns them from that point and
+   * is expected to compile them and call `markCompiled`. Empty on almost every
+   * frame — it fills only when the camera crosses an LOD switch onto a level
+   * that the boot prewarm skipped, which in practice means flying in to the
+   * island for the first time.
+   */
+  takeUncompiledLevels(): THREE.InstancedMesh[] {
+    if (this.uncompiled.size === 0) return EMPTY_MESHES;
+    const out = [...this.uncompiled];
+    this.uncompiled.clear();
+    return out;
+  }
+
+  /**
+   * Records that these meshes now have pipelines, and lets them draw.
+   *
+   * `markCompiled()` with no argument claims everything currently visible, which
+   * is what the boot path wants: the prewarm compiled exactly the visible set,
+   * so exactly that set is now safe to draw.
+   */
+  markCompiled(meshes?: readonly THREE.InstancedMesh[]): void {
+    if (meshes === undefined) {
+      for (const entry of this.thinnable) {
+        if (!entry.lod) continue;
+        for (const level of entry.lod.levels) {
+          for (const mesh of level) if (mesh.visible) this.compiled.add(mesh);
+        }
+      }
+      return;
+    }
+    for (const mesh of meshes) {
+      this.compiled.add(mesh);
+      mesh.visible = mesh.count > 0;
     }
   }
 

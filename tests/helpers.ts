@@ -45,7 +45,20 @@ export async function waitForOcean(page: Page, settleMs = 2500): Promise<void> {
       return ocean.loop.stats.frameMs > 0;
     },
     undefined,
-    { timeout: 60_000 },
+    // 240 s, and the number tracks a deliberate change in what boot *is*.
+    //
+    // The loop used to start as soon as the sea and the sky were compiled, and
+    // the ship, the island and their sixty materials were compiled afterwards,
+    // while frames were already being drawn — so a frame arrived within a couple
+    // of seconds and 60 s here was generous. Compiling all of it behind the boot
+    // overlay is what removes the hitch that used to land seconds into a session,
+    // and the price is that the *first frame* now waits for the whole compile.
+    //
+    // Measured on this harness: 90 s to first frame on WebGPU, 195 s on the
+    // WebGL2 fallback, against about 2 s to parse the models — so this is
+    // shader compilation and nothing else. Both figures are inflated by
+    // automation throttling rAF and are not what a user waits for.
+    { timeout: 240_000 },
   );
   // Settle: shader compilation, mip chain construction, first sampler readback,
   // and the boot overlay fade so it never bleeds into a screenshot.

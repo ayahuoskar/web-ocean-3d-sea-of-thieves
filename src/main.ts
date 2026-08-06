@@ -105,7 +105,13 @@ const boot = {
   bar: document.getElementById('boot-bar'),
   status: document.getElementById('boot-status'),
   set(progress: number, message: string) {
-    if (this.bar) (this.bar as HTMLElement).style.width = `${Math.round(progress * 100)}%`;
+    // Scaled rather than resized. Animating `width` puts a layout pass and a
+    // paint on the main thread for every update, during the one stretch where
+    // that thread is already compiling shaders and decoding assets; a transform
+    // is composited and costs neither. The bar is `transform-origin: left`.
+    if (this.bar) {
+      (this.bar as HTMLElement).style.transform = `scaleX(${Math.max(0, Math.min(1, progress))})`;
+    }
     if (this.status) this.status.textContent = message;
   },
   hide() {
@@ -246,6 +252,8 @@ class App {
    * the drain rule it out instead of hoping.
    */
   private contentReady: Promise<void> | null = null;
+  /** In-flight compile of LOD levels that just became drawable; see `compileLodLevels`. */
+  private lodCompile: Promise<void> | null = null;
   /** True once `compileAsync` has built the initial pipeline set. */
   private shadersReady = false;
   /** Lazily created offscreen target for `capturePixels`. */
@@ -335,7 +343,35 @@ class App {
       0.1,
       40000,
     );
-    this.camera.position.set(0, 14, 46);
+    /**
+     * The opening frame, chosen against captures rather than against taste.
+     *
+     * This was `(0, 14, 46)` — looking along a bearing of 180 degrees, straight
+     * down -Z. Three things were wrong with it, and they were all the same
+     * thing: the sun in the default preset sits at azimuth 137.5 degrees and 26
+     * degrees elevation, so that bearing pointed the camera 43 degrees *into* the
+     * light. The sea's near faces were turned away from it, the hull the orbit
+     * rig targets was a flat silhouette, and the island — which is 1.4 km out on
+     * a bearing of 236 degrees — sat 56 degrees off axis, reduced to a smudge at
+     * the very edge of frame. The first thing a visitor saw was a dark seascape
+     * with a black cut-out in it.
+     *
+     * 250 degrees puts the sun 113 degrees off the view axis: behind the camera's
+     * shoulder, so the hull and the swell faces are lit and modelled rather than
+     * silhouetted, while enough of the specular path stays in frame that the
+     * water still glitters. It also brings the island to 14 degrees off centre,
+     * clear of the ship instead of behind it.
+     *
+     * **Rotating the camera rather than the sun is deliberate.** The two are the
+     * same relative change, but `sunAzimuth` lives on the `skyPro` preset, which
+     * more than twenty canonical shots are captured under; moving it would
+     * rewrite every one of those baselines to fix one frame nobody photographs.
+     *
+     * Standoff and eye height are unchanged at 47.5 m and 14 m, so only the
+     * bearing moves. `OrbitControls` derives its own spherical from this on first
+     * update, which is why it is set here and not on the rig.
+     */
+    this.camera.position.set(44.6, 14, 16.2);
 
     const quality = QUALITY_TIERS[this.state.quality];
 
@@ -475,7 +511,7 @@ class App {
 
     // Distant canopy. The island's trees are LOD2 specks from the play area and
     // the biome in the terrain colour cannot give a dome a broken edge, so past
-    // the last mesh LOD the forest becomes billboards. See `src/scene/Canopy.ts`.
+    // ninety metres the forest becomes billboards. See `src/scene/Canopy.ts`.
     this.canopy = new IslandCanopy(
       quality.canopy,
       (worldPosition) => this.seafloor.heightNode(worldPosition),
@@ -702,27 +738,79 @@ class App {
     this.loop = new Loop(() => this.post.renderAsync());
     this.loop.add(this.update);
 
+    // Models load **behind the boot overlay**, not after it.
+    //
+    // This used to start after `loop.start()`, on the reasoning that the ocean
+    // is the headline and nobody should wait on 26 MB of ship textures before
+    // seeing anything. What that traded away was worse than what it bought: the
+    // ship and the dressing arrive seconds into the experience, and the reveal
+    // at the end of `loadSceneContent` has to stop the loop to compile roughly
+    // sixty models' materials without a frame being drawn between the reveal and
+    // the compile. A viewer already flying the camera sees that as a hitch — and
+    // it lands at the exact moment the scene finally has something in it, which
+    // is the worst possible time to drop frames.
+    //
+    // Waiting here costs a longer boot screen, which is a progress bar doing its
+    // job, and buys a session with no compile pause in it. The overlay says what
+    // it is waiting for so the extra seconds read as loading rather than as a
+    // hang.
+    //
+    // Kept in a field, not dropped. A tier change destroys GPU resources and
+    // this task creates them, so the two must never overlap;
+    // `drainQualityRequests` awaits it.
+    // Published *before* the content load, and that ordering is load-bearing.
+    //
+    // Every object this exposes by reference — renderer, scene, camera, loop,
+    // the post stages — exists by now; only the ship and the dressing do not,
+    // and those are reached through closures. What moving the load ahead of
+    // `loop.start()` accidentally also moved was this line, which put the whole
+    // of a sixty-model parse and compile in front of the hook being installed at
+    // all. On WebGPU that is absorbed; on the WebGL2 fallback it ran past the
+    // 60 s the harness waits for `__ocean` to appear, so the fallback path
+    // failed to boot as far as every test was concerned.
+    //
+    // Nothing is weakened by publishing early: `isReady()` gates on
+    // `sceneContentLoaded`, so a caller that waits for readiness still gets a
+    // fully dressed scene. The hook now appears when the *renderer* is up, which
+    // is what it is for, and the loading it used to hide behind is a wait the
+    // harness can observe rather than a silence it has to time out on.
+    this.exposeTestHooks();
+
+    boot.set(0.88, 'Loading ship and island…');
+    this.contentReady = this.loadSceneContent();
+    await this.contentReady;
+
     // Prewarm behind the boot overlay. Every pipeline the first frame will need
     // is compiled here rather than on first draw — otherwise the frame that
     // first shows the water pays for compiling it, which is exactly the spike
     // this project previously measured at ~57 ms when scene content arrived.
+    //
+    // One prewarm, not two. Running it before the content load compiled the sea
+    // and the sky, and `loadSceneContent` then ran a second pass for everything
+    // it had just added; with the load moved ahead of this line, a single pass
+    // covers both and the boot pays for compilation exactly once.
+    // Choose each prop's LOD *before* compiling, so the prewarm builds pipelines
+    // for the levels the opening frame will actually draw and skips the rest.
+    //
+    // The deal used to happen in the frame update, which is after this line — so
+    // at compile time every kind still held the state `seal` left it in, with
+    // LOD0 carrying the whole population and the lower levels empty, and
+    // `compileAsync` walking all of them regardless because `traverseVisible`
+    // does not look at `count`. Dealing here costs one pass over a few thousand
+    // distance tests and takes the boot from 177 pipelines to 73.
+    //
+    // The levels that come back uncompiled are claimed immediately rather than
+    // deferred: this *is* the compile pass they were waiting for, and there is
+    // no loop running yet, so revealing them here is free.
+    this.props?.updateLod(this.camera.position);
+    this.props?.markCompiled(this.props.takeUncompiledLevels());
+
     boot.set(0.95, 'Compiling pipelines…');
     await this.prewarm();
 
     boot.set(1, 'Ready');
     this.loop.start();
     window.setTimeout(() => boot.hide(), 350);
-
-    this.exposeTestHooks();
-
-    // Models load after the first frames are on screen. The ocean is the
-    // headline; making the viewer wait on 26 MB of ship textures before seeing
-    // anything would be the wrong trade.
-    // Kept, not dropped. A tier change destroys GPU resources, and this task
-    // adds meshes and creates pipelines on its own schedule — so the two must
-    // not overlap. `drainQualityRequests` awaits it.
-    this.contentReady = this.loadSceneContent();
-    void this.contentReady;
   }
 
   /**
@@ -831,6 +919,46 @@ class App {
    * is already waiting. It is best-effort: a backend that cannot honour it must
    * not stop the app from starting.
    */
+  /**
+   * Builds pipelines for LOD levels that have just become drawable.
+   *
+   * The dance is the one `loadSceneContent` and the tier change already use, and
+   * it is forced from both ends: `compileAsync` walks `traverseVisible`, so a
+   * hidden mesh compiles to nothing and the level has to be revealed before it
+   * can be built — and a frame drawn between the reveal and the compile
+   * resolving is exactly the inline compile being avoided. The only gap that is
+   * safe between them is one no frame can be drawn in, so the loop is paused and
+   * settled first.
+   *
+   * Rare by construction: the boot prewarm covers everything drawable from the
+   * opening camera, so this runs only when the viewer crosses an LOD switch onto
+   * a level that was skipped — in practice, flying in to the island. The pause
+   * is a few frames rather than the ~11 s that compiling every level at boot
+   * would have cost every session, including the sessions that never go there.
+   */
+  private async compileLodLevels(levels: readonly THREE.InstancedMesh[]): Promise<void> {
+    const wasPaused = this.loop.isPaused;
+    this.loop.setPaused(true);
+    try {
+      await this.loop.settle();
+      if (this.disposed) return;
+      for (const mesh of levels) mesh.visible = true;
+      try {
+        await this.renderer.compileAsync(this.scene, this.camera);
+      } catch {
+        // A compile can fail while the device is reconfiguring. Marking the
+        // levels compiled anyway would let an unbuilt pipeline reach a draw, so
+        // they stay unclaimed and the next deal offers them again.
+        for (const mesh of levels) mesh.visible = false;
+        return;
+      }
+      this.props?.markCompiled(levels);
+    } finally {
+      this.lodCompile = null;
+      if (!wasPaused && !this.disposed && !this.captureOwnsClock) this.loop.setPaused(false);
+    }
+  }
+
   private async prewarm(): Promise<void> {
     try {
       await this.renderer.compileAsync(this.scene, this.camera);
@@ -997,6 +1125,21 @@ class App {
     // `traverseVisible`, so compiling before the reveal compiles nothing at all,
     // and revealing before the compile is the original bug. The only gap between
     // them that is safe is one no frame can be drawn in.
+    //
+    // **None of which is needed when the loop has not started yet.** On the boot
+    // path this runs behind the overlay, before `loop.start()`, so there is no
+    // frame that could be drawn between the reveal and the compile and no loop
+    // to pause; the caller prewarms once, immediately after this resolves, and
+    // that single pass covers the sea, the sky and everything loaded here. The
+    // branch below is what the *other* caller would need — a tier change or any
+    // future mid-session load — and it is kept working rather than deleted,
+    // because the bug it closes is invisible until it is not.
+    if (!this.loop.isRunning) {
+      for (const object of loaded) object.visible = true;
+      this.sceneContentLoaded = true;
+      return;
+    }
+
     const wasPaused = this.loop.isPaused;
     this.loop.setPaused(true);
     await this.loop.settle();
@@ -1705,6 +1848,14 @@ class App {
     // enough for a level boundary to have plausibly been crossed. See
     // `Props.updateLod`.
     this.props?.updateLod(this.camera.position);
+    // A level the boot prewarm skipped has just become drawable — fly in to the
+    // island and the near LODs are wanted for the first time. `updateLod` leaves
+    // them hidden and hands them over here; drawing one before its pipeline
+    // exists is the inline gameplay compile this project rules out.
+    if (this.props !== null && this.lodCompile === null) {
+      const pending = this.props.takeUncompiledLevels();
+      if (pending.length > 0) this.lodCompile = this.compileLodLevels(pending);
+    }
 
     this.fish.setSunDirection(this.atmosphere.sunDirection);
     this.fish.update(dt);
@@ -2247,6 +2398,22 @@ class App {
           await this.qualityApply?.catch(() => undefined);
           this.loop.setPaused(true);
 
+          // Settle the LOD levels for wherever this shot's camera is, and build
+          // any pipeline it newly needs, *before* the capture rather than during
+          // it.
+          //
+          // Levels the boot prewarm skipped are compiled lazily when the viewer
+          // crosses a switch, which for a harness means: a shot that moves the
+          // camera in toward the island can start that compile mid-settle and
+          // finish it somewhere unpredictable. The props would then appear
+          // between two captures of the same shot, and the baseline would depend
+          // on how fast the machine compiled — the exact class of order- and
+          // timing-dependence the shot list exists to keep out.
+          this.props?.updateLod(this.camera.position);
+          const lodLevels = this.props?.takeUncompiledLevels() ?? [];
+          if (lodLevels.length > 0) await this.compileLodLevels(lodLevels);
+          await this.lodCompile?.catch(() => undefined);
+
           // Rewind far enough that the settle run *ends* exactly at `time`.
           // Setting the clock to `time` and then stepping forward would leave the
           // world at `time + settleSteps * dt`, and the caller's chosen time is
@@ -2278,9 +2445,9 @@ class App {
           // Two clocks, rewound together and from different origins.
           //
           // `start` is the *simulation* clock — the sea, the foam, the wake.
-          // The flight rides its own 166 s lap, and which second of that lap a
+          // The flight rides its own 60 s lap, and which second of that lap a
           // shot wants is an independent choice: a caller can ask for a settled
-          // sea at t = 40 framed by the tour's night watch. Passing `null` keeps
+          // sea at t = 40 framed by the tour's night squall. Passing `null` keeps
           // the old behaviour of running both from the same number, which is
           // what every non-cinematic shot wants.
           const cinematicStart =
@@ -2365,6 +2532,22 @@ class App {
           // reach the state that simulation time implies. Stepping goes through
           // the synchronous sampler path — see `stepDeterministic`.
           await this.stepDeterministic(settleDt, settleSteps);
+
+          // And again, because the settle can *move* the camera. A cinematic
+          // shot pins no pose — the tour drives it — so the levels wanted at the
+          // end of the settle are not the ones wanted at its start, and the
+          // capture that follows must not be the frame a compile happens to land
+          // in. Cheap when nothing has changed: the deal early-exits until the
+          // camera has moved 25 m, and the queue is empty on every ordinary shot.
+          this.props?.updateLod(this.camera.position);
+          const settledLevels = this.props?.takeUncompiledLevels() ?? [];
+          // Compiled, not stepped. Revealing a level changes what the next
+          // *render* draws and nothing about the simulation, and `capturePixels`
+          // renders on demand — so the levels are in the captured frame without
+          // advancing any clock. An extra step here would have ended the settle
+          // at `time + settleDt` and quietly broken the one guarantee this whole
+          // function is built around.
+          if (settledLevels.length > 0) await this.compileLodLevels(settledLevels);
         },
 
         shadersReady: () => this.shadersReady,
