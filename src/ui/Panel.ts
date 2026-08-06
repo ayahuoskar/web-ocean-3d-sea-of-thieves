@@ -236,10 +236,13 @@ export class Panel {
     panel.id = `${uid}-sheet`;
 
     // ---- Title block -------------------------------------------------------
+    // No standfirst under the title. An eyebrow or subtitle stacked on a heading
+    // is a label doing work the heading already does — and "Demo" told a visitor
+    // nothing they could not see. The heading carries itself.
     const head = el('header', 'panel__head');
     const title = el('h1', 'panel__title');
-    title.append('WEB ', el('span', 'panel__title-accent', 'OCEAN'), ' 3D');
-    head.append(title, el('p', 'panel__subtitle', 'Demo'));
+    title.append('Web ', el('span', 'panel__title-accent', 'Ocean'), ' 3D');
+    head.append(title);
     panel.append(head);
 
     const body = el('div', 'panel__body');

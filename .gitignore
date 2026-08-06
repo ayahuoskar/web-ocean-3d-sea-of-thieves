@@ -63,5 +63,35 @@ public/models/_preview/
 # each one as *technique*.
 research/
 
-# Scratch capture spec used for eyeballing tuning changes between tasks.
-tests/_probe.spec.ts
+# Scratch capture specs used for eyeballing tuning changes between tasks.
+tests/_probe*.spec.ts
+
+# Impeccable's design skill, installed with `npx impeccable install`. Six harness
+# directories, each a full copy of the same ~150 files, because the installer
+# targets every harness it finds on the machine rather than the one in use.
+#
+# Untracked rather than vendored: it is tooling for whoever is editing the UI,
+# not part of what this project builds or ships, and its own guidance is that a
+# team wanting it pinned should use the git-submodule install instead. The design
+# decisions it produced are recorded in PRODUCT.md and DESIGN.md, which *are*
+# tracked — those are the durable artefacts.
+.agents/
+.claude/
+.codex/
+.cursor/
+.gemini/
+.opencode/
+.impeccable/config.local.json
+.impeccable/hook.cache.json
+.impeccable/*.png
+.impeccable/live/sessions/
+.impeccable/live/previews/
+# Transcripts of the decision pages the skill serves while a direction is being
+# chosen. The *outcome* is recorded in the direction contract at the top of
+# index.html and in DESIGN.md; these are the scratch behind it.
+.impeccable/questions/
+
+# Scratch capture harness — drives a headless browser against its own preview
+# server to screenshot the UI while a design change is being judged. Kept out of
+# `scripts/` because nothing in the build or the suite calls it.
+_shoot.mjs

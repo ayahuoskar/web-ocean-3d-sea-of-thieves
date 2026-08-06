@@ -1,37 +1,136 @@
 /* ==========================================================================
    Web Ocean 3D — UI layer
-   Dark "glass" control surface floating over the realtime viewport.
+   "Tide Table": the instrument as a printed reference page, not a glass pane.
+
+   The world is an Admiralty tide table read at a chart table under a shaded red
+   lamp — which is where the dark ground comes from. It is not a theme choice:
+   this interface is only ever seen lying over a moving sea, at whatever hour the
+   viewer has set, and a page held under a night lamp is the one real scene in
+   which a printed table is read against a dark window.
+
+   Four rules carry the whole thing, and every one of them is a refusal of what
+   this category ships:
+
+     1. **Opaque, never glass.** There is no `backdrop-filter` in this file. A
+        blurred panel over a 3D canvas is both the category default and a real
+        per-frame cost on the exact surface whose frame budget is the product.
+        Printed paper is opaque, and opaque is also legible over a sea that is
+        white in one corner and black in the other.
+     2. **Square.** No `border-radius` anywhere. A rounded rectangle is a
+        software affordance; a page has corners.
+     3. **Ruled.** Structure is carried by hairlines and double rules, the way a
+        table carries it, rather than by boxes, cards or elevation. Nothing here
+        is a card, and nothing is nested inside another one.
+     4. **One overprint.** A single red, used the way an almanac uses it — for
+        the value that matters and the row you are on — and never as a glow.
+
+   Two faces, and the split is load-bearing rather than decorative. Bodoni Moda
+   is the project's *voice*: its name, and the one line of prose it ever speaks.
+   Bitter is its *instrument*: every label, figure, row and control. That keeps
+   the storm quote typographically apart from all of the readouts, which is a
+   commitment recorded in PRODUCT.md, while spending only two font files.
    ========================================================================== */
 
+/* --------------------------------------------------------------------------
+   Faces
+   -------------------------------------------------------------------------- */
+
+/*
+ * `swap`, not `block`. The boot overlay is the first paint and it is text; a
+ * blocking face would hold that frame back behind a font download on the one
+ * screen whose entire job is to say that something is happening.
+ */
+/*
+ * Four files, not two: each family carries a **true italic** alongside its
+ * roman.
+ *
+ * Declaring only the roman does not disable italics — it makes the browser
+ * synthesise them, by shearing the upright letterforms. A Didone is the worst
+ * possible face to do that to: a real Bodoni italic is a different alphabet,
+ * with a single-storey `a`, entry and exit strokes, and a narrower fit, and none
+ * of that survives a skew transform. The two places this project sets italic are
+ * its own name and the storm quote — the only line in the whole product that is
+ * voice rather than instrument — so a faked oblique lands squarely on the one
+ * thing that must not look machine-made.
+ */
+@font-face {
+  font-family: 'Bodoni Moda';
+  src: url('/fonts/bodoni-moda.woff2') format('woff2');
+  font-weight: 400 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Bodoni Moda';
+  src: url('/fonts/bodoni-moda-italic.woff2') format('woff2');
+  font-weight: 400 900;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Bitter';
+  src: url('/fonts/bitter.woff2') format('woff2');
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Bitter';
+  src: url('/fonts/bitter-italic.woff2') format('woff2');
+  font-weight: 300 800;
+  font-style: italic;
+  font-display: swap;
+}
+
 :root {
-  --accent: #3ba7f5;
-  --accent-soft: #7cc6fb;
-  --accent-deep: #1a72d4;
-  --accent-glow: rgba(59, 167, 245, 0.35);
+  /* --- the page ---------------------------------------------------------- */
+  --ink: #14100d;
+  --ink-raised: #1e1813;
+  --ink-deep: #0b0806;
 
-  --text: #e8f2fb;
-  --muted: #8ba6c4;
-  --muted-dim: #6f89a6;
+  /* --- the impression ---------------------------------------------------- */
+  /* 13.4:1 on --ink. */
+  --bone: #e9dfcb;
+  /* 6.3:1 on --ink — the floor for anything anyone has to read. */
+  --bone-dim: #a2937c;
 
-  --glass: rgba(10, 20, 34, 0.82);
-  --glass-raised: rgba(6, 14, 26, 0.72);
-  --hairline: rgba(120, 170, 220, 0.16);
-  --hairline-soft: rgba(120, 170, 220, 0.1);
+  /*
+   * Rules only. 2.4:1 on --ink, which is under the text floor by design and
+   * deliberately not a text colour anywhere in this file: hairlines are drawn
+   * objects, not writing, and holding them to a reading contrast would turn a
+   * ruled table into a striped one.
+   */
+  --rule: #443c33;
+  /* Lifted from #2a231d, which was so nearly the ground that the row rules did
+     not read at all and the panel came back looking like a stack of unruled
+     lines. A table's hairlines have to be *seen* to be doing their job. */
+  --rule-soft: #372f28;
 
-  --ok: #4ade80;
-  --warn: #fbbf24;
-  --bad: #f87171;
+  /* --- the overprint ----------------------------------------------------- */
+  /* 5.1:1 on --ink. Lifted from a truer vermilion, which measured 4.2 and so
+     could not carry a value anyone has to read. */
+  --red: #e8503a;
+  --red-deep: #b0341f;
 
-  --radius: 14px;
-  --radius-sm: 10px;
-  --shadow: 0 18px 46px rgba(0, 0, 0, 0.46), 0 2px 10px rgba(0, 0, 0, 0.3);
+  --ok: #8fbf6a;
+  --warn: #e0a33c;
 
-  --font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono',
-    monospace;
+  --font-voice: 'Bodoni Moda', 'Bodoni 72', Didot, 'Times New Roman', serif;
+  --font-instrument: 'Bitter', 'Roboto Slab', Rockwell, Georgia, serif;
 
-  --panel-width: 288px;
+  --panel-width: 296px;
   --gutter: 20px;
+  /* One table row. Everything vertical is a multiple or a half of this. */
+  --row: 34px;
+
+  /* Offset and blur, never a zero-offset halo: this is a sheet lying on a
+     surface, and a sheet casts its shadow downward. */
+  --lift: 0 14px 34px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.4);
+
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
 
   color-scheme: dark;
 }
@@ -48,9 +147,10 @@ body {
   padding: 0;
   height: 100%;
   overflow: hidden;
-  background: #04101d;
-  color: var(--text);
-  font-family: var(--font-ui);
+  background: var(--ink-deep);
+  color: var(--bone);
+  font-family: var(--font-instrument);
+  font-size: 16px;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   overscroll-behavior: none;
@@ -90,26 +190,70 @@ body {
   pointer-events: auto;
 }
 
-/* Shared glass treatment */
+/*
+ * The shared sheet treatment. Opaque ground, hairline edge, square corners.
+ *
+ * A hair of grain rather than a flat fill: two nearly-invisible linear gradients
+ * at right angles, which is enough to keep a 300px field of one colour from
+ * banding on an 8-bit display sitting next to a dithered ocean.
+ */
 .panel,
 .hud,
 .panel-toggle {
-  background: var(--glass);
-  -webkit-backdrop-filter: blur(18px) saturate(140%);
-  backdrop-filter: blur(18px) saturate(140%);
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
+  background-color: var(--ink);
+  background-image: linear-gradient(
+      92deg,
+      rgba(233, 223, 203, 0.022) 0%,
+      rgba(233, 223, 203, 0) 55%
+    ),
+    linear-gradient(3deg, rgba(0, 0, 0, 0.25) 0%, rgba(0, 0, 0, 0) 40%);
+  border: 1px solid var(--rule);
+  border-radius: 0;
+  box-shadow: var(--lift);
 }
 
-/* Focus ring for every interactive control */
+/* Focus ring for every interactive control. Square, like everything else. */
 #ui-root :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--red);
   outline-offset: 2px;
+  border-radius: 0;
 }
 
 /* --------------------------------------------------------------------------
-   Control panel
+   Shared table furniture
+
+   `.rule` is a hairline between rows; `.rule--double` is the almanac's section
+   break, two lines with a hair of paper between them. They are drawn with
+   borders rather than as elements so a row can carry its own without markup.
+   -------------------------------------------------------------------------- */
+
+.sheet-title {
+  margin: 0;
+  font-family: var(--font-voice);
+  font-optical-sizing: auto;
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0.005em;
+  color: var(--bone);
+}
+
+.sheet-title em {
+  font-style: italic;
+  font-weight: 600;
+}
+
+/* Table column heads: the almanac's letterspaced small capitals. */
+.col-head {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--bone-dim);
+}
+
+/* --------------------------------------------------------------------------
+   Control panel — a ruled column of table rows
    -------------------------------------------------------------------------- */
 
 .panel {
@@ -125,36 +269,31 @@ body {
 }
 
 .panel__head {
-  padding: 16px 18px 14px;
-  border-bottom: 1px solid var(--hairline-soft);
   flex: none;
+  padding: 14px 16px 12px;
+  /* The double rule under a table's title block. */
+  border-bottom: 3px double var(--rule);
 }
 
 .panel__title {
   margin: 0;
-  font-size: 14px;
+  font-family: var(--font-voice);
+  font-optical-sizing: auto;
+  font-size: 21px;
   font-weight: 500;
-  letter-spacing: 0.22em;
-  line-height: 1.2;
-  text-transform: uppercase;
-  color: var(--text);
+  line-height: 1;
+  letter-spacing: 0.005em;
+  color: var(--bone);
 }
 
 .panel__title-accent {
-  color: var(--accent);
-  font-weight: 700;
-}
-
-.panel__subtitle {
-  margin: 6px 0 0;
-  font-size: 9px;
-  letter-spacing: 0.34em;
-  text-transform: uppercase;
-  color: var(--muted-dim);
+  font-style: italic;
+  font-weight: 600;
+  color: var(--bone);
 }
 
 .panel__body {
-  padding: 16px 18px 18px;
+  padding: 4px 16px 16px;
   /*
    * `min-height: 0` is load-bearing, not defensive.
    *
@@ -173,35 +312,40 @@ body {
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
-  scrollbar-color: rgba(120, 170, 220, 0.28) transparent;
+  scrollbar-color: var(--rule) transparent;
 }
 
 .panel__body::-webkit-scrollbar {
-  width: 6px;
+  width: 5px;
 }
 
 .panel__body::-webkit-scrollbar-thumb {
-  background: rgba(120, 170, 220, 0.28);
-  border-radius: 999px;
+  background: var(--rule);
+  border-radius: 0;
 }
 
+/* Section break, full-bleed to the panel edges the way a printed rule runs to
+   the margin rather than stopping at the text block. */
 .panel__divider {
-  height: 1px;
-  margin: 16px -18px;
-  background: var(--hairline-soft);
+  height: 0;
+  margin: 14px -16px;
+  border-top: 3px double var(--rule);
 }
 
 /* --------------------------------------------------------------------------
-   Fields
+   Fields — every control is a table row
    -------------------------------------------------------------------------- */
 
 .field {
   display: block;
-  margin-bottom: 16px;
+  /* Asymmetric on purpose: more air above a row than below it, so a label binds
+     to the bar it describes rather than floating between two of them. */
+  padding: 13px 0 9px;
+  border-bottom: 1px solid var(--rule-soft);
 }
 
 .field:last-child {
-  margin-bottom: 0;
+  border-bottom: 0;
 }
 
 .field__row {
@@ -209,41 +353,45 @@ body {
   align-items: baseline;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 10px;
+  margin-bottom: 6px;
 }
 
 .field__label {
   display: block;
-  margin-bottom: 8px;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.16em;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
   text-transform: uppercase;
-  color: var(--muted);
+  color: var(--bone-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.field__row .field__label {
-  margin-bottom: 0;
+.field > .field__label {
+  margin-bottom: 7px;
 }
 
+/*
+ * The reading. Tabular figures so a changing value never reflows its row, and a
+ * `min-width` behind that as well: `font-variant-numeric` is a font *feature*,
+ * so it silently does nothing if the face lacks `tnum`, and a jittering column
+ * is exactly the failure this world cannot afford.
+ */
 .field__value {
   flex: none;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.02em;
-  color: var(--accent);
-}
-
-.field--slider {
-  margin-bottom: 20px;
+  min-width: 5.5ch;
+  text-align: right;
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings: 'tnum' 1;
+  letter-spacing: 0.01em;
+  color: var(--bone);
 }
 
 /* --------------------------------------------------------------------------
-   Select
+   Select — a row with an overprint marker, not a dropdown chip
    -------------------------------------------------------------------------- */
 
 .select {
@@ -256,35 +404,45 @@ body {
   -webkit-appearance: none;
   -moz-appearance: none;
   width: 100%;
-  padding: 10px 34px 10px 13px;
+  padding: 7px 26px 7px 9px;
   font-family: inherit;
   font-size: 13px;
   font-weight: 500;
-  color: var(--text);
-  background-color: var(--glass-raised);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%233ba7f5' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m5 9 7 7 7-7'/%3E%3C/svg%3E");
+  letter-spacing: 0.01em;
+  color: var(--bone);
+  background-color: var(--ink-deep);
+  /* A solid right-pointing triangle in the overprint red — a printed marker,
+     not a UI chevron. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 10'%3E%3Cpath d='M0 0l8 5-8 5z' fill='%23a2937c'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right 11px center;
-  background-size: 14px 14px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-sm);
+  background-position: right 9px center;
+  background-size: 6px 8px;
+  border: 1px solid var(--rule);
+  border-radius: 0;
   cursor: pointer;
-  transition: border-color 0.18s ease, background-color 0.18s ease;
+  transition: border-color 0.16s var(--ease), background-color 0.16s var(--ease);
   text-overflow: ellipsis;
 }
 
 .select__input:hover {
-  border-color: rgba(120, 170, 220, 0.3);
+  border-color: var(--bone-dim);
+  background-color: var(--ink-raised);
 }
 
 /* Native dropdown list is rendered by the OS — keep it legible on dark UI */
 .select__input option {
-  background: #0b1726;
-  color: var(--text);
+  background: var(--ink);
+  color: var(--bone);
 }
 
 /* --------------------------------------------------------------------------
-   Range slider
+   Range — a printed bar with a pencil tick, not a track with a bead
+
+   The fill is a hard-edged block of bone on a faint ground: no gradient, no
+   glow, square ends. The thumb is a two-pixel vermilion rule, the mark a
+   navigator draws against a scale — but it is carried on a twelve-pixel
+   transparent block so the grab target is a finger's worth of screen rather
+   than two pixels.
    -------------------------------------------------------------------------- */
 
 .range {
@@ -297,70 +455,85 @@ body {
   margin: 0;
   padding: 0;
   background: transparent;
-  cursor: pointer;
+  cursor: ew-resize;
   touch-action: none;
 }
 
-/* WebKit / Blink */
+/*
+ * The filled part is a *tint*, not solid ink.
+ *
+ * At full bone this was a 300px block of the brightest colour in the system,
+ * repeated seven times down the panel — which made the controls the loudest
+ * thing in a viewport whose whole product is the sea behind them. A printed bar
+ * chart is set in a tint precisely so the figure and the mark stay dominant, and
+ * that is the job here: the reading is the red tick, the bar only says where in
+ * its range it sits.
+ */
 .range::-webkit-slider-runnable-track {
-  height: 4px;
-  border-radius: 999px;
+  height: 5px;
+  border-radius: 0;
   background: linear-gradient(
     to right,
-    var(--accent) 0,
-    var(--accent) var(--fill),
-    rgba(190, 215, 240, 0.16) var(--fill),
-    rgba(190, 215, 240, 0.16) 100%
+    var(--bone-dim) 0,
+    var(--bone-dim) var(--fill),
+    var(--rule-soft) var(--fill),
+    var(--rule-soft) 100%
   );
+  border-bottom: 1px solid var(--rule);
 }
 
 .range::-webkit-slider-thumb {
   appearance: none;
   -webkit-appearance: none;
-  width: 15px;
+  width: 12px;
   height: 15px;
-  margin-top: -5.5px;
+  margin-top: -5px;
   border: 0;
-  border-radius: 50%;
-  background: #ffffff;
-  box-shadow: 0 0 0 3px var(--accent-glow), 0 2px 6px rgba(0, 0, 0, 0.55);
-  transition: transform 0.14s ease, box-shadow 0.14s ease;
+  border-radius: 0;
+  background: linear-gradient(
+    to right,
+    transparent 0,
+    transparent 5px,
+    var(--red) 5px,
+    var(--red) 7px,
+    transparent 7px,
+    transparent 100%
+  );
+  transition: filter 0.16s var(--ease);
 }
 
 .range:hover::-webkit-slider-thumb,
 .range:focus-visible::-webkit-slider-thumb {
-  transform: scale(1.12);
-  box-shadow: 0 0 0 5px var(--accent-glow), 0 2px 8px rgba(0, 0, 0, 0.55);
+  filter: brightness(1.25);
 }
 
 /* Gecko */
 .range::-moz-range-track {
-  height: 4px;
+  height: 5px;
   border: 0;
-  border-radius: 999px;
-  background: rgba(190, 215, 240, 0.16);
+  border-bottom: 1px solid var(--rule);
+  border-radius: 0;
+  background: var(--rule-soft);
 }
 
 .range::-moz-range-progress {
-  height: 4px;
-  border-radius: 999px;
-  background: var(--accent);
+  height: 5px;
+  border-radius: 0;
+  background: var(--bone-dim);
 }
 
 .range::-moz-range-thumb {
-  width: 15px;
+  width: 2px;
   height: 15px;
   border: 0;
-  border-radius: 50%;
-  background: #ffffff;
-  box-shadow: 0 0 0 3px var(--accent-glow), 0 2px 6px rgba(0, 0, 0, 0.55);
-  transition: transform 0.14s ease, box-shadow 0.14s ease;
+  border-radius: 0;
+  background: var(--red);
+  transition: filter 0.16s var(--ease);
 }
 
 .range:hover::-moz-range-thumb,
 .range:focus-visible::-moz-range-thumb {
-  transform: scale(1.12);
-  box-shadow: 0 0 0 5px var(--accent-glow), 0 2px 8px rgba(0, 0, 0, 0.55);
+  filter: brightness(1.25);
 }
 
 .range:focus {
@@ -368,13 +541,16 @@ body {
 }
 
 .range:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 4px;
-  border-radius: 999px;
+  outline: 2px solid var(--red);
+  outline-offset: 3px;
 }
 
 /* --------------------------------------------------------------------------
-   Toggle rows
+   Toggles — a ballot box, ticked
+
+   Not a sliding switch. A switch is a piece of hardware borrowed from a phone;
+   a printed form has a box you mark. The knob element survives from the old
+   markup and becomes the mark inside the box.
    -------------------------------------------------------------------------- */
 
 .switchrow {
@@ -383,24 +559,25 @@ body {
   justify-content: space-between;
   gap: 12px;
   width: 100%;
-  margin: 0 0 14px;
-  padding: 0;
+  margin: 0;
+  padding: 9px 0 8px;
   font-family: inherit;
   background: none;
   border: 0;
-  border-radius: 6px;
+  border-bottom: 1px solid var(--rule-soft);
+  border-radius: 0;
   cursor: pointer;
   text-align: left;
   color: inherit;
 }
 
 .switchrow__label {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.16em;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
   text-transform: uppercase;
-  color: var(--muted);
-  transition: color 0.18s ease;
+  color: var(--bone-dim);
+  transition: color 0.16s var(--ease);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -408,94 +585,106 @@ body {
 
 .switchrow:hover .switchrow__label,
 .switchrow.is-on .switchrow__label {
-  color: var(--text);
+  color: var(--bone);
 }
 
 .switch {
   position: relative;
   flex: none;
   display: block;
-  width: 40px;
-  height: 22px;
-  border-radius: 999px;
-  background: rgba(4, 12, 22, 0.9);
-  border: 1px solid var(--hairline);
-  transition: background-color 0.2s ease, border-color 0.2s ease;
+  width: 15px;
+  height: 15px;
+  border: 1px solid var(--rule);
+  border-radius: 0;
+  background: var(--ink-deep);
+  transition: border-color 0.16s var(--ease);
+}
+
+.switchrow:hover .switch {
+  border-color: var(--bone-dim);
 }
 
 .switch__knob {
   position: absolute;
-  top: 50%;
-  left: 3px;
-  width: 16px;
-  height: 16px;
-  margin-top: -8px;
-  border-radius: 50%;
-  background: #c7d6e6;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
-  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.2s ease;
+  inset: 2px;
+  border-radius: 0;
+  background: var(--red);
+  transform: scale(0);
+  transform-origin: center;
+  transition: transform 0.18s var(--ease);
 }
 
 .switchrow.is-on .switch {
-  background: var(--accent);
-  border-color: var(--accent);
-  box-shadow: 0 0 12px var(--accent-glow);
+  border-color: var(--red);
 }
 
 .switchrow.is-on .switch__knob {
-  background: #ffffff;
-  transform: translateX(16px);
+  transform: scale(1);
 }
 
 /* --------------------------------------------------------------------------
-   Buttons
+   Buttons — an overprint block with knocked-out type
    -------------------------------------------------------------------------- */
 
 .panel__actions {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
+  padding-top: 4px;
 }
 
 .btn {
   display: block;
   width: 100%;
-  padding: 11px 14px;
+  padding: 10px 14px;
   font-family: inherit;
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
   text-align: center;
   text-decoration: none;
-  border-radius: var(--radius-sm);
+  border-radius: 0;
   border: 1px solid transparent;
   cursor: pointer;
-  transition: transform 0.14s ease, filter 0.18s ease, background-color 0.18s ease,
-    border-color 0.18s ease;
+  transition: background-color 0.16s var(--ease), color 0.16s var(--ease),
+    border-color 0.16s var(--ease);
 }
 
-.btn:active {
-  transform: translateY(1px);
-}
-
+/*
+ * Quiet, not a billboard.
+ *
+ * This was a full-width solid vermilion block, and on a 1600px viewport it was
+ * the single loudest thing on screen — louder than the sea. That is the wrong
+ * answer twice over: this surface's mode is Experience, where the work leads and
+ * the interface recedes, and "view source" is a secondary action that a visitor
+ * who came to look at water does not need shouted at them.
+ *
+ * The red is spent instead on the marks that carry a *reading* — the tick on
+ * each scale, the row the camera is in, a ticked box. That is how an almanac
+ * spends its overprint: on the value, never on the furniture.
+ */
 .btn--primary {
-  color: #04213c;
-  background: linear-gradient(100deg, var(--accent-soft) 0%, var(--accent) 55%, var(--accent-deep) 100%);
-  box-shadow: 0 6px 18px rgba(26, 114, 212, 0.32);
+  color: var(--bone-dim);
+  background: transparent;
+  border-color: var(--rule);
 }
 
 .btn--primary:hover {
-  filter: brightness(1.08);
+  color: var(--ink);
+  background: var(--red);
+  border-color: var(--red);
 }
 
 .btn--ghost {
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.02);
-  border-color: var(--hairline);
+  color: var(--bone-dim);
+  background: transparent;
+  border-color: var(--rule);
 }
 
 .btn--ghost:hover {
-  background: rgba(120, 170, 220, 0.1);
-  border-color: rgba(120, 170, 220, 0.3);
+  color: var(--bone);
+  border-color: var(--bone-dim);
 }
 
 /* --------------------------------------------------------------------------
@@ -505,170 +694,215 @@ body {
 .panel-toggle {
   display: none;
   position: absolute;
-  right: 14px;
-  bottom: 14px;
+  right: 12px;
+  bottom: 12px;
   align-items: center;
-  gap: 8px;
-  padding: 11px 16px;
+  gap: 9px;
+  padding: 11px 15px;
   font-family: inherit;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
   text-transform: uppercase;
-  color: var(--text);
+  color: var(--bone);
   cursor: pointer;
   z-index: 12;
 }
 
+/* Three ruled lines with a mark on one of them — the table, as a mark. */
 .panel-toggle__icon {
-  width: 14px;
-  height: 14px;
+  width: 13px;
+  height: 13px;
   flex: none;
   background: currentcolor;
-  opacity: 0.85;
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M4 7h10M18 7h2M4 17h4M12 17h8'/%3E%3Ccircle cx='16' cy='7' r='2.2' fill='%23000'/%3E%3Ccircle cx='10' cy='17' r='2.2' fill='%23000'/%3E%3C/svg%3E")
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cg fill='%23000'%3E%3Crect y='2' width='16' height='1.6'/%3E%3Crect y='7.2' width='16' height='1.6'/%3E%3Crect y='12.4' width='16' height='1.6'/%3E%3Crect x='10.4' y='5.2' width='1.8' height='5.6'/%3E%3C/g%3E%3C/svg%3E")
     center / contain no-repeat;
-  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M4 7h10M18 7h2M4 17h4M12 17h8'/%3E%3Ccircle cx='16' cy='7' r='2.2' fill='%23000'/%3E%3Ccircle cx='10' cy='17' r='2.2' fill='%23000'/%3E%3C/svg%3E")
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cg fill='%23000'%3E%3Crect y='2' width='16' height='1.6'/%3E%3Crect y='7.2' width='16' height='1.6'/%3E%3Crect y='12.4' width='16' height='1.6'/%3E%3Crect x='10.4' y='5.2' width='1.8' height='5.6'/%3E%3C/g%3E%3C/svg%3E")
     center / contain no-repeat;
 }
 
 .panel-toggle.is-active {
-  color: var(--accent);
-  border-color: rgba(59, 167, 245, 0.4);
+  color: var(--red);
+  border-color: var(--red);
 }
 
 /* --------------------------------------------------------------------------
-   HUD
+   HUD — the rate, the backend, and the camera index
+
+   Deliberately not the hero-metric card this would otherwise become. The figure
+   is large because an almanac sets its headline reading large, but it sits in a
+   ruled row with its unit in the next column, so it reads as the top line of a
+   table rather than as a statistic in a box.
    -------------------------------------------------------------------------- */
 
 .hud {
   position: absolute;
   top: var(--gutter);
   left: var(--gutter);
-  width: 196px;
+  width: 188px;
   max-width: calc(100vw - var(--gutter) * 2);
-  padding: 14px 14px 12px;
+  padding: 0;
 }
 
 .hud__meter {
   position: relative;
-  text-align: center;
-  padding: 2px 0 10px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 9px 14px 7px;
 }
 
 .hud__fps {
-  font-family: var(--font-mono);
-  font-size: 34px;
-  font-weight: 700;
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
-  color: var(--ok);
-  transition: color 0.25s ease;
+  font-size: 40px;
+  font-weight: 600;
+  line-height: 0.94;
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings: 'tnum' 1;
+  letter-spacing: -0.02em;
+  /* Three digits of headroom, so 9 -> 60 -> 144 never shifts the unit beside
+     it. Tabular figures fix the digit width; only the digit *count* is left. */
+  min-width: 3ch;
+  text-align: right;
+  color: var(--bone);
+  transition: color 0.3s var(--ease);
 }
 
-.hud__fps.is-good {
-  color: var(--ok);
-}
-
+/*
+ * Two states, not three, and neither of them is amber.
+ *
+ * A rate is a measurement, and colour-coding a measurement is the interface
+ * adding a judgement to a number that already tells the truth — which this
+ * project's second principle says these instruments must not do. So a merely
+ * unremarkable rate is simply the reading, in bone, and only a genuinely
+ * degraded one takes the overprint, which is what an almanac's red is for.
+ *
+ * The amber this replaces also sat within a few degrees of hue of the red tick
+ * on the active camera row a centimetre below it. Two warm signals inside one
+ * 188px block is not "one overprint", it is two spot colours pretending to be a
+ * system.
+ */
+.hud__fps.is-good,
 .hud__fps.is-warn {
-  color: var(--warn);
+  color: var(--bone);
 }
 
 .hud__fps.is-bad {
-  color: var(--bad);
+  color: var(--red);
 }
 
+/* The unit column. `f·s⁻¹` rather than `FPS`: this is a table of measurements
+   and that is how a table writes a rate. */
 .hud__fps-caption {
-  margin-top: 4px;
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.34em;
-  text-indent: 0.34em;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
-  color: var(--muted-dim);
+  color: var(--bone-dim);
 }
 
 .hud__backend {
   position: absolute;
-  top: 0;
-  right: 0;
-  padding: 3px 6px;
-  font-family: var(--font-mono);
+  top: 9px;
+  right: 14px;
+  padding: 2px 5px;
   font-size: 8px;
   font-weight: 700;
-  letter-spacing: 0.12em;
-  color: var(--accent);
-  background: rgba(59, 167, 245, 0.12);
-  border: 1px solid rgba(59, 167, 245, 0.28);
-  border-radius: 5px;
+  letter-spacing: 0.14em;
+  color: var(--bone-dim);
+  border: 1px solid var(--rule);
+  border-radius: 0;
 }
 
+/*
+ * The fallback stamp, and the one place in this file where colour is an
+ * assertion rather than a decoration. On the WebGL2 path there is no planar
+ * reflection, no refraction and no lens misting — the visitor is looking at a
+ * materially reduced scene, and PRODUCT.md holds that they have to be able to
+ * tell. So it overprints.
+ */
 .hud__backend.is-fallback {
-  color: var(--warn);
-  background: rgba(251, 191, 36, 0.12);
-  border-color: rgba(251, 191, 36, 0.28);
+  color: var(--ink);
+  background: var(--warn);
+  border-color: var(--warn);
 }
 
 .hud__divider {
-  height: 1px;
-  margin: 0 0 12px;
-  background: var(--hairline-soft);
+  height: 0;
+  margin: 0;
+  border-top: 3px double var(--rule);
 }
 
+/* The camera index: numbered rows, not a row of cards. */
 .hud__modes {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
+  display: block;
+  padding: 4px 0;
 }
 
 .seg {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  padding: 8px 2px 7px;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 5px 14px 5px 13px;
   font-family: inherit;
-  color: var(--muted);
-  background: var(--glass-raised);
-  border: 1px solid var(--hairline-soft);
-  border-radius: var(--radius-sm);
+  color: var(--bone-dim);
+  background: none;
+  border: 0;
+  /* The margin the active row's mark lives in. Held on every row so selecting
+     one never shifts the column. */
+  border-left: 1px solid transparent;
+  border-radius: 0;
   cursor: pointer;
-  transition: background-color 0.18s ease, color 0.18s ease, border-color 0.18s ease,
-    box-shadow 0.18s ease;
+  text-align: left;
+  transition: color 0.16s var(--ease), background-color 0.16s var(--ease);
 }
 
 .seg:hover {
-  color: var(--text);
-  border-color: rgba(120, 170, 220, 0.26);
+  color: var(--bone);
+  background: var(--ink-raised);
 }
 
 .seg__digit {
-  font-family: var(--font-mono);
-  font-size: 13px;
+  flex: none;
+  width: 1ch;
+  font-size: 10px;
   font-weight: 700;
-  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--rule);
+  transition: color 0.16s var(--ease);
 }
 
 .seg__name {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
   line-height: 1.2;
 }
 
-.seg.is-active {
-  color: #06243f;
-  background: linear-gradient(170deg, var(--accent-soft) 0%, var(--accent) 60%, var(--accent-deep) 100%);
-  border-color: rgba(124, 198, 251, 0.65);
-  box-shadow: 0 0 16px var(--accent-glow);
+.seg:hover .seg__digit {
+  color: var(--bone-dim);
 }
 
+.seg.is-active {
+  color: var(--bone);
+  border-left-color: var(--red);
+  background: var(--ink-raised);
+}
+
+.seg.is-active .seg__digit {
+  color: var(--red);
+}
+
+/* The key legend — a printed abbreviation table. */
 .hud__hints {
   list-style: none;
-  margin: 12px 0 0;
-  padding: 0;
+  margin: 0;
+  padding: 8px 14px 10px;
+  border-top: 1px solid var(--rule-soft);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
 }
 
 .hud__hint {
@@ -678,9 +912,14 @@ body {
   gap: 8px;
 }
 
+/* Set in the same register as every other label here. These were sentence case,
+   which made the one block of text in the HUD read as prose sitting in a table. */
 .hud__hint-action {
-  font-size: 11px;
-  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--bone-dim);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -688,20 +927,19 @@ body {
 
 .keycap {
   flex: none;
-  padding: 2px 7px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--accent-soft);
-  background: rgba(59, 167, 245, 0.07);
-  border: 1px solid rgba(120, 170, 220, 0.24);
-  border-radius: 6px;
-  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.35);
+  padding: 1px 5px;
+  font-family: inherit;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--bone-dim);
+  background: var(--ink-deep);
+  border: 1px solid var(--rule);
+  border-radius: 0;
 }
 
 /* --------------------------------------------------------------------------
-   Boot overlay
+   Boot — the title page of the sheet
    -------------------------------------------------------------------------- */
 
 .boot {
@@ -711,61 +949,110 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: radial-gradient(120% 90% at 50% 40%, #0a1e35 0%, #04101d 60%, #02080f 100%);
+  background: var(--ink-deep);
   opacity: 1;
   visibility: visible;
-  transition: opacity 600ms ease, visibility 0s linear 0s;
+  /*
+   * The one authored moment in the interface: the sheet is drawn up off the
+   * table rather than dissolved. Exponential ease-out, from an already-visible
+   * default, and transform + opacity only.
+   */
+  transform: translateY(0);
+  transition: opacity 620ms var(--ease), transform 700ms var(--ease),
+    visibility 0s linear 0s;
 }
 
 .boot--hidden {
   opacity: 0;
+  transform: translateY(-2.5%);
   visibility: hidden;
   pointer-events: none;
-  transition: opacity 600ms ease, visibility 0s linear 600ms;
+  transition: opacity 620ms var(--ease), transform 700ms var(--ease),
+    visibility 0s linear 700ms;
 }
 
 .boot__inner {
-  width: min(320px, calc(100vw - 48px));
-  text-align: center;
+  width: min(380px, calc(100vw - 48px));
+}
+
+.boot__rule {
+  border-top: 1px solid var(--rule);
+}
+
+.boot__rule--double {
+  border-top: 3px double var(--rule);
 }
 
 .boot__title {
-  font-size: clamp(14px, 4vw, 18px);
+  margin: 14px 0 6px;
+  font-family: var(--font-voice);
+  font-optical-sizing: auto;
+  font-size: clamp(30px, 7vw, 44px);
   font-weight: 500;
-  letter-spacing: 0.3em;
-  text-indent: 0.3em;
-  text-transform: uppercase;
-  color: var(--text);
+  line-height: 1;
+  letter-spacing: 0.005em;
+  color: var(--bone);
 }
 
-.boot__title span {
-  color: var(--accent);
-  font-weight: 700;
+.boot__title em {
+  font-style: italic;
+  font-weight: 600;
 }
 
-.boot__bar {
-  height: 3px;
-  margin: 22px 0 14px;
-  border-radius: 999px;
-  background: rgba(120, 170, 220, 0.14);
-  overflow: hidden;
+.boot__standfirst {
+  margin: 0 0 14px;
+  font-size: 12px;
+  font-style: italic;
+  letter-spacing: 0.01em;
+  color: var(--bone-dim);
 }
 
-#boot-bar {
-  display: block;
-  width: 0%;
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, var(--accent-soft), var(--accent));
-  box-shadow: 0 0 12px var(--accent-glow);
-  transition: width 260ms ease;
+.boot__readout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 10px;
 }
 
 .boot__status {
-  font-size: 11px;
-  letter-spacing: 0.1em;
-  color: var(--muted-dim);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--bone-dim);
   min-height: 1.2em;
+}
+
+.boot__status--error {
+  color: var(--red);
+}
+
+.boot__bar {
+  flex: none;
+  display: block;
+  width: 108px;
+  height: 6px;
+  background: var(--rule-soft);
+  overflow: hidden;
+}
+
+/*
+ * Scaled, not resized.
+ *
+ * This used to animate `width`, which puts a layout pass and a paint on the
+ * main thread for every progress update — during boot, which is the one stretch
+ * where the main thread is already compiling shaders and decoding assets. A
+ * transform is composited and costs neither.
+ */
+#boot-bar {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--red);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 280ms var(--ease);
 }
 
 /* --------------------------------------------------------------------------
@@ -786,9 +1073,9 @@ body {
     max-width: none;
     max-height: min(72vh, 560px);
     border-width: 1px 0 0;
-    border-radius: 18px 18px 0 0;
+    border-radius: 0;
     transform: translateY(101%);
-    transition: transform 0.3s cubic-bezier(0.32, 0.72, 0, 1);
+    transition: transform 0.34s var(--ease);
     will-change: transform;
   }
 
@@ -797,11 +1084,11 @@ body {
   }
 
   .panel__body {
-    padding-bottom: max(18px, env(safe-area-inset-bottom));
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
   }
 
   .panel__divider {
-    margin-inline: -18px;
+    margin-inline: -16px;
   }
 
   .panel-toggle {
@@ -816,12 +1103,11 @@ body {
   }
 
   .hud {
-    width: 168px;
-    padding: 12px 12px 10px;
+    width: 166px;
   }
 
   .hud__fps {
-    font-size: 28px;
+    font-size: 32px;
   }
 
   .hud__hints {
@@ -834,29 +1120,49 @@ body {
     width: 150px;
   }
 
-  .seg__name {
-    font-size: 9px;
-  }
-
   .panel__title {
-    font-size: 12px;
-    letter-spacing: 0.16em;
+    font-size: 18px;
   }
 
   .field__label,
-  .switchrow__label {
-    letter-spacing: 0.1em;
+  .switchrow__label,
+  .seg__name {
+    letter-spacing: 0.14em;
   }
 }
 
 /* Coarse pointers get larger hit targets */
 @media (pointer: coarse) {
   .range {
+    height: 28px;
+  }
+
+  .range::-webkit-slider-thumb {
+    width: 30px;
     height: 26px;
+    margin-top: -11px;
+    background: linear-gradient(
+      to right,
+      transparent 0,
+      transparent 14px,
+      var(--red) 14px,
+      var(--red) 16px,
+      transparent 16px,
+      transparent 100%
+    );
+  }
+
+  .range::-moz-range-thumb {
+    width: 3px;
+    height: 28px;
   }
 
   .switchrow {
-    padding: 8px 0;
+    padding: 12px 0;
+  }
+
+  .seg {
+    padding-block: 9px;
   }
 }
 
@@ -868,6 +1174,9 @@ body {
  * Bottom-left, away from the panel on the right and the panel toggle. Sized in
  * `min()` against the viewport so it stays a thumb's reach on a phone and does
  * not become a dinner plate on a tablet.
+ *
+ * Square, like everything else here: this is the plotting square on a chart,
+ * with a rule through each axis, rather than a game pad's circle.
  */
 .touchpad {
   position: absolute;
@@ -892,26 +1201,28 @@ body {
   position: relative;
   width: 100%;
   height: 100%;
-  border-radius: 50%;
-  border: 1px solid var(--hairline);
-  background: rgba(10, 20, 32, 0.34);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  box-shadow: inset 0 0 26px rgba(90, 150, 210, 0.12);
+  border-radius: 0;
+  border: 1px solid var(--rule);
+  background: rgba(20, 16, 13, 0.82);
+  /* The cross-hairs of the plotting square. */
+  background-image: linear-gradient(var(--rule-soft) 1px, transparent 1px),
+    linear-gradient(90deg, var(--rule-soft) 1px, transparent 1px);
+  background-size: 100% 50%, 50% 100%;
+  background-position: center, center;
 }
 
 .touchpad__knob {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 34%;
-  height: 34%;
+  width: 26%;
+  height: 26%;
   transform: translate(-50%, -50%);
-  border-radius: 50%;
-  background: rgba(150, 200, 240, 0.28);
-  border: 1px solid rgba(160, 210, 245, 0.5);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
-  transition: background 120ms ease;
+  border-radius: 0;
+  background: var(--red);
+  border: 0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  transition: background 120ms var(--ease);
 }
 
 .touchpad__label {
@@ -919,18 +1230,19 @@ body {
   left: 50%;
   transform: translateX(-50%);
   font-size: 8px;
-  letter-spacing: 0.26em;
+  font-weight: 700;
+  letter-spacing: 0.2em;
   text-transform: uppercase;
-  color: var(--muted-dim);
+  color: var(--bone-dim);
   pointer-events: none;
 }
 
 .touchpad__label--ahead {
-  top: 6px;
+  top: 5px;
 }
 
 .touchpad__label--astern {
-  bottom: 6px;
+  bottom: 5px;
 }
 
 /* --------------------------------------------------------------------------
@@ -969,9 +1281,7 @@ body {
      appearing; a few pixels of rise reads as something arriving, which is the
      difference between a notification and a moment. */
   transform: translateY(14px);
-  transition:
-    opacity 1.6s cubic-bezier(0.22, 0.61, 0.36, 1),
-    transform 1.6s cubic-bezier(0.22, 0.61, 0.36, 1);
+  transition: opacity 1.6s var(--ease), transform 1.6s var(--ease);
   z-index: 5;
 }
 
@@ -995,28 +1305,35 @@ body {
   transform: translateY(0);
 }
 
+/*
+ * The one thing in this project that is voice rather than instrument, and the
+ * only place the display face is set at length.
+ *
+ * That separation is the commitment PRODUCT.md records, and it survives the
+ * redesign in a different form than it arrived in: the old rule was "a serif,
+ * where everything else is a UI sans". Here the whole interface is already a
+ * slab serif, so the distinction is carried by the *voice* face — Bodoni,
+ * italic, at reading size — against the instrument's Bitter. Setting this line
+ * in the same face as the frame-rate counter would make it read as one more
+ * readout, which is exactly what must not happen.
+ */
 .quote__line {
   margin: 0;
   max-width: min(90vw, 44ch);
   text-align: center;
-  font-family: Georgia, 'Iowan Old Style', 'Palatino Linotype', Palatino, 'Times New Roman', serif;
-  /* Serif, and deliberately not the UI stack. The panel and the HUD are
-     instrumentation and read as software; this is the only text in the project
-     that is *voice*, and setting it in the same face as the frame-rate counter
-     would make it read as one more readout. */
-  font-size: clamp(1.4rem, 3.1vw, 2.85rem);
-  font-weight: 400;
+  font-family: var(--font-voice);
+  font-optical-sizing: auto;
+  font-size: clamp(1.5rem, 3.2vw, 2.9rem);
+  font-weight: 500;
   font-style: italic;
-  line-height: 1.28;
-  letter-spacing: 0.012em;
-  color: #f4f8fc;
+  line-height: 1.24;
+  letter-spacing: 0.005em;
+  color: #f6f0e4;
   /* Two shadows doing two jobs: a tight dark one for legibility against a
      bright whitecap, and a wide soft one that lifts the line off the water
      without turning into a glow. The sea underneath is high-contrast and moving,
      so a single shadow is not enough to hold the text at any one moment. */
-  text-shadow:
-    0 1px 3px rgba(0, 0, 0, 0.72),
-    0 6px 34px rgba(0, 10, 22, 0.6);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.72), 0 6px 34px rgba(6, 4, 2, 0.6);
 }
 
 @media (prefers-reduced-motion: reduce) {

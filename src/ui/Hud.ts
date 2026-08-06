@@ -13,11 +13,14 @@ interface Hint {
   readonly key: string;
 }
 
+// Spelled out. These were abbreviated because the modes were laid out as a
+// three-column grid of four buttons; they are a numbered index now and the row
+// is as wide as the panel, so nothing has to be clipped to "Cine".
 const MODE_LABELS: Record<CameraMode, string> = {
   orbit: 'Orbit',
   fly: 'Fly',
-  boat: 'Boat',
-  cinematic: 'Cine',
+  boat: 'Helm',
+  cinematic: 'Tour',
 };
 
 const MODE_DIGITS: Record<CameraMode, string> = {
@@ -124,7 +127,10 @@ export class Hud {
     fpsValue.setAttribute('aria-label', 'Frames per second');
     const backendBadge = el('div', 'hud__backend', 'WEBGPU');
     backendBadge.setAttribute('aria-label', 'Renderer backend: WebGPU');
-    meter.append(fpsValue, el('div', 'hud__fps-caption', 'FPS'), backendBadge);
+    // The unit column, written the way a table of measurements writes a rate
+    // rather than as the label of a statistic. `aria-label` on the value above
+    // still says "Frames per second", so nothing is lost to a screen reader.
+    meter.append(fpsValue, el('div', 'hud__fps-caption', 'f·s⁻¹'), backendBadge);
     hud.append(meter, el('div', 'hud__divider'));
 
     // ---- Camera mode segmented control ------------------------------------

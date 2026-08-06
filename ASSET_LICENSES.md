@@ -7,7 +7,11 @@
 
 - **CC0 1.0** (public domain dedication), or
 - **CC-BY** with the exact attribution string recorded in the table below, or
-- **MIT / Apache-2.0**.
+- **MIT / Apache-2.0**, or
+- **SIL OFL 1.1**, for typefaces only — see [Typefaces](#typefaces-publicfonts).
+  The OFL permits bundling and redistribution inside a work; it forbids selling
+  the fonts on their own and requires a *modified* font be renamed. Neither
+  condition is engaged here, since the files ship unmodified as part of the build.
 
 Nothing else may be committed. In particular, **no assets are taken from
 threejswaterpro.com or any other commercial product**. Assets are sourced from
@@ -268,6 +272,34 @@ Some slugs floated during planning do not exist on Poly Haven. Verified against
 | `qwantani_puresky` | yes | `kloofendal_misty_morning_puresky` | `qwantani_puresky` exists and is fine, but the demo needed a foggy/overcast sky rather than a fourth clear one. |
 
 ---
+
+### Typefaces (`public/fonts/`)
+
+Both are self-hosted rather than linked from a font CDN. That is a privacy and a
+performance decision in equal parts: a CDN link discloses every visitor to a third
+party, and it puts a DNS lookup plus a connection in front of the first painted
+frame — which here is the boot overlay, whose entire job is to appear immediately.
+
+Both are **SIL Open Font License 1.1**, which permits bundling and redistribution
+in a build. The OFL requires that the fonts not be sold on their own and that any
+*modified* version be renamed; neither file is modified.
+
+| File | Family | Author | Licence | Source |
+| --- | --- | --- | --- | --- |
+| `bodoni-moda.woff2` | Bodoni Moda roman (variable, 6–96 opsz / 400–900 wght) | Owen Earl / indestructible type* | OFL-1.1 | https://fonts.google.com/specimen/Bodoni+Moda |
+| `bodoni-moda-italic.woff2` | Bodoni Moda **italic** (same axes) | Owen Earl / indestructible type* | OFL-1.1 | https://fonts.google.com/specimen/Bodoni+Moda |
+| `bitter.woff2` | Bitter roman (variable, 300–800 wght) | Sol Matas, Huerta Tipográfica | OFL-1.1 | https://fonts.google.com/specimen/Bitter |
+| `bitter-italic.woff2` | Bitter **italic** (same axis) | Sol Matas, Huerta Tipográfica | OFL-1.1 | https://fonts.google.com/specimen/Bitter |
+
+Latin subsets only, as served by Google Fonts to a modern browser: 46, 54, 34 and
+33 KB — 167 KB in total, against an 886 KB three.js chunk.
+
+The italics are shipped rather than synthesised, and that is not completeness for
+its own sake. Declaring only a roman does not disable italic; it makes the
+browser shear the upright letterforms instead. A real Bodoni italic is a
+different alphabet — single-storey `a`, entry and exit strokes, a narrower fit —
+and none of that survives a skew. See `DESIGN.md` for why these two families and
+what each one is for.
 
 ## Software dependencies
 
