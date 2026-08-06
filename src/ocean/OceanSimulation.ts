@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { Fn, float, int, ivec2, select, texture, textureLoad, uniform, uv, vec2, vec4 } from 'three/tsl';
+import { Fn, float, int, ivec2, mix, select, texture, textureLoad, uniform, uv, vec2, vec4 } from 'three/tsl';
 import { butterflyPassNode, cMul, createFFTResources, type FFTResources } from './FFT';
 import {
   CASCADES,
@@ -92,6 +92,24 @@ export class OceanSimulation {
   private readonly uTime = uniform(0);
   private readonly uStage = uniform(0);
   private readonly uChoppiness = uniform(1.05);
+  /**
+   * Travelling-to-standing blend, mirroring `SpectrumParams.standingWaveRatio`.
+   *
+   * A uniform rather than a rebuild: the spectrum half of this parameter needs
+   * `h0` regenerating and the motion half does not, so `updateSpectrum` writes
+   * both and the shader never recompiles.
+   */
+  private readonly uStandingRatio = uniform(0);
+  /**
+   * Amplitude compensation for the standing blend: `1 / sqrt(1 - r + r^2/2)`.
+   *
+   * The locked form carries half the time-averaged energy of the travelling one
+   * for the same `h0`, so without this the standing control would quietly flatten
+   * the sea as it was turned up — a sheltered bay would be sheltered *and*
+   * smaller, and the two are separate statements. Energy goes as amplitude
+   * squared, hence the square root.
+   */
+  private readonly uStandingGain = uniform(1);
 
   private size: OceanSimulationOptions['size'];
   private cascadeCount: OceanSimulationOptions['cascadeCount'];
@@ -103,8 +121,19 @@ export class OceanSimulation {
     this.size = options.size;
     this.cascadeCount = options.cascadeCount;
     this.params = { ...options.params };
+    // Here as well as in `updateSpectrum`, because a caller can construct with a
+    // non-zero standing ratio and then never call the setter — which would leave
+    // the spectrum broadened for standing water while the surface still ran.
+    this.applyStandingRatio();
     this.fft = createFFTResources(this.size);
     this.build();
+  }
+
+  /** Derives both standing-wave uniforms from `params.standingWaveRatio`. */
+  private applyStandingRatio(): void {
+    const ratio = Math.max(0, Math.min(1, this.params.standingWaveRatio));
+    this.uStandingRatio.value = ratio;
+    this.uStandingGain.value = 1 / Math.sqrt(1 - ratio + (ratio * ratio) / 2);
   }
 
   // ---------------------------------------------------------------- public API
@@ -248,6 +277,11 @@ export class OceanSimulation {
   /** Re-derives h0 from new wind/wavelength. Cheap enough to call on slider input. */
   updateSpectrum(params: Partial<SpectrumParams>): void {
     this.params = { ...this.params, ...params };
+    // The motion half of the standing blend. Kept in step here rather than in a
+    // setter of its own so the two halves cannot be written independently — a
+    // spectrum broadened for standing water while the surface still travels is
+    // the one incoherent state this parameter has.
+    this.applyStandingRatio();
     this.writeSpectra();
   }
 
@@ -470,7 +504,35 @@ export class OceanSimulation {
       const expMinusIwt = vec2(phase.cos(), phase.sin().negate()).toVar();
 
       // h(k, t) = h0(k) e^{iwt} + conj(h0(-k)) e^{-iwt}
-      const h = cMul(h0k, expIwt).add(cMul(h0MinusKConj, expMinusIwt)).toVar();
+      const travelling = cMul(h0k, expIwt).add(cMul(h0MinusKConj, expMinusIwt)).toVar();
+
+      // The standing limit, and it is the same two components with their phases
+      // locked rather than a different model.
+      //
+      // A travelling wave is `h0(k) e^{iwt}` running one way against
+      // `conj(h0(-k)) e^{-iwt}` running the other, each with its own phase. Lock
+      // them together — take the Hermitian sum once and let the *whole* mode
+      // breathe on `cos(wt)` — and the crests stop advancing and oscillate where
+      // they are. That is a standing wave in the strict sense rather than a
+      // slowed travelling one: same wavelengths, but with nodes.
+      //
+      // **It does not carry the same energy, and the amplitude compensation
+      // below is why.** For two independent components the time-averaged energy
+      // of the locked form is half the travelling form's, so blending at ratio
+      // `r` leaves `1 - r + r^2/2` of it — 0.65 at the 0.45 the calmest preset
+      // asks for, which is a 19% drop in RMS height. That would make the
+      // standing control a sea-state control by the back door, and every other
+      // parameter in this file is careful not to be. `uStandingGain` undoes
+      // exactly that factor.
+      //
+      // Blended rather than switched, because the interesting values are in
+      // between: real sheltered water is mostly standing with a little run left
+      // in it. See `standingWaveRatio` in `Spectrum`, which also broadens the
+      // spectrum's headings by the same amount — the two are halves of one
+      // statement and moving one without the other gives a sea that oscillates
+      // in place while still visibly pointing downwind.
+      const standing = h0k.add(h0MinusKConj).mul(phase.cos()).toVar();
+      const h = mix(travelling, standing, this.uStandingRatio).mul(this.uStandingGain).toVar();
 
       const nx = kx.div(kLen).toVar();
       const nz = kz.div(kLen).toVar();

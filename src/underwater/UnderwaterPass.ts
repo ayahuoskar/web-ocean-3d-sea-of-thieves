@@ -72,6 +72,26 @@ export interface UnderwaterParams {
   /** Depth of the camera below the surface, metres — drives light falloff. */
   cameraDepth: number;
   causticsStrength: number;
+  /** Screen-space refractive warp of the submerged image, in uv. 0 disables. */
+  distortion: number;
+  /** Spatial frequency of that warp, cycles across the frame. */
+  distortionScale: number;
+  /** How fast it evolves, radians per second. */
+  distortionSpeed: number;
+  /**
+   * Half-width of the meniscus band, metres of ray distance.
+   *
+   * Floored away from zero when applied — `crossT` is divided by it — so this is
+   * not the control that switches the effect off. `meniscusHighlight` and
+   * `meniscusPull` are; set both to zero and the band contributes nothing.
+   */
+  meniscusThickness: number;
+  /** Rim brightness at the meniscus boundary. */
+  meniscusHighlight: number;
+  /** Rim falloff exponent. */
+  meniscusSharpness: number;
+  /** How far the meniscus pulls the image across the boundary, in uv. */
+  meniscusPull: number;
 }
 
 export const DEFAULT_UNDERWATER_PARAMS: UnderwaterParams = {
@@ -86,6 +106,13 @@ export const DEFAULT_UNDERWATER_PARAMS: UnderwaterParams = {
   sunColor: new THREE.Color(0xd8f0ff),
   cameraDepth: 4,
   causticsStrength: 0.35,
+  distortion: 0.012,
+  distortionScale: 3,
+  distortionSpeed: 0.5,
+  meniscusThickness: 0.5,
+  meniscusHighlight: 0.8,
+  meniscusSharpness: 3,
+  meniscusPull: 0.02,
 };
 
 /**
@@ -266,8 +293,60 @@ export class UnderwaterPass {
   private readonly uDesaturate = uniform(0.2);
   private readonly uContrastLoss = uniform(0.12);
 
+  // --- refractive distortion -----------------------------------------------
+  /**
+   * Screen-space warp applied to the submerged image, in uv.
+   *
+   * Water between the eye and what it is looking at is not optically flat. It
+   * carries thermal microstructure and the orbital motion of every wave above
+   * it, and the result is that an underwater view is always very slightly
+   * swimming. Without it the submerged frames are the stillest images this
+   * renderer produces, which is exactly backwards.
+   *
+   * Weighted by the *pixel's* water path, so it goes to zero on a pixel looking
+   * out of the water rather than being switched by the camera's own depth. That
+   * matters at the waterline, where half the frame is above and half below.
+   */
+  private readonly uDistortion = uniform(0.012);
+  /** Spatial frequency of the warp, cycles across the frame. */
+  private readonly uDistortionScale = uniform(3);
+  /** How fast the warp evolves, in radians per second. */
+  private readonly uDistortionSpeed = uniform(0.5);
+
+  // --- meniscus ------------------------------------------------------------
+  /**
+   * Half-width of the meniscus band, metres of ray distance.
+   *
+   * Where a ray crosses the surface within this distance of the eye, it is
+   * passing through the film of water that clings to the lens rather than
+   * through open water. That film is a lens in its own right: it bends the view
+   * sharply and catches a bright rim along the boundary. It is the difference
+   * between a camera coming out of the sea and an image with a horizontal wipe
+   * across it, and its absence is the largest single reason a half-submerged
+   * frame here reads as a compositing artefact.
+   *
+   * Expressed against `crossT` — the distance along each ray to the surface —
+   * rather than against a screen-space line, because the surface is not a plane
+   * and the band has to follow the crests the same way the waterline above it
+   * already does.
+   */
+  private readonly uMeniscusThickness = uniform(0.5);
+  /** Rim brightness at the boundary. */
+  private readonly uMeniscusHighlight = uniform(0.8);
+  /** Rim falloff exponent — higher is a tighter, wetter edge. */
+  private readonly uMeniscusSharpness = uniform(3);
+  /**
+   * How far the band pulls the image across the boundary, in uv.
+   *
+   * This is the normal tilt, done in the only currency a post pass has. A real
+   * meniscus turns the surface normal toward the viewer, which compresses what
+   * is behind it into the band; displacing the sample toward the waterline is
+   * the same compression arrived at from the other side.
+   */
+  private readonly uMeniscusPull = uniform(0.02);
+
   // --- camera --------------------------------------------------------------
-  private readonly uNear = uniform(0.1);
+  private readonly uNear = uniform(0.5);
   private readonly uFar = uniform(40000);
   private readonly uTime = uniform(0);
 
@@ -442,6 +521,58 @@ export class UnderwaterPass {
           .clamp(0, 1)
           .toVar('uwPixelSub');
 
+        // --- 1b. refraction through the water in front of the lens ------------
+        //
+        // Two displacements of the same sample, because they are the same kind
+        // of thing — water bending the view — and paying for two dependent
+        // fetches to keep them apart would buy nothing.
+        //
+        // The warp is a pair of crossed sines rather than a noise texture. What
+        // is wanted is a low-frequency, band-limited, *smooth* field; a hash
+        // noise would need several octaves and a smoothstep to get there, and
+        // the artefact a plain sine grid would normally show — visible
+        // rectilinear structure — is invisible here because the amplitude is a
+        // hundredth of the frame and the thing being displaced is already a
+        // diffuse underwater image. Driven by `uTime`, which is the simulation
+        // clock, so a deterministic rewind puts the warp back where it was.
+        const warpPhase = this.uTime.mul(this.uDistortionSpeed).toVar('uwWarpT');
+        const warpArg = suv.mul(this.uDistortionScale).toVar('uwWarpArg');
+        const warp = vec2(
+          warpArg.y.mul(6.283).add(warpPhase).sin().add(
+            warpArg.x.mul(3.771).add(warpPhase.mul(1.31)).sin().mul(0.5),
+          ),
+          warpArg.x.mul(6.283).add(warpPhase.mul(0.87)).sin().add(
+            warpArg.y.mul(4.115).add(warpPhase.mul(1.17)).sin().mul(0.5),
+          ),
+        )
+          .mul(this.uDistortion.mul(pixelSubmersion))
+          .toVar('uwWarp');
+
+        // The meniscus band. `crossT` is where this ray meets the surface; a
+        // crossing within `uMeniscusThickness` of the eye is the film on the
+        // glass rather than open water. Rays that never cross carry a negative
+        // or enormous `crossT` and fall outside the band on their own, so no
+        // separate validity test is needed.
+        const meniscus = smoothstepDown(crossT, float(0), this.uMeniscusThickness)
+          .mul(crossT.greaterThanEqual(0).select(float(1), float(0)))
+          .toVar('uwMeniscus');
+        // Pulled along screen Y, toward whichever side of the boundary this ray
+        // is on — down for a ray heading into the water, up for one leaving it.
+        //
+        // Screen Y and not the surface normal, which would be the physical
+        // answer and is not available here: a post pass has the depth buffer and
+        // the wave field, not the shading normal of a surface it is looking
+        // *along*. The approximation is exact while the horizon is level and
+        // degrades as the camera rolls, which for a rig whose roll comes from a
+        // hull's own motion is a few degrees.
+        const pullDir = vec2(0, rayYRaw.lessThan(0).select(float(-1), float(1)))
+          .toVar('uwPull');
+        warp.addAssign(pullDir.mul(meniscus.mul(this.uMeniscusPull)));
+
+        const warped = colorNode
+          .sample(suv.add(warp).clamp(vec2(0.001, 0.001), vec2(0.999, 0.999)))
+          .toVar('uwWarped');
+
         // --- 2. transmission --------------------------------------------------
         const transmit = exp(this.uSigma.mul(waterPath.negate())).toVar('uwT');
 
@@ -450,7 +581,19 @@ export class UnderwaterPass {
         const daylight = exp(this.uSigma.mul(this.uCameraDepth.mul(-0.55))).toVar('uwDay');
         const medium = this.uWaterColor.mul(this.uAmbient).mul(daylight).toVar('uwMedium');
 
-        const fogged = src.rgb.mul(transmit).add(medium.mul(transmit.oneMinus())).toVar('uwFog');
+        const fogged = warped.rgb.mul(transmit).add(medium.mul(transmit.oneMinus())).toVar('uwFog');
+
+        // The rim. Tinted by the medium rather than added as white, because what
+        // is bright at a meniscus is the water itself catching the light above
+        // it — a white line would read as a graphic overlay, which is precisely
+        // the failure this is here to remove. Raised to `uMeniscusSharpness` so
+        // the band has a hard inner edge and a soft outer one, which is the way
+        // round a real film of water sits.
+        const rim = meniscus
+          .pow(this.uMeniscusSharpness)
+          .mul(this.uMeniscusHighlight)
+          .toVar('uwRim');
+        fogged.addAssign(medium.add(this.uWaterColor.mul(0.35)).mul(rim));
 
         // --- 2. volumetric shafts --------------------------------------------
         //
@@ -654,6 +797,13 @@ export class UnderwaterPass {
     if (params.godRaySteps !== undefined) p.godRaySteps = params.godRaySteps;
     if (params.cameraDepth !== undefined) p.cameraDepth = params.cameraDepth;
     if (params.causticsStrength !== undefined) p.causticsStrength = params.causticsStrength;
+    if (params.distortion !== undefined) p.distortion = params.distortion;
+    if (params.distortionScale !== undefined) p.distortionScale = params.distortionScale;
+    if (params.distortionSpeed !== undefined) p.distortionSpeed = params.distortionSpeed;
+    if (params.meniscusThickness !== undefined) p.meniscusThickness = params.meniscusThickness;
+    if (params.meniscusHighlight !== undefined) p.meniscusHighlight = params.meniscusHighlight;
+    if (params.meniscusSharpness !== undefined) p.meniscusSharpness = params.meniscusSharpness;
+    if (params.meniscusPull !== undefined) p.meniscusPull = params.meniscusPull;
     this.applyParams();
   }
 
@@ -791,6 +941,19 @@ export class UnderwaterPass {
     this.uShaftRange.value = Math.max(12, Math.min(180, p.visibility * 2.2));
 
     this.uCaustics.value = Math.max(0, p.causticsStrength);
+
+    this.uDistortion.value = Math.max(0, p.distortion);
+    this.uDistortionScale.value = Math.max(0.1, p.distortionScale);
+    this.uDistortionSpeed.value = Math.max(0, p.distortionSpeed);
+
+    // Floored away from zero rather than allowed to reach it: `crossT` is
+    // divided by this thickness to form the band, and a preset that turned the
+    // meniscus off by zeroing its width would take the division with it. The
+    // highlight and the pull are the controls that switch it off.
+    this.uMeniscusThickness.value = Math.max(0.01, p.meniscusThickness);
+    this.uMeniscusHighlight.value = Math.max(0, p.meniscusHighlight);
+    this.uMeniscusSharpness.value = Math.max(0.1, p.meniscusSharpness);
+    this.uMeniscusPull.value = p.meniscusPull;
   }
 }
 

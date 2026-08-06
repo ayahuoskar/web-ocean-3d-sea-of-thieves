@@ -44,8 +44,29 @@ export interface Preset {
     shadowColor: THREE.Color;
   };
   weather: { kind: WeatherKind; intensity: number };
-  /** Sea state. */
-  sea: Pick<SpectrumParams, 'windSpeed' | 'windDirection' | 'peakWavelength' | 'gamma' | 'swell'>;
+  /**
+   * Sea state.
+   *
+   * `standingWaveRatio` and `spectralSharpness` are here rather than left on
+   * their defaults because they are the two parameters that separate one body of
+   * water from another at the same wind speed. Sharpness decides whether the sea
+   * is combed downwind or confused; the standing ratio decides whether it runs
+   * at all. A sheltered lagoon and an open gale can share a wind vector and
+   * agree on nothing else.
+   *
+   * `windwardFoam` is the deposit rate for the wind-facing-face term in
+   * `Wake.setWindward`, before the wind law scales it.
+   */
+  sea: Pick<
+    SpectrumParams,
+    | 'windSpeed'
+    | 'windDirection'
+    | 'peakWavelength'
+    | 'gamma'
+    | 'swell'
+    | 'standingWaveRatio'
+    | 'spectralSharpness'
+  > & { windwardFoam: number };
   water: Partial<WaterAppearance>;
   /**
    * Aerial perspective applied to the water surface (`density`), and the
@@ -65,9 +86,18 @@ export interface Preset {
    * describes the medium belongs to the place, not to the renderer.
    */
   fog: { color: THREE.Color; density: number; volumetric: number };
-  /** Underwater medium. */
+  /**
+   * Underwater medium.
+   *
+   * `distortion` is the refractive warp of the submerged image, in uv. It is per
+   * preset because it is a property of the water: a storm's surface is a
+   * disturbed lens and an arctic calm is very nearly a flat one, and a submerged
+   * frame that swims by the same amount in both is one of the tells that the two
+   * are the same render with a different palette.
+   */
   underwater: {
     color: THREE.Color;
+    distortion: number;
     extinction: THREE.Vector3;
     visibility: number;
     godRayStrength: number;
@@ -133,6 +163,9 @@ export const PRESETS: Record<PresetId, Preset> = {
       peakWavelength: 47,
       gamma: 3.3,
       swell: 0.2,
+      standingWaveRatio: 0.05,
+      spectralSharpness: 1,
+      windwardFoam: 0.03,
     },
     water: {
       deepColor: color(0x04283c),
@@ -185,6 +218,7 @@ export const PRESETS: Record<PresetId, Preset> = {
      */
     underwater: {
       color: color(0x2f8fb5),
+      distortion: 0.01,
       extinction: vec(0.22, 0.072, 0.045),
       visibility: 62,
       godRayStrength: 1.1,
@@ -257,6 +291,9 @@ export const PRESETS: Record<PresetId, Preset> = {
       peakWavelength: 38,
       gamma: 2.4,
       swell: 0.3,
+      standingWaveRatio: 0.05,
+      spectralSharpness: 0.85,
+      windwardFoam: 0.05,
     },
     water: {
       deepColor: color(0x081f2e),
@@ -269,6 +306,7 @@ export const PRESETS: Record<PresetId, Preset> = {
     fog: { color: color(0xd8e6f2), density: 0.00034, volumetric: 0.00028 },
     underwater: {
       color: color(0x14526e),
+      distortion: 0.014,
       extinction: vec(0.34, 0.13, 0.08),
       visibility: 30,
       godRayStrength: 0.7,
@@ -317,6 +355,9 @@ export const PRESETS: Record<PresetId, Preset> = {
       peakWavelength: 55,
       gamma: 3.3,
       swell: 0.25,
+      standingWaveRatio: 0.03,
+      spectralSharpness: 1.15,
+      windwardFoam: 0.05,
     },
     water: {
       deepColor: color(0x04303f),
@@ -329,6 +370,7 @@ export const PRESETS: Record<PresetId, Preset> = {
     fog: { color: color(0xc8e0ee), density: 0.00014, volumetric: 0.0001 },
     underwater: {
       color: color(0x1c7f92),
+      distortion: 0.012,
       extinction: vec(0.24, 0.075, 0.045),
       visibility: 55,
       godRayStrength: 1.15,
@@ -377,6 +419,9 @@ export const PRESETS: Record<PresetId, Preset> = {
       peakWavelength: 42,
       gamma: 2.8,
       swell: 0.35,
+      standingWaveRatio: 0.25,
+      spectralSharpness: 1.25,
+      windwardFoam: 0.02,
     },
     water: {
       deepColor: color(0x08192b),
@@ -389,6 +434,7 @@ export const PRESETS: Record<PresetId, Preset> = {
     fog: { color: color(0x9a8ea6), density: 0.00026, volumetric: 0.00022 },
     underwater: {
       color: color(0x11364f),
+      distortion: 0.008,
       extinction: vec(0.36, 0.14, 0.09),
       visibility: 26,
       godRayStrength: 0.55,
@@ -440,6 +486,9 @@ export const PRESETS: Record<PresetId, Preset> = {
       peakWavelength: 30,
       gamma: 2,
       swell: 0.4,
+      standingWaveRatio: 0.4,
+      spectralSharpness: 0.9,
+      windwardFoam: 0.02,
     },
     water: {
       deepColor: color(0x14252c),
@@ -452,6 +501,7 @@ export const PRESETS: Record<PresetId, Preset> = {
     fog: { color: color(0xccd6da), density: 0.0016, volumetric: 0.0028 },
     underwater: {
       color: color(0x2a5560),
+      distortion: 0.016,
       extinction: vec(0.46, 0.24, 0.17),
       visibility: 16,
       godRayStrength: 0.35,
@@ -501,6 +551,9 @@ export const PRESETS: Record<PresetId, Preset> = {
       peakWavelength: 80,
       gamma: 2.2,
       swell: 0.45,
+      standingWaveRatio: 0.35,
+      spectralSharpness: 1.2,
+      windwardFoam: 0.02,
     },
     water: {
       deepColor: color(0x020a12),
@@ -513,6 +566,7 @@ export const PRESETS: Record<PresetId, Preset> = {
     fog: { color: color(0x0d1926), density: 0.0003, volumetric: 0.00024 },
     underwater: {
       color: color(0x07202e),
+      distortion: 0.01,
       extinction: vec(0.38, 0.16, 0.1),
       visibility: 22,
       godRayStrength: 0.3,
@@ -563,6 +617,9 @@ export const PRESETS: Record<PresetId, Preset> = {
       peakWavelength: 34,
       gamma: 3,
       swell: 0.2,
+      standingWaveRatio: 0.1,
+      spectralSharpness: 1.3,
+      windwardFoam: 0.06,
     },
     water: {
       deepColor: color(0x03414f),
@@ -575,6 +632,7 @@ export const PRESETS: Record<PresetId, Preset> = {
     fog: { color: color(0xcfeaf4), density: 0.00012, volumetric: 9e-05 },
     underwater: {
       color: color(0x1fa0ab),
+      distortion: 0.011,
       extinction: vec(0.18, 0.05, 0.03),
       visibility: 70,
       godRayStrength: 1.35,
@@ -628,6 +686,9 @@ export const PRESETS: Record<PresetId, Preset> = {
       peakWavelength: 60,
       gamma: 3.3,
       swell: 0.15,
+      standingWaveRatio: 0,
+      spectralSharpness: 0.75,
+      windwardFoam: 0.07,
     },
     water: {
       deepColor: color(0x0a1620),
@@ -640,6 +701,7 @@ export const PRESETS: Record<PresetId, Preset> = {
     fog: { color: color(0x6f7a86), density: 0.0007, volumetric: 0.00075 },
     underwater: {
       color: color(0x16323f),
+      distortion: 0.02,
       extinction: vec(0.44, 0.2, 0.14),
       visibility: 14,
       godRayStrength: 0.25,
@@ -689,6 +751,9 @@ export const PRESETS: Record<PresetId, Preset> = {
       peakWavelength: 20,
       gamma: 2.2,
       swell: 0.5,
+      standingWaveRatio: 0.45,
+      spectralSharpness: 1.1,
+      windwardFoam: 0.01,
     },
     water: {
       deepColor: color(0x0a2230),
@@ -701,6 +766,7 @@ export const PRESETS: Record<PresetId, Preset> = {
     fog: { color: color(0xd0aa9c), density: 0.00022, volumetric: 0.00018 },
     underwater: {
       color: color(0x14455c),
+      distortion: 0.006,
       extinction: vec(0.32, 0.12, 0.08),
       visibility: 30,
       godRayStrength: 0.7,

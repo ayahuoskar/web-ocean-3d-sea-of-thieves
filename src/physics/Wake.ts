@@ -595,6 +595,47 @@ export class Wake {
    * common case of a crest passing over once.
    */
   private readonly uBreakRate = uniform(0.55);
+  /**
+   * Unit wind axis in world XZ, the direction the sea runs toward.
+   *
+   * Only the windward-face term uses it. `uDrift` cannot stand in: drift is a
+   * velocity and goes to zero in a calm, and an axis that vanishes would swing
+   * the foam bias through every heading on the way down.
+   */
+  private readonly uWindAxis = uniform(new THREE.Vector2(1, 0));
+  /**
+   * Foam per second deposited by a fully wind-facing wave face.
+   *
+   * A separate term from `uBreakRate`, and it has to be, because it answers a
+   * different question. The fold asks "is this water overturning", which is true
+   * of a fraction of a percent of the sea; this asks "is the wind driving up
+   * this face", which is true of about half of it. So the rate is far lower and
+   * what it produces is not whitecap but the faint aeration that a wind-driven
+   * face carries before it breaks — and, once persistence has had it for a
+   * second, the foam that is still there after the crest has passed over it.
+   *
+   * That last part is the point. Depositing only on the fold puts foam exactly
+   * on the crest line and nowhere else, so a wave has a white top and clean
+   * water either side of it. Real wind seas carry foam *up* the face and leave
+   * it *behind* the crest, because the water that was at the crest a moment ago
+   * is now on the back of it. Injecting on the rising face and letting the
+   * existing decay carry it is the cheapest way to say that: no new buffer, no
+   * new pass, one dot product in a shader that already samples the slope.
+   *
+   * 0.06 against the 1.5 s sea-foam constant settles at 0.09 — a wash, an order
+   * of magnitude below what breaking deposits, which is the correct relationship
+   * between "the wind is on this face" and "this face is overturning".
+   */
+  private readonly uWindwardRate = uniform(0.06);
+  /**
+   * Slope, in metres of rise per metre, at which a face counts as fully facing
+   * the wind.
+   *
+   * 0.25 is a little under the 0.44 steepness at which waves fold, so the term
+   * saturates on faces that are steep but not breaking — which is exactly the
+   * band the fold term cannot see.
+   */
+  private readonly uWindwardSlope = uniform(0.25);
   /** Rain rate, 0..1. */
   private readonly uRainAgitation = uniform(0);
   /** Foam per second deposited by rain at full intensity. */
@@ -766,6 +807,27 @@ export class Wake {
   setDrift(x: number, z: number): void {
     this.driftX = x;
     this.driftZ = z;
+  }
+
+  /**
+   * Bearing the sea runs toward, `atan2(dz, dx)` — the same convention and the
+   * same number as `SpectrumParams.windDirection`.
+   *
+   * Kept apart from `setDrift` because that one takes a velocity and this one
+   * takes a heading, and the heading has to survive the velocity going to zero.
+   */
+  setWindAxis(bearingRadians: number): void {
+    const axis = this.uWindAxis.value as THREE.Vector2;
+    axis.set(Math.cos(bearingRadians), Math.sin(bearingRadians));
+  }
+
+  /**
+   * Foam deposited per second on a fully wind-facing face, and the slope at
+   * which a face counts as fully facing. See `uWindwardRate`.
+   */
+  setWindward(rate: number, slope = 0.25): void {
+    this.uWindwardRate.value = Math.max(0, rate);
+    this.uWindwardSlope.value = Math.max(0.01, slope);
   }
 
   /** Rain rate, 0..1, driving the agitation term. */
@@ -1078,17 +1140,38 @@ export class Wake {
       // left to the accumulation. Coverage can then be sparse and still read as
       // foam, because what the eye integrates is the trail, not the instant.
       const fold = float(1).toVar();
+      // Surface slope, summed over the active cascades. The fold is a running
+      // minimum because a texel breaks if *any* band folds it; slope is a sum
+      // because the bands displace the same water and their gradients add.
+      const slope = vec2(0, 0).toVar();
       for (let i = 0; i < WAKE_CASCADES; i++) {
         const d = this.derivativeNodes[i].sample(world.div(this.uTileSizes[i])).toVar();
         // Unused cascades are weighted to 1 — the neutral value for a running
         // minimum — rather than to 0, which would read as maximal folding
         // everywhere and paint the whole ocean white.
         fold.assign(fold.min(mix(float(1), d.z, this.uCascadeWeights[i])));
+        slope.addAssign(d.xy.mul(this.uCascadeWeights[i]));
       }
       // Only genuinely folding water breaks. The threshold is deliberately
       // tighter than the old per-frame mask could afford to be.
       const breaking = smoothstepDown(fold, this.uBreakThreshold.sub(0.22), this.uBreakThreshold);
       deposit.addAssign(breaking.mul(this.uBreakRate).mul(this.uStep));
+
+      // --- windward faces -----------------------------------------------------
+      //
+      // Positive slope along the wind axis is the face rising toward the crest
+      // as you travel downwind — the face the wind is pushing on, and the one a
+      // wind sea aerates before it breaks. Negative is the lee face, which gets
+      // nothing here and gets its foam a second later when the crest that was
+      // upwind of it has passed over and the persistence buffer still holds what
+      // was deposited then. That handover is the whole mechanism; see
+      // `uWindwardRate`.
+      const windward = slope
+        .dot(this.uWindAxis)
+        .div(this.uWindwardSlope)
+        .clamp(0, 1)
+        .toVar();
+      deposit.addAssign(windward.mul(this.uWindwardRate).mul(this.uStep));
 
       // Rain agitation. Heavy rain aerates a surface on its own — it goes white
       // in a downpour whether or not the waves are steep enough to break — so

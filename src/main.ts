@@ -25,6 +25,7 @@ import {
   BuoyancySystem,
   BuoyantBody,
   ShipController,
+  Spray,
   Wake,
   createRadialProbes,
   type ShipControlState,
@@ -50,6 +51,7 @@ import {
   OUTPUT_TONE_MAPPING,
   OutputTransform,
 } from './post/OutputTransform';
+import { SpatialAA } from './post/SpatialAA';
 import { CameraDirector } from './cameras/CameraDirector';
 import { CINEMATIC_BEATS, nominalShipXZ } from './cameras/Cinematic';
 import { getPreset } from './presets';
@@ -174,6 +176,7 @@ class App {
   private weather!: Weather;
   /** Gulls over the play area. Owns no simulation state — see `Birds`. */
   private birds!: Birds;
+  private spray!: Spray;
   /** Reef school. Parented to the scene root: its vertex stage emits world space. */
   private fish!: FishSchool;
   private kelp!: KelpForest;
@@ -201,6 +204,7 @@ class App {
   private dof!: DepthOfField;
   private lensFlare!: LensFlare;
   private outputTransform!: OutputTransform;
+  private spatialAa!: SpatialAA;
   private particles!: UnderwaterParticles;
   private caustics!: Caustics;
 
@@ -337,6 +341,46 @@ class App {
     this.renderer.shadowMap.enabled = true;
 
     this.scene = new THREE.Scene();
+    /**
+     * Near 0.5, not 0.1, and the far plane is why.
+     *
+     * Depth precision goes as `z^2 / near`, so with a 40 km far plane — which
+     * the 24 km ocean disc in `OceanMesh` requires and which therefore cannot
+     * come in — the near plane is the only lever there is. At 0.1 the depth
+     * buffer resolved 1.17 m at the island, 1.4 km out, and 54 cm at the
+     * `ISLAND_STAND_OFF` the tour keeps. Two nearly coplanar surfaces at that
+     * range separated by less than one depth code is a shoreline: the seafloor
+     * heightfield breaks the surface there and the water writes depth, so the
+     * two meet at a grazing angle inside the quantum. 0.5 divides all of it by
+     * five, for one number and no format change.
+     *
+     * **It stays at 0.1 anyway, and the reason is worth recording because the
+     * obvious argument for moving it is wrong.**
+     *
+     * The plan was 0.5, on the reasoning that `OceanMesh.innerRadius` is 0.6 m
+     * so nothing of the sea lives closer. That is a misreading of the mesh:
+     * `buildRadialGrid` fans from a *centre vertex at radius zero* out to the
+     * first ring, so the surface reaches the lens no matter what the inner
+     * radius says. The grid is re-centred on the camera every frame, so what a
+     * near plane of `n` removes is a disc of water of radius roughly `n`
+     * directly under the viewer. At 0.1 that is a 10 cm hole nobody will find;
+     * at 0.5 it is half a metre, and the shot that finds it is already in the
+     * gallery — `waterline` sits the eye 2 cm above the surface, which is
+     * exactly the case where that disc fills the bottom of frame and the
+     * per-pixel waterline has nothing left to resolve against.
+     *
+     * The underwater particle boxes and the rain field have no exclusion radius
+     * either, so they would start popping at half a metre as well.
+     *
+     * The precision is a real problem and this is not the lever for it. The
+     * lever is `reversedDepthBuffer`, which r185 supports and which would give
+     * 0.16 mm at the island against the 1.17 m above — every depth consumer here
+     * goes through `perspectiveDepthToViewZ` or `linearDepth` and both branch on
+     * it, so it is genuinely a one-flag change. What stops it being taken here is
+     * that the WebGL2 backend silently reverts without `EXT_clip_control`, which
+     * would leave the two backends resolving depth differently, and that is a
+     * commitment to make deliberately rather than at the end of a batch.
+     */
     this.camera = new THREE.PerspectiveCamera(
       55,
       window.innerWidth / window.innerHeight,
@@ -479,6 +523,13 @@ class App {
     // atmosphere and nothing else, and they never touch the water.
     this.birds = new Birds(quality.birds);
     this.scene.add(this.birds.object);
+
+    // Built here with the rest of the always-present scene rather than with the
+    // ship, so its shader is compiled by the boot prewarm whether or not a hull
+    // ever loads. Its probes are attached later, if one does.
+    this.spray = new Spray();
+    this.spray.setStrength(quality.spray);
+    this.scene.add(this.spray.mesh);
 
     this.fish = new FishSchool(quality.fish);
     this.scene.add(this.fish.object);
@@ -702,11 +753,19 @@ class App {
     // light rather than a tone-mapped picture — which is both what its own
     // comment asks for and what a drop of water on glass actually does.
     this.outputTransform = new OutputTransform();
+    this.spatialAa = new SpatialAA();
     this.post.outputColorTransform = false;
-    this.post.outputNode = this.outputTransform.build(
-      this.lensRain.build(rtt(this.colorGrade.build(flared) as THREE.Node)),
-      OUTPUT_TONE_MAPPING,
-      OUTPUT_COLOR_SPACE,
+    // Tone map, anti-alias, dither — in that order, and none of the three can
+    // move. See `SpatialAA` for why the filter has to sit between the other two
+    // rather than at either end of the chain.
+    this.post.outputNode = this.outputTransform.applyDither(
+      this.spatialAa.build(
+        this.outputTransform.buildDisplay(
+          this.lensRain.build(rtt(this.colorGrade.build(flared) as THREE.Node)),
+          OUTPUT_TONE_MAPPING,
+          OUTPUT_COLOR_SPACE,
+        ),
+      ),
     ) as THREE.Node;
 
     boot.set(0.85, 'Wiring controls…');
@@ -1000,6 +1059,23 @@ class App {
       loaded.push(ship.object);
       this.scene.add(ship.object);
       this.wetness.adopt(ship.object);
+      // Four probes along the centreline, weighted forward. A hull throws water
+      // where it is finest and moving fastest through the vertical — the
+      // forefoot does nearly all of it, the midships some, and the quarters
+      // effectively none, which is why the weights fall off so sharply rather
+      // than being spread evenly along the length.
+      // The hull's forward direction is +X and its beam runs along Z — see
+      // `forwardLocal` in `Ship`, and note that getting this the wrong way round
+      // puts the spray over the quarters of a vessel that is throwing it off the
+      // stem.
+      const halfLength = ship.hullLength * 0.5;
+      const halfBeam = ship.hullBeam * 0.5;
+      this.spray.setProbes([
+        { offset: new THREE.Vector3(halfLength * 0.92, 0, 0), weight: 1 },
+        { offset: new THREE.Vector3(halfLength * 0.6, 0, halfBeam * 0.85), weight: 0.7 },
+        { offset: new THREE.Vector3(halfLength * 0.6, 0, -halfBeam * 0.85), weight: 0.7 },
+        { offset: new THREE.Vector3(-halfLength * 0.35, 0, 0), weight: 0.25 },
+      ]);
       // The hull gets the same treatment the dressing does, and the part of it
       // that matters here is the caustics: `underwater.png` shows the submerged
       // hull as a flat black cutout, because the one thing lighting a shape down
@@ -1366,6 +1442,10 @@ class App {
     // Moves `instanceCount` only; the flock is not rebuilt and each gull keeps
     // its own circuit across the change.
     this.birds.setCount(quality.birds);
+    // A uniform write, not a rebuild: the geometry and the shader are the same
+    // at every tier and only the master scale moves, so changing tier cannot
+    // compile anything.
+    this.spray.setStrength(quality.spray);
     this.fish.setCount(quality.fish);
     this.kelp.setCount(quality.kelp);
     this.meadow.setCount(quality.meadow);
@@ -1566,8 +1646,12 @@ class App {
     const lean = Math.min(0.55, this.state.windSpeed * 0.022);
     this.weather.setShear(Math.cos(windAngle) * lean, Math.sin(windAngle) * lean);
 
+    // `windwardFoam` rides in `sea` because it is a property of the sea state,
+    // but it is not a spectrum parameter — it drives the foam buffer's deposit.
+    // Split off explicitly rather than relying on the spread to be ignored.
+    const { windwardFoam, ...seaSpectrum } = preset.sea;
     this.simulation.updateSpectrum({
-      ...preset.sea,
+      ...seaSpectrum,
       windSpeed: this.state.windSpeed,
       peakWavelength: this.state.peakWavelength,
     });
@@ -1631,10 +1715,69 @@ class App {
     // so a rate following the full law on top of it double-counts. At 21 m/s the
     // clamped rate is a fifth of what the law alone would ask for, and the
     // rendered coverage lands within 0.02 points of it.
+    // 0.50, up from 0.32, and the increase is a consequence of the spectrum
+    // rather than a change of taste.
+    //
+    // 0.32 was measured against a directional lobe with a fixed `cos^8`
+    // exponent, which made every cascade run downwind together. Replacing it
+    // with the Hasselmann frequency-dependent spread left the *energy*
+    // untouched — the lobe is renormalised, see `Spectrum` — but spread the
+    // short waves across every heading, and waves that do not agree on a
+    // direction do not pile into steep crests. The fold threshold is unchanged
+    // and the sea state is unchanged; what fell is the fraction of the surface
+    // steep enough to trip it, measured at 0.60 to 0.67 of the old value at
+    // every wind speed from 6 to 24 m/s.
+    //
+    // `tests/foam.spec.ts` is what caught it and what set this number: it reads
+    // the accumulation buffer back and compares the standing coverage against
+    // Monahan & O'Muircheartaigh, so the rate is a calibration against a
+    // measurement rather than a free parameter. A more realistic spectrum
+    // needing a higher deposit rate to reach the same observed coverage is not a
+    // contradiction — the law predicts coverage, and it is coverage that is held
+    // fixed.
     this.wake.setBreaking(
       foamThreshold * 0.34,
-      0.32 * (Math.max(0.45, Math.min(2.2, whitecapRatio)) + 0.08 * whitecapRatio),
+      // The lower clamp moved with it, and finding where took three
+      // measurements because coverage is violently non-linear against the rate
+      // down here. Both 6 and 9 m/s sit under the floor — the clamp binds below
+      // about 11.9 m/s, which the test's own comments call out — so they move
+      // together, and the floor has to put the pair inside two bands at once:
+      // 6 m/s must stay under 0.52% and 9 m/s must stay over 0.23%.
+      //
+      //   floor 0.45 -> 0.58% and 0.62%   6 m/s over its ceiling
+      //   floor 0.30 -> 0.15% and 0.18%   9 m/s under its floor
+      //   floor 0.38 -> 0.35% and 0.38%   both inside, but the 6-to-24 dynamic
+      //                                   range collapses to 34x against the
+      //                                   38x the law's own shape demands
+      //   floor 0.34 -> where this sits
+      //
+      // A 1.5x change in rate moving coverage almost fourfold is the saturation
+      // working backwards: at these levels almost nothing reaches equilibrium,
+      // so the standing coverage is set by how many texels cross the threshold
+      // at all rather than by how white they get. That is also why the floor
+      // cannot simply be scaled by the same factor as the rate — the calm end
+      // responds to it far more strongly than the storm end, which is already
+      // saturating, so a uniform scale flattens the law it is meant to preserve.
+      0.5 * (Math.max(0.34, Math.min(2.2, whitecapRatio)) + 0.08 * whitecapRatio),
     );
+
+    // The windward-face term rides the same law, and has to: it is the same air
+    // being entrained by the same wind, just before the fold rather than at it.
+    //
+    // **It does overlap the breaking term, and the rate is set knowing that.** A
+    // wind-facing crest that is also folding satisfies both tests and receives
+    // both deposits — they are not disjoint and cannot be, because a crest
+    // steepens on its windward face before it breaks there. What keeps that from
+    // being a bug is the size of the two: the windward rate is an order of
+    // magnitude below the breaking rate, so on the small fraction of the surface
+    // that is doing both, the windward share is a rounding error on top of a
+    // deposit that was already going to saturate. What it buys is the *other*
+    // 99% — the wind-facing water that never breaks at all, which the fold term
+    // by construction cannot see.
+    //
+    // `tests/foam.spec.ts` measures the total, so the calibration above is
+    // against both terms together rather than against the fold alone.
+    this.wake.setWindward(windwardFoam * Math.max(0.15, Math.min(3, whitecapRatio)));
 
     // The surface's own mask is re-scaled from the same number.
     //
@@ -1990,6 +2133,21 @@ class App {
       Math.cos(driftBearing) * driftSpeed,
       Math.sin(driftBearing) * driftSpeed,
     );
+    // The axis the windward-face term biases foam along. Same bearing, but it
+    // has to be set separately because the drift above goes to zero in a calm
+    // and an axis cannot.
+    this.wake.setWindAxis(driftBearing);
+
+    // Spray reads the hull's world matrix, so it has to run after whatever moved
+    // it this frame — the buoyancy solve above — and it samples the same wave
+    // field the buoyancy did, so the surface it tests against is the one the
+    // hull is actually floating on rather than a second opinion about it.
+    this.spray.update(
+      dt,
+      elapsed,
+      this.ship?.object ?? null,
+      (x, z) => this.sampler.height(x, z),
+    );
     // Wood and canvas darken and gloss in a squall, and stay damp well after it
     // passes — see `SurfaceWetness` for the asymmetric time constants.
     this.wetness.update(dt, raining);
@@ -2027,6 +2185,10 @@ class App {
       visibility: preset.underwater.visibility,
       godRayStrength: preset.underwater.godRayStrength,
       godRaySteps: QUALITY_TIERS[this.state.quality].godRaySteps,
+      // The lens the submerged view is looking through. Per preset, because a
+      // storm's surface is a disturbed one and a glassy sunset's is very nearly
+      // flat — see `Preset.underwater`.
+      distortion: preset.underwater.distortion,
     });
     // The hull, as the one occluder the shafts need. A diver under a ship
     // should be in its shadow; the caustics field cannot know that, because it
@@ -2486,6 +2648,7 @@ class App {
           }
           this.clouds.resetWind();
           this.birds.resetClock(start);
+          this.spray.resetClock(start);
           this.fish.resetClock(start);
           this.kelp.resetClock(start);
           this.meadow.resetClock(start);
@@ -2635,6 +2798,20 @@ class App {
          * renderer's own path.
          */
         setDitherLevels: (levels: number) => this.outputTransform.setDitherLevels(levels),
+        /**
+         * Test-only anti-alias blend, 0..1. 0 is the unfiltered frame exactly,
+         * which is how a test proves the filter is in the chain and doing
+         * something rather than being wired up and inert.
+         */
+        setAaStrength: (strength: number) => this.spatialAa.setStrength(strength),
+        /**
+         * Test-only spray master scale. 0 removes it from the frame exactly,
+         * which is how a test attributes pixels to it rather than to the wake
+         * and the whitecaps it appears on top of.
+         */
+        setSprayStrength: (strength: number) => this.spray.setStrength(strength),
+        /** Live impact events, for the spray test. */
+        sprayLiveEvents: () => this.spray.liveEvents(),
         /** The tour's environment curves, for the seam and coverage tests. */
         cinematicEnvironment: (time?: number) => ({
           ...this.director.cinematicEnvironment(time),
@@ -2698,6 +2875,8 @@ class App {
     this.dof?.dispose();
     this.lensFlare?.dispose();
     this.outputTransform?.dispose();
+    this.spatialAa?.dispose();
+    this.spray?.dispose();
     this.particles?.dispose();
     this.caustics?.dispose();
     this.shipControls?.dispose();

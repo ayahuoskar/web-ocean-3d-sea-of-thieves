@@ -281,6 +281,28 @@ const REFRACTION_FADE_FAR = 460;
 const FOAM_BREAKUP_NEAR = 180;
 const FOAM_BREAKUP_FAR = 520;
 
+/**
+ * How far the foam breakup noise is stretched along the wind, as a ratio.
+ *
+ * Whitecap foam is not an isotropic blob. The wind that breaks a crest keeps
+ * blowing over the raft it leaves, so a real whitecap is a streak lying along
+ * the wind — the standard aerial photographs of a Beaufort 6 sea are almost all
+ * streak and very little patch. Sampling the breakup field in a frame stretched
+ * along the wind axis says that for the cost of one dot product, and it is the
+ * difference between foam that looks blown and foam that looks sprinkled.
+ *
+ * 2.6 rather than something larger because past about 3 the streaks start to
+ * read as scratches: the noise runs out of features along the stretched axis and
+ * what is left is a comb. It also has to stay clear of `uSlopeAnisotropy`, which
+ * already stretches the *specular* along the same axis — two anisotropies at the
+ * same aspect ratio on the same surface stop reading as wind and start reading
+ * as a texture bug.
+ *
+ * Stretching lowers the along-wind frequency rather than raising anything, so
+ * this cannot cost the far-field jitter budget the surrounding comments defend.
+ */
+const FOAM_WIND_STRETCH = 2.6;
+
 const SHORE_GRADIENT_EPSILON = 12;
 
 /**
@@ -1533,7 +1555,18 @@ export class OceanMaterial {
       // Break the mask up with world-space noise at roughly the scale of real
       // foam clumps (sub-metre), so the edge dissolves into bubbles rather than
       // ending on a clean contour.
-      const foamUv = worldPos.xz.mul(1.4).toVar();
+      // Sampled in the wind's own frame, stretched along it — see
+      // `FOAM_WIND_STRETCH`. The rotation is the wind axis and its perpendicular
+      // used as basis vectors, which is a pair of dot products; building a
+      // matrix for a 2-D rotation would cost more and say less.
+      const windAlong = vec2(this.uWindAxis.x, this.uWindAxis.y).toVar();
+      const windAcross = vec2(this.uWindAxis.y.negate(), this.uWindAxis.x).toVar();
+      const foamUv = vec2(
+        worldPos.xz.dot(windAlong).div(FOAM_WIND_STRETCH),
+        worldPos.xz.dot(windAcross),
+      )
+        .mul(1.4)
+        .toVar();
       const breakup = float(0).toVar();
       let amplitude = 0.5;
       let frequency = 1;

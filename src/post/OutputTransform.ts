@@ -78,16 +78,46 @@ export class OutputTransform {
    * @param colorSpace  Must match the renderer's `outputColorSpace`.
    */
   build(sceneColor: unknown, toneMapping: THREE.ToneMapping, colorSpace: string): unknown {
+    return this.applyDither(this.buildDisplay(sceneColor, toneMapping, colorSpace));
+  }
+
+  /**
+   * Tone mapping and the transfer function, with nothing after them.
+   *
+   * Split out from `build` so a stage that *requires display-referred input* can
+   * stand between the two halves. FXAA is the one that does: it thresholds on
+   * luma and its constants are calibrated against sRGB, so three's own node
+   * documents that "tone mapping and color space conversion must happen before
+   * the anti-aliasing". Running it on the linear HDR frame instead would have it
+   * find almost no edges in the shadows and treat every specular highlight as
+   * one.
+   *
+   * The dither still goes last, which is the whole reason this class exists —
+   * see the header. Anti-aliasing before quantisation is the correct order
+   * anyway: dithering first and then blurring the dither is how you get back the
+   * banding it was there to remove.
+   */
+  buildDisplay(sceneColor: unknown, toneMapping: THREE.ToneMapping, colorSpace: string): unknown {
     const src: any = sceneColor;
     if (src === null || src === undefined) {
-      throw new Error('OutputTransform.build: sceneColor is required.');
+      throw new Error('OutputTransform.buildDisplay: sceneColor is required.');
+    }
+
+    // The renderer's own output node, with the renderer's own settings. This
+    // includes `toneMappingExposure` — the tone-mapping node reads it as a
+    // uniform — so the per-preset exposure keeps working untouched.
+    return Fn(() => vec4(renderOutput(src, toneMapping, colorSpace)))();
+  }
+
+  /** The dither, which must be the last thing that touches the frame. */
+  applyDither(displayColor: unknown): unknown {
+    const src: any = displayColor;
+    if (src === null || src === undefined) {
+      throw new Error('OutputTransform.applyDither: displayColor is required.');
     }
 
     return Fn(() => {
-      // The renderer's own output node, with the renderer's own settings. This
-      // includes `toneMappingExposure` — the tone-mapping node reads it as a
-      // uniform — so the per-preset exposure keeps working untouched.
-      const display = vec4(renderOutput(src, toneMapping, colorSpace)).toVar('outDisplay');
+      const display = vec4(src).toVar('outDisplay');
 
       // Triangular dither, applied *after* the transfer function.
       //

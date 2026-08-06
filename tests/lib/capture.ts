@@ -82,6 +82,7 @@ interface OceanHooks {
   capturePixels(): Promise<CapturedPixels>;
   /** Test-only dither amplitude in output levels; 0 disables. */
   setDitherLevels(levels: number): void;
+  setAaStrength(strength: number): void;
   /** Test-only lens override: gather tap count and f-number. */
   setDof(samples: number, fNumber: number): void;
   /** Test-only flare override. */

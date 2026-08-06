@@ -96,6 +96,15 @@ export interface QualitySettings {
   cloudSteps: number;
   /** Raymarch steps for underwater god rays; 0 disables them. */
   godRaySteps: number;
+  /**
+   * Master scale on hull spray. 0 draws none.
+   *
+   * Zero at Low for the same reason  is: that tier is the
+   * WebGL2 floor and everything optional comes off it. The system still
+   * builds and still compiles there — only its strength is zero — so
+   * raising the tier cannot compile a shader mid-session.
+   */
+  spray: number;
   underwaterParticles: number;
   /**
    * Gulls in the flock, and fish in the school.
@@ -263,6 +272,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     terrainShadowSteps: 0,
     cloudSteps: 0,
     godRaySteps: 0,
+    spray: 0,
     underwaterParticles: 400,
     birds: 0,
     fish: 0,
@@ -291,6 +301,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     terrainShadowSteps: 12,
     cloudSteps: 12,
     godRaySteps: 12,
+    spray: 0.6,
     underwaterParticles: 1200,
     birds: 14,
     fish: 110,
@@ -319,6 +330,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     terrainShadowSteps: 20,
     cloudSteps: 18,
     godRaySteps: 24,
+    spray: 1,
     underwaterParticles: 2400,
     birds: 26,
     fish: 240,
@@ -345,6 +357,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     terrainShadowSteps: 28,
     cloudSteps: 34,
     godRaySteps: 40,
+    spray: 1,
     underwaterParticles: 4000,
     birds: 40,
     fish: 380,
@@ -371,6 +384,7 @@ export const QUALITY_TIERS: Record<QualityTier, QualitySettings> = {
     terrainShadowSteps: 28,
     cloudSteps: 34,
     godRaySteps: 40,
+    spray: 1,
     underwaterParticles: 6000,
     birds: 64,
     fish: 560,
