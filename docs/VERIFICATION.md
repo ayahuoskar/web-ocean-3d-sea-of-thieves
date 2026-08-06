@@ -57,12 +57,12 @@ views.
 | `cinematic-squall` | skyPro | The tour changing the weather: rain on the lens, key light killed, hull wet |
 | `cinematic-night` | skyPro | The tour at 02:20 — moon glitter, star field, a hull lit by nothing else |
 
-**Five shots run the cinematic flight rather than pinning a camera.** Those are
+**Four shots run the cinematic flight rather than pinning a camera.** Those are
 the ones whose `state.cameraMode` is `'cinematic'`, and they name a
-`cinematicTime` — a position on the tour's own 166 s lap — instead of a pose. The
+`cinematicTime` — a position on the tour's own 60 s lap — instead of a pose. The
 two clocks are independent: `time` settles the sea, the foam and the wake, while
 `cinematicTime` decides the camera, the hour and the weather together, so a shot
-can ask for a settled sea framed by the night watch.
+can ask for a settled sea framed by the night squall.
 
 They used to be captured by copying a beat's key into an *orbit* camera, because
 the shot type had no cinematic mode. That was serviceable while the tour's sun

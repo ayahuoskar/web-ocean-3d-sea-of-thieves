@@ -99,19 +99,19 @@ and weather together — so switching reads as a different *place*, not a colour
 | Clear day | The night watch |
 |---|---|
 | ![Clear day](docs/images/clear-day.png) | ![Night](docs/images/night.png) |
-| The reference frame every measurement in this repository is taken against | The cinematic tour at 02:20 — moon glitter, star field, and a hull lit by nothing else |
+| The reference frame every measurement in this repository is taken against | The cinematic tour at 00:56 — moon glitter, star field, and a hull lit by nothing else |
 
-| A squall | The surf line |
+| A squall | Landfall |
 |---|---|
-| ![Squall](docs/images/squall.png) | ![Surf](docs/images/surf.png) |
-| The tour changing the weather: rain on the lens, the deck killing the key light, the hull wet | Inside the shore break under a low sun, from the beat that flies at 9 m |
+| ![Squall](docs/images/squall.png) | ![Landfall](docs/images/landfall.png) |
+| The tour changing the weather: rain on the lens, the deck killing the key light, the hull wet | The island from the tour's stand-off, half a kilometre off the beach |
 
 ![Island](docs/images/island.png)
 
 *The frame the terrain, the planting and the grade are tuned against, and the one the
 reference in [`docs/ref/`](docs/ref/) depicts. Bare coral sand to 3.5 m, canopy over the
-flanks carried by billboard impostors past the last mesh LOD, a pale rock crown on the 150 m
-summit, and closed shoreline rock that can be dropped at any angle.*
+flanks carried by billboard impostors that hand over to the meshes at 90 m, a pale rock
+crown on the 150 m summit, and closed shoreline rock that can be dropped at any angle.*
 
 | The shore break | Over the reef |
 |---|---|
@@ -197,7 +197,7 @@ Drop the camera below the surface in any mode to trigger the underwater state.
 - Cloud shadows drift across the water, sampled from the same density field the clouds are
   drawn from
 - Buoys and barrels floating independently
-- **Canopy impostors.** Past the last mesh LOD the island's forest becomes camera-facing cards,
+- **Canopy impostors.** Past 90 m the island's forest becomes camera-facing cards,
   placed straight off the heightfield node so they stop exactly where the terrain's green stops.
   One draw, two triangles a card, no texture and no shadow — and it is what gives the island a
   broken silhouette instead of a painted dome

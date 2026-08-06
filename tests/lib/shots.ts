@@ -451,22 +451,27 @@ export const SHOTS: readonly Shot[] = [
      */
     camera: null,
     time: 44,
-    // 133 s, which is the beat's *middle key* — the one authored to pass within
-    // fifteen metres of the reef patch at (-97, -102). 137 was four seconds too
-    // late and put the camera over open sand between two patches, which is the
-    // same mistake this shot list has now made three times in different places:
-    // aiming at the reef in general rather than at something in particular.
-    // The tour's dawn has reached an elevation of 0.29 by then, so it is lit.
-    cinematicTime: 133,
+    // 53.5 s, and the precision is not fussiness — the window is genuinely that
+    // narrow. The beat crosses the reef patch at (-97, -102) at about 20 m/s, so
+    // the coral is at a useful size and inside the view cone for roughly two
+    // seconds of the lap. 52.5 has it 34 m off and small; 55 has already passed
+    // it and photographs open sand, which is the failure this shot exists to
+    // catch and has twice been captured *as* the evidence for.
+    //
+    // It also has to be lit, and on a 60-second lap that is a real constraint:
+    // the dive goes under at 03:57 and this is about the earliest the tour's
+    // dawn has the sun high enough to reach 11 m of water.
+    cinematicTime: 53.5,
     settleSteps: 90,
   },
   {
     id: 'cinematic-landfall',
-    title: 'The tour, over the cove',
+    title: 'The tour, standing off the island',
     purpose:
-      "The `landfall` beat's middle key: the cove, the jetty and the beached " +
-      'pinnace from the air. The previous flight never came within 1.7 km of ' +
-      'any of them.',
+      "The `landfall` beat's middle key: the whole landmass in one frame from " +
+      '1.08 km, which is where the re-cut tour holds it. Headland, bay, canopy ' +
+      'band and bare summit together, at the range the billboard canopy and the ' +
+      'aerial perspective are both built to work at.',
     state: {
       quality: 'high',
       cameraMode: 'cinematic',
@@ -477,7 +482,7 @@ export const SHOTS: readonly Shot[] = [
     },
     camera: null,
     time: 30,
-    cinematicTime: 46,
+    cinematicTime: 26,
     settleSteps: 90,
   },
   {
@@ -537,26 +542,6 @@ export const SHOTS: readonly Shot[] = [
     settleSteps: 90,
   },
   {
-    id: 'cinematic-surf',
-    title: 'The tour, in the surf',
-    purpose:
-      'The `surf-line` beat: the shore break from inside it, under a low sun. ' +
-      'The previous flight never came below 55 m over the island, so the whole ' +
-      'depth-driven surf zone was a few pixels of white in a wide.',
-    state: {
-      quality: 'high',
-      cameraMode: 'cinematic',
-      windSpeed: 15,
-      peakWavelength: 47,
-      cloudCoverage: 0.32,
-      preset: 'skyPro',
-    },
-    camera: null,
-    time: 58,
-    cinematicTime: 66,
-    settleSteps: 90,
-  },
-  {
     id: 'cinematic-squall',
     title: 'The tour, in a squall',
     purpose:
@@ -577,7 +562,7 @@ export const SHOTS: readonly Shot[] = [
     time: 76,
     // The rain envelope peaks at 99 s; this is one second past it, so the shot
     // cannot be quietly satisfied by a squall that arrives late.
-    cinematicTime: 100,
+    cinematicTime: 40,
     settleSteps: 90,
   },
   {
@@ -597,7 +582,7 @@ export const SHOTS: readonly Shot[] = [
     },
     camera: null,
     time: 88,
-    cinematicTime: 117,
+    cinematicTime: 44,
     settleSteps: 90,
   },
 ] as const;
@@ -664,7 +649,6 @@ export const MEASURED_NOISE_FLOOR: Readonly<Record<string, NoiseFloor>> = {
   'cinematic-reef': { meanDeltaE: 0.0162, p95DeltaE: 0.0000, fractionAbove: 0.00213 },
   'cinematic-landfall': { meanDeltaE: 0.0000, p95DeltaE: 0.0000, fractionAbove: 0.00000 },
   'ship-and-island': { meanDeltaE: 0.0069, p95DeltaE: 0.0000, fractionAbove: 0.00062 },
-  'cinematic-surf': { meanDeltaE: 0.0000, p95DeltaE: 0.0000, fractionAbove: 0.00000 },
   'cinematic-squall': { meanDeltaE: 0.0072, p95DeltaE: 0.0000, fractionAbove: 0.00051 },
   'cinematic-night': { meanDeltaE: 0.0000, p95DeltaE: 0.0000, fractionAbove: 0.00000 },
 };

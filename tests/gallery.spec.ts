@@ -87,12 +87,17 @@ const GALLERY: readonly GalleryShot[] = [
   canonical('island-approach', 'island'),
   canonical('shore-break', 'shore'),
   canonical('reef-dive', 'reef'),
-  // The three beats the re-authored tour added. Each is captured by *running*
-  // the flight, not by copying its camera into an orbit shot — which for these
-  // three is the difference between the picture and a lie, since a night beat
-  // photographed under the preset's own sun is a noon frame at a night camera
-  // position.
-  canonical('cinematic-surf', 'surf'),
+  // Beats of the tour, captured by *running* the flight rather than by copying
+  // its camera into an orbit shot — which for these is the difference between
+  // the picture and a lie, since a night beat photographed under the preset's
+  // own sun is a noon frame at a night camera position.
+  //
+  // `landfall` replaces what used to be `surf` here. The 60-second flight stands
+  // half a kilometre off the island by design, so it has no surf beat left to
+  // photograph — and the gallery already carried the shore break twice, once
+  // from the tour and once from the canonical `shore-break` shot below. This
+  // slot now shows the thing the re-cut tour actually does.
+  canonical('cinematic-landfall', 'landfall'),
   canonical('cinematic-squall', 'squall'),
   canonical('cinematic-night', 'night'),
   // `waterline` is deliberately absent. The per-pixel split is a real capability

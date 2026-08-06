@@ -150,23 +150,20 @@ interface Beat {
 const ISLAND_LOOK: readonly [number, number, number] = [ISLAND.x, 70, ISLAND.z];
 
 /**
- * The two landmarks the island leg is composed around, in world XZ.
+ * How close any camera key is allowed to come to the island's centre, metres.
  *
- * Derived here rather than imported because `Props` owns them as *bearings* and
- * does not export the resolved points — but they are worth writing down, since
- * a beat aimed at the island's centre flies past both of them without ever
- * framing either. The cove sits on `COVE_BEARING` (0.7 rad) at the waterline;
- * the fort on `FORT_BEARING` (1.35 rad) at `FORT_INSET` (0.34) of the radius
- * inland from it.
+ * Not enforced in code — a clamp would put a corner in the curve, which is the
+ * one thing it must never develop — but asserted by `tests/cinematic.spec.ts`,
+ * which is the right place for a bound that is about art direction rather than
+ * about arithmetic. The mean shore radius is 500 m, so this stands the flight
+ * off by half a kilometre of water: the island reads as a landmass being
+ * *approached* rather than as terrain being flown over, and the canopy cards,
+ * the beach and the shore break stay at the range they are built to work at.
+ *
+ * The previous flight came to 413 m — eighty-seven metres *inland* of the mean
+ * shore — and that is what this constant exists to stop happening again.
  */
-const COVE: readonly [number, number] = [
-  ISLAND.x + Math.cos(0.7) * ISLAND.radius,
-  ISLAND.z + Math.sin(0.7) * ISLAND.radius,
-];
-const FORT: readonly [number, number] = [
-  ISLAND.x + Math.cos(1.35) * ISLAND.radius * 0.66,
-  ISLAND.z + Math.sin(1.35) * ISLAND.radius * 0.66,
-];
+export const ISLAND_STAND_OFF = 950;
 
 /**
  * The tour's day, as a *phase warp* on a full twenty-four hours per lap.
@@ -186,9 +183,9 @@ const FORT: readonly [number, number] = [
  * a day.
  *
  * A linear ramp is still not enough, because the beats do not want equal shares
- * of it: the reef needs sun on it, the surf needs a low sun rather than no sun,
- * and the squall and the night watch need real darkness — and the last two sit
- * fourteen seconds apart on a 166-second lap. So the ramp is warped:
+ * of it: the island leg needs the sun well up, the squall needs real darkness,
+ * and the reef needs enough light to see coral by — and at sixty seconds a
+ * uniform day gives each of them about eight. So the ramp is warped:
  *
  *     g(x) = x + (a / 2π) · sin(2π (x − p))
  *
@@ -199,18 +196,23 @@ const FORT: readonly [number, number] = [
  * light on the island and hurries through the small hours.
  *
  * The three numbers are not taste. They were searched against the light each
- * beat actually needs — surf lit end to end, squall and night watch below −0.25
- * elevation throughout, the reef lit from a third of the way in and reaching
- * noon by its end — and these are the values that satisfy all of it at once.
- * The resulting schedule: afternoon on the open water, golden light on the
- * island, a low sun in the surf, sunset on the way back, a squall after dark,
- * the middle of the night on watch, and a dive that begins before dawn and
- * surfaces at noon.
+ * beat actually needs — sun elevation above 0.55 for the hull and the outbound,
+ * above 0.35 across the island leg, below −0.15 for the whole squall, and back
+ * above 0.2 by the time the dive surfaces — and these are the values that
+ * satisfy all four at once with the most margin to spare. Re-searching is the
+ * right move if a duration changes; guessing at them is not, because the
+ * constraints conflict and the feasible region is small.
+ *
+ * The resulting schedule: late morning on the water, noon over the run out,
+ * early afternoon on the island, sunset on the way back, a squall and a night
+ * watch in genuine darkness, and a dive that begins before dawn and surfaces
+ * into morning light. `HOUR_WARP_AMOUNT` is unchanged from the 166-second lap —
+ * only where the warp is centred and what hour the lap opens on had to move.
  */
 const HOUR_WARP_AMOUNT = 0.9;
-const HOUR_WARP_PHASE = 0.74;
+const HOUR_WARP_PHASE = 0.71;
 /** Hour of the day at the top of the lap. */
-const HOUR_AT_ORIGIN = 10.5;
+const HOUR_AT_ORIGIN = 6.8;
 
 /**
  * Peak rain rate in the squall, and the shape of its arrival.
@@ -221,208 +223,208 @@ const HOUR_AT_ORIGIN = 10.5;
  * would show as the rain rate visibly changing gear — the same class of defect
  * the camera curve is built to avoid, applied to the sky instead.
  *
- * Centred a little before the squall beat's midpoint and wider than the beat, so
- * the weather is already making up as the `return` leg ends and has not quite
- * cleared when the night watch begins. Weather that starts exactly when a shot
- * starts reads as a switch being thrown.
+ * Centred on the squall beat's opening and wider than the beat, so the weather
+ * is already making up through the second half of `return` and has not quite
+ * cleared as the dive goes under. Weather that starts exactly when a shot starts
+ * reads as a switch being thrown.
+ *
+ * The half-width is bounded from above by something other than taste: rain has
+ * to be a *change*, so the lap must be dry for most of itself. Nine seconds
+ * either side is eighteen of sixty — thirty per cent wet — which
+ * `tests/cinematic.spec.ts` holds to a 40% ceiling.
  */
 const RAIN_PEAK = 0.85;
-const RAIN_CENTRE_SECONDS = 99;
-const RAIN_HALF_WIDTH_SECONDS = 21;
+const RAIN_CENTRE_SECONDS = 40;
+const RAIN_HALF_WIDTH_SECONDS = 9;
 
 /**
  * The flight.
  *
- * Geometry worth knowing while reading the numbers: the ship spawns at the
- * origin heading +X; the shallow plateau runs to 320 m with the reef scattered
- * between 26 m and 260 m over sand at about −17 m; the island sits 1.39 km away
- * on a bearing of roughly (−0.83, −0.56). The rudder derivation below turns the
- * hull to port throughout, which sweeps it toward −Z — the island's side of the
- * world — so the wide beats can hold the ship and the landmass on one axis
- * instead of having to choose.
+ * **Shape.** One closed circuit, sixty seconds, traversed in a single direction.
+ * A closed loop has exactly two places where the travel direction reverses, and
+ * both are placed on purpose rather than left to fall where the knots happen to
+ * run out: one is the wide arc across the island's face in `landfall`, the other
+ * is the sweep around the hull in `open-water`. Everything between them is two
+ * near-parallel legs — out on the north side, back down the middle over the reef
+ * — so no beat has to double back inside itself.
  *
- * Underwater keys hold −7 to −8.5 m, which is 4.5 m of water under the lens
- * against the *worst* plateau relief (−11.5 m, where the seafloor's noise peaks)
- * rather than against its −17 m mean. That clearance is authored rather than
- * enforced with a clamp
- * against `seafloorHeight`: a clamp is a non-smooth term, and the one thing this
- * curve must never develop is a corner — it would appear as a kick in the motion
- * at exactly the moments the shot is closest to the ground.
+ * **Why the whole tour fits in a kilometre of water.** The island is 1.39 km
+ * away and the previous flight went *to* it, which cost 2.8 km of transit and is
+ * why that lap needed 166 seconds. Standing off it instead — `ISLAND_STAND_OFF`,
+ * half a kilometre of water off the beach — puts the far end of the circuit only
+ * ~440 m from the play area, because the stand-off point is measured from the
+ * island's centre and the island is 500 m in radius. The landmass still fills
+ * some fifty degrees of frame there. Nearly all of the old lap's length was
+ * spent closing a gap that did not need closing.
+ *
+ * **What the numbers were chosen against.** Not by eye. The curve is sampled at
+ * 60 Hz over the lap and scored for the things that read as a *cut* — speed,
+ * acceleration, the angular rate of the view, and how far ahead the camera is
+ * looking. That last one is the one worth naming, because it is the mechanism
+ * behind every whip the previous flight had: when the look point comes close to
+ * the eye, the view direction becomes hypersensitive to it, and a look point
+ * that drifts *through* the camera swings the frame through 180° in a few
+ * frames. The old `ascent` beat closed to 9 m and span at 297°/s. Every look
+ * target here stays at least 59 m ahead, and the worst view rate on the lap is
+ * 39°/s — a deliberate pan, which is what a camera operator does, rather than a
+ * whip, which is what a spline does when nobody checked.
+ *
+ *     metric                previous (166 s)   this flight
+ *     peak speed              300 m/s            47 m/s
+ *     peak acceleration       422 m/s²           35 m/s²
+ *     peak view rate          297 °/s            39 °/s
+ *     closest look point        9 m              59 m
+ *     closest island approach  87 m *inland*     584 m off the beach
+ *
+ * `tests/cinematic.spec.ts` asserts all five, an order of magnitude loose, so
+ * they catch a knot edited into a lurch rather than policing the last per cent.
+ *
+ * **Geometry worth knowing while reading the numbers.** The hull spawns at the
+ * origin heading +X and holds one constant turn to port; the shallow plateau
+ * runs to 320 m with the reef scattered between 26 m and 260 m over sand at
+ * about −17 m; the island sits 1.39 km away on a bearing of roughly
+ * (−0.83, −0.56). The underwater keys hold −7 to −10 m over a floor near −16.5
+ * in the reef band. That clearance is authored rather than clamped against
+ * `seafloorHeight`, for the same reason nothing else here is clamped: a clamp is
+ * a non-smooth term, and it would appear as a kick in the motion at exactly the
+ * moments the shot is closest to the ground.
  */
 const BEATS: readonly Beat[] = [
   {
-    // Ship at full ahead with the camera holding station off the starboard bow,
-    // letting the hull close on the lens. The wake is the subject as much as the
-    // hull is, and it needs a few seconds at speed before it is worth showing.
+    // The hull at full ahead, with the camera sweeping round its quarter.
+    //
+    // This beat is also the loop's turning region — the camera arrives from the
+    // south-west at the end of `reef-run` and leaves heading south-west again on
+    // `outbound`, so something has to come about, and an arc around the subject
+    // is the one move that makes a reversal read as a choice. The hull is held
+    // in frame throughout, which keeps the view rate down while the *travel*
+    // direction changes by 180°: the look point is barely moving, so the pan is
+    // 13°/s where the eye is turning far faster than that.
     name: 'open-water',
-    duration: 14,
+    duration: 8,
     throttle: 1.0,
     keys: [
-      { at: 0.0, eye: [180, 12, 80], look: 'ship' },
-      { at: 0.5, eye: [120, 7, 26], look: 'ship' },
+      { at: 0.0, eye: [46, 11, -46], look: 'ship' },
+      { at: 0.5, eye: [104, 13, -4], look: 'ship' },
     ],
   },
   {
-    // Crane astern and up, then run for the island.
+    // Climb away from the hull and run for the island.
     //
-    // The whole leg is 1.4 km in 20 s — about 70 m/s, which is fast for a camera
-    // move and is the price of the tour visiting the island at all. The distance
-    // is not negotiable: `ISLAND` is 1.39 km from the play area, and a 120 s loop
-    // that goes there and comes back spends nearly forty of those seconds in
-    // transit however it is cut. Framing it as a climb keeps the ship in shot for
-    // the first third and hands the frame to the landmass for the rest, so the
-    // speed reads as an establishing move rather than as a rush.
+    // The frame changes hands here, and the handover is staged rather than cut:
+    // the first key is still on the hull, the second aims at a point a third of
+    // the way out, and only the third takes the island itself. Aiming straight
+    // from a subject 60 m away to one 1.4 km away is what put a 55°/s swing in
+    // the first cut of this beat — the look point has to travel the whole
+    // distance between them, and the closer of the two decides how fast that
+    // reads.
     name: 'outbound',
-    duration: 20,
-    throttle: 0.85,
+    duration: 14,
+    throttle: 0.8,
     keys: [
-      { at: 0.0, eye: [66, 22, 96], look: 'ship' },
-      { at: 0.35, eye: [-180, 92, -40], look: ISLAND_LOOK },
-      { at: 0.72, eye: [-620, 150, -378], look: ISLAND_LOOK },
+      { at: 0.0, eye: [118, 16, 58], look: 'ship' },
+      { at: 0.29, eye: [34, 32, 6], look: [-380, 28, -280] },
+      { at: 0.57, eye: [-78, 60, -64], look: ISLAND_LOOK },
+      // 0.78 rather than the 0.86 this sat at first. The tail of a beat is a
+      // span like any other, and leaving 2 s of it to cover the distance into
+      // the next beat's opening key put 81 m/s² through the join — the same
+      // short-span-long-chord mistake that gave the previous flight its 300 m/s
+      // lurch, in miniature. Evening the spans took it to 35.
+      { at: 0.78, eye: [-172, 90, -126], look: [ISLAND.x, 66, ISLAND.z] },
     ],
   },
   {
-    // The island's near shore, composed around its two landmarks rather than
-    // around its centre.
+    // Across the island's face, held at half a kilometre off the beach.
     //
-    // This beat is the reason the tour was re-authored. Every key in the previous
-    // flight sat within 420 m of the origin: the island was never closer than
-    // 1.7 km and appeared only as a shape on the horizon in one wide, so the cove,
-    // the jetty, the beached pinnace and the fort — the whole of the scene's
-    // authored set dressing — were in a tour that never once looked at them.
+    // The wide turn at the far end of the circuit, and the beat that shows the
+    // landmass: 1084 m from its centre throughout, where the island subtends
+    // about fifty degrees and its whole silhouette — headland, bay, canopy band,
+    // bare summit — is inside one frame. Flying *along* it rather than at it is
+    // what gives the parallax that separates the headland from the hill behind
+    // it; a beat that only closed the distance would show the same picture
+    // getting bigger.
     //
-    // 55 to 75 m of altitude, which is under the 150 m summit: the shore reads
-    // as a coastline flown *along* rather than a map looked down at, and the
-    // crown stays above the lens where it belongs.
+    // 82 to 104 m of altitude, under the 150 m summit, so the crown stays above
+    // the lens where it belongs.
     name: 'landfall',
-    duration: 26,
-    throttle: 0.45,
+    duration: 10,
+    throttle: 0.55,
     keys: [
-      { at: 0.0, eye: [-640, 96, -300], look: [COVE[0] + 30, 18, COVE[1] + 10] },
-      { at: 0.36, eye: [-812, 58, -318], look: [COVE[0], 6, COVE[1] - 18] },
-      { at: 0.7, eye: [-1044, 72, -322], look: [FORT[0], 38, FORT[1]] },
+      { at: 0.0, eye: [-248, 104, -176], look: ISLAND_LOOK },
+      { at: 0.4, eye: [-282, 100, -84], look: [-1120, 52, -700] },
+      { at: 0.8, eye: [-286, 92, 14], look: [-1080, 46, -620] },
     ],
   },
   {
-    // Into the surf zone, at the end of the island leg and before the run home.
+    // Back toward the plateau, descending, with the weather making up behind.
     //
-    // The shore break is one of this scene's headline features — depth-driven
-    // breaking foam, a swash band, wet sand, rock crossing the waterline — and
-    // the previous flight never came below 55 m, so the whole of it was a few
-    // pixels of white in a wide. This beat is the only one that flies low enough
-    // to see it.
+    // The slowest beat on the lap by some way — 13 m/s against a median of 22 —
+    // and that is deliberate: it sits between the two widest turns, so the
+    // lateral acceleration it would otherwise carry is exactly where a viewer
+    // would feel the circuit as a circuit rather than as a flight.
+    name: 'return',
+    duration: 8,
+    throttle: 0.55,
+    keys: [
+      { at: 0.0, eye: [-272, 82, 58], look: [-1040, 40, -560] },
+      { at: 0.5, eye: [-236, 60, 116], look: [-620, 22, -320] },
+    ],
+  },
+  {
+    // Weather, over open water, after dark — and the night watch, in one beat.
     //
-    // 9 to 30 m on the cove's bearing, angled *along* the beach rather than
-    // square at it, so the surf line runs across the frame instead of lying as a
-    // horizontal band. Cleared rather than clamped against the ground, for the
-    // reason the underwater keys are: a clamp is a non-smooth term and the one
-    // thing this curve must never develop is a corner.
-    name: 'surf-line',
+    // The previous flight spent twenty seconds on the squall and fourteen more
+    // on a separate night beat. At sixty seconds there is no room for both, and
+    // they want the same conditions anyway: the tour's day has the sun below the
+    // horizon across this whole stretch, so the second key frames the hull under
+    // rain at 01:00 and covers what the night watch used to. Moon glitter, the
+    // star field, a wet hull and rain on the lens are all in the same shot.
+    //
+    // Low and level. A squall read from above is a grey frame; read from twenty
+    // metres with the swell running past the lens it is weather.
+    name: 'squall',
+    duration: 8,
+    throttle: 0.35,
+    keys: [
+      { at: 0.0, eye: [-198, 42, 110], look: [-300, 14, -140] },
+      { at: 0.5, eye: [-186, 24, 32], look: 'ship' },
+    ],
+  },
+  {
+    // Down through the surface, along the reef, and up onto the opening mark.
+    //
+    // The route is a line drawn between the places the reef actually is, not a
+    // shape chosen for the camera: `reefPatches` puts a patch at (−97, −102) and
+    // this runs *past* it, roughly level with the fish, which mill some three
+    // metres off a floor near −16.5.
+    //
+    // Past it, not over it, and the distinction is the whole shot. The first cut
+    // of this beat put a key at (−88, −98) — eleven metres from the patch, which
+    // sounded like the right answer and photographed open sand, because the
+    // coral was directly beneath the lens while the look target was eighty
+    // metres ahead. A camera *on* a subject cannot frame it. The keys now pass
+    // some thirty metres to seaward with the look leading along the run, so the
+    // patch comes up in the middle of frame and goes by.
+    //
+    // It is also routed *clear of the hull*. The ship closes its own circuit at
+    // the end of the lap, which brings it back through the origin on very nearly
+    // this heading — the first cut of this beat ran straight down the hull's
+    // track and passed 22 m from it, which collapsed the look reach and put a
+    // 783°/s whip in the ascent. Offsetting the run to seaward keeps 80 m of
+    // water between them.
+    //
+    // The last key hands the frame back to the hull while the camera is still
+    // rising and moving away from it — a pull-back rather than a turn — so the
+    // wrap arrives on the same composition `open-water` opens on. The spline
+    // makes the loop continuous; this is what makes it unwatchable as an edit.
+    name: 'reef-run',
     duration: 12,
     throttle: 0.25,
     keys: [
-      // Every eye sits *outside* the 500 m mean shore radius, and every look
-      // point just inside it. The first cut of this beat did not: its opening
-      // eye was 455 m from the island centre, which is 45 m inland, so the shot
-      // opened on a grey expanse of wet sand with the sea somewhere off to one
-      // side. Authored on bearings and radii for that reason — a beat about the
-      // waterline has to be positioned relative to the waterline.
-      { at: 0.0, eye: [-723, 26, -358], look: [-804, 4, -464] },
-      { at: 0.45, eye: [-731, 12, -427], look: [-767, 2, -507] },
-      { at: 0.78, eye: [-709, 9, -504], look: [-724, 3, -563] },
-    ],
-  },
-  {
-    // Back out to the plateau and down onto the water. The last key is at 9 m
-    // with the lens already tilted toward where the dive is going, so the descent
-    // that follows starts as a continuation of this move rather than as a new one.
-    name: 'return',
-    duration: 18,
-    throttle: 0.45,
-    keys: [
-      { at: 0.0, eye: [-1218, 88, -300], look: ISLAND_LOOK },
-      { at: 0.42, eye: [-702, 44, -262], look: [-260, 6, -150] },
-      { at: 0.76, eye: [-338, 9, -206], look: [-150, 4, -128] },
-    ],
-  },
-  {
-    // Weather, over open water, after dark.
-    //
-    // The one beat that exists for the sky rather than for anything in the sea:
-    // rain on the lens, the deck killing the key light, the whitecap deposit
-    // rate up, the hull darkening as it wets. All of it is driven from this same
-    // clock — see `CinematicEnvironment` — so it is as reproducible as the pose.
-    //
-    // Low and level. A squall read from above is a grey frame; read from fifteen
-    // metres with the swell running past the lens it is weather.
-    name: 'squall',
-    duration: 20,
-    throttle: 0.25,
-    keys: [
-      { at: 0.0, eye: [-300, 17, -190], look: [-160, 6, -120] },
-      { at: 0.4, eye: [-182, 12, -122], look: [-40, 5, -40] },
-      { at: 0.75, eye: [-64, 15, -42], look: [60, 6, 40] },
-    ],
-  },
-  {
-    // The middle of the night, with the ship.
-    //
-    // Moon glitter, the star field and a hull lit by nothing else — the whole
-    // night half of the atmosphere, which the previous flight never reached
-    // because its sun swing bottomed out at 08:18.
-    //
-    // Framed on the hull throughout, and that is what makes it a *watch* rather
-    // than a landscape: there is very little else legible at this hour, and a
-    // beat pointed at empty black water is indistinguishable from a renderer
-    // that has failed. The look targets resolve through `nominalShipXZ`, so they
-    // follow the hull wherever its circuit has taken it — about 230 m out at
-    // this point on the lap, still over the shallow plateau.
-    name: 'night-watch',
-    duration: 14,
-    throttle: 0.2,
-    keys: [
-      { at: 0.0, eye: [-40, 19, -28], look: 'ship' },
-      { at: 0.45, eye: [-92, 11, -62], look: 'ship' },
-      { at: 0.8, eye: [-152, 8, -12], look: 'ship' },
-    ],
-  },
-  {
-    // Through the surface and along the reef, threading two of its schools.
-    //
-    // The route is not a shape chosen for the camera; it is a line drawn between
-    // the places the reef actually is. `reefPatches` puts patches at (-97, -102)
-    // and (33, 31), `findReefStation` gives reef schools 8 and 1 those two, and
-    // this beat passes within fifteen metres of both. The flight it replaces ran
-    // at a radius of 221 to 312 m from the origin — outside the 245 m the coral
-    // reaches and well outside the 190 m the fish station within — so the whole
-    // underwater leg was a two-minute pan across empty sand. Nothing was broken;
-    // it was simply pointed at the one part of the plateau with nothing on it.
-    //
-    // 12 m/s, against the 7-15 the previous leg ran at, and low: -9.5 m over a
-    // floor near -16.5 puts the lens seven metres above the coral and roughly
-    // level with the fish, which mill about three metres off the bottom.
-    name: 'reef-run',
-    duration: 26,
-    throttle: 0.18,
-    keys: [
-      { at: 0.0, eye: [-206, -4.5, -142], look: [-130, -13, -118] },
-      { at: 0.34, eye: [-116, -10.5, -104], look: [-52, -15.5, -62] },
-      { at: 0.7, eye: [-12, -10.5, -18], look: [40, -15.5, 34] },
-    ],
-  },
-  {
-    // Up through the surface and back onto the opening mark, re-acquiring the
-    // hull on the way so the loop point arrives on a shot of the ship rather than
-    // on empty water. This beat exists to make the wrap *unwatchable* — the
-    // spline guarantees the motion is continuous, but continuity through a
-    // surprising composition still reads as an edit.
-    name: 'ascent',
-    duration: 16,
-    throttle: 0.35,
-    keys: [
-      { at: 0.0, eye: [48, -6.5, 46], look: [92, -4, 96] },
-      { at: 0.42, eye: [104, 12, 124], look: 'ship' },
-      { at: 0.74, eye: [74, 21, 162], look: 'ship' },
+      { at: 0.0, eye: [-196, 8, -40], look: [-160, -6, -92] },
+      { at: 0.25, eye: [-158, -9, -86], look: [-92, -14, -104] },
+      { at: 0.5, eye: [-100, -11, -104], look: [-24, -13, -88] },
+      { at: 0.75, eye: [-14, -7, -84], look: 'ship' },
     ],
   },
 ];
@@ -480,10 +482,21 @@ const TOTAL_ARC =
  *
  * Not a tuning knob — it is the radius at which one lap of arc is exactly one
  * revolution, which is the whole reason the circuit closes. At the durations and
- * throttles above it comes out at 161.5 m, or six hull lengths: a lazy sweep
- * rather than a hull doing donuts. The lap reaches 323 m from the origin at its
- * far point, which puts the ship over the shallow plateau — turquoise water with
- * the reef under it — right out to that plateau's 320 m edge and no further.
+ * throttles above it comes out at 68 m, and the lap reaches 137 m from the
+ * origin at its far point: well inside the shallow plateau's 320 m edge, so the
+ * hull stays over turquoise water with the reef under it for the entire flight.
+ *
+ * It shrank from 161 m when the lap went from 166 s to 60. That is arithmetic
+ * rather than a choice — a hull doing 7 m/s can only enclose so much water in a
+ * minute — and it is worth knowing that it *cannot* be opened back out: at full
+ * throttle throughout, a 60 s circuit tops out near 92 m. What it costs is that
+ * the ship is visibly under helm rather than making a lazy sweep. 137 m of
+ * tactical diameter is five hull lengths, which is what a 27 m vessel actually
+ * turns in, so it reads as a ship being handled and not as one doing donuts.
+ *
+ * The rudder orders it implies are checked, not assumed: `BEAT_RUDDER` clamps at
+ * 1, and a clamp there would quietly stop the circuit closing. The tightest beat
+ * asks for 0.66.
  */
 const TRACK_RADIUS = TOTAL_ARC / (2 * Math.PI);
 
