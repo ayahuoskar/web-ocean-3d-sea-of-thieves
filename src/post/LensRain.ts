@@ -1,5 +1,20 @@
 import * as THREE from 'three/webgpu';
-import { Fn, If, float, mix, pow, screenSize, uniform, uv, vec2, vec3, vec4 } from 'three/tsl';
+import {
+  Fn,
+  If,
+  Loop,
+  cos,
+  float,
+  mix,
+  pow,
+  screenSize,
+  sin,
+  uniform,
+  uv,
+  vec2,
+  vec3,
+  vec4,
+} from 'three/tsl';
 import { smoothstepDown } from '../core/tslMath';
 
 /**
@@ -65,7 +80,14 @@ export interface LensRainParams {
   lensDepth: number;
   /** Misting on the glass between the droplets, 0..1. */
   fog: number;
-  /** Radius of the mist blur, in screen heights. */
+  /**
+   * Radius of the glass gather at the top tier, in screen heights.
+   *
+   * **Read this together with `GLASS_TAPS`.** A radius is only meaningful next
+   * to the number of samples spread over it: the two together set the tap
+   * density, and it is density — not strength — that decides whether the result
+   * reads as a blur or as a handful of copies of the image. See `GLASS_TAPS`.
+   */
   fogRadius: number;
   /**
    * How far the wet glass defocuses the world *outside* the droplets, 0..1.
@@ -101,7 +123,10 @@ export interface LensRainParams {
 export const DEFAULT_LENS_RAIN_PARAMS: LensRainParams = {
   lensDepth: 6.5,
   fog: 0.32,
-  fogRadius: 0.012,
+  // 0.005 of a screen height — about 4.5 px at 900 lines, which is what
+  // `GLASS_TAPS` samples can actually resolve. It was 0.012, a radius nothing in
+  // this file had the taps to fill.
+  fogRadius: 0.005,
   backdropBlur: 0.7,
   dispersion: 0.05,
   glint: 0.55,
@@ -176,6 +201,44 @@ const TRAIL_SLOPE = 0.75;
 /** How much of a trail's width the beading modulates, peak to peak. */
 const BEAD_DEPTH = 0.6;
 
+/**
+ * Taps in the glass gather, and the reason the number matters as much as the
+ * radius does.
+ *
+ * This gather was eight samples on two fixed rings spanning a radius of 0.012
+ * screen heights — about eleven pixels at 900 lines. Eight samples cannot
+ * band-limit eleven pixels: each one lands far enough from its neighbours to
+ * stay individually visible, so what the frame showed was not a defocused image
+ * but eight superimposed copies of it. Against thin high-contrast geometry —
+ * rigging, masts, the island's edge — that read as smearing and ghosting, and
+ * it is what made the storm preset look broken.
+ *
+ * The controlling measurement, at a fixed weight of 0.7 and unchanged
+ * everything else: at radius 0.012 the rigging ghosts badly, at 0.006 it still
+ * ghosts, and at 0.003 it is clean. The strength was never the problem; the
+ * sampling was.
+ *
+ * `DepthOfField` already states the rule this file was breaking — sample density
+ * over a disc goes as `N / (pi r^2)`, so a radius chosen without reference to
+ * the tap count "would start to read as individual samples rather than as a
+ * defocused image". That is exactly what happened here. So the gather is now the
+ * same sunflower spiral the depth of field uses, and `applyParams` scales the
+ * radius with `sqrt(N)` so density stays fixed as the tier changes the count.
+ *
+ * Sixteen taps over ~4.5 px puts roughly two pixels between neighbours, which is
+ * where a gather stops having visible structure.
+ */
+const GLASS_TAPS = 16;
+/** The middle tier's count. Radius follows it down; see `applyParams`. */
+const GLASS_TAPS_MID = 10;
+
+/**
+ * Golden angle, for the sunflower spiral. The same constant `DepthOfField`
+ * uses, and for the same reason: it is the most uniform disc packing available
+ * without a lookup table.
+ */
+const GOLDEN_ANGLE = 2.39996323;
+
 /** Softness of a droplet rim, as a fraction of its radius. */
 const RIM_SOFT = 0.22;
 
@@ -197,6 +260,66 @@ const CLOCK_WRAP = 3600;
 /** Seconds the gravity direction takes to follow a change in wind or tilt. */
 const GRAVITY_TAU = 0.9;
 
+/**
+ * The film of water a submerged lens carries, and how it behaves — a separate
+ * quantity from rain, and separate for three reasons the previous single scalar
+ * got wrong.
+ *
+ * It used to be the rain coverage itself, snapped to 1 whenever `submersion`
+ * fell from above 0.5 to below 0.05 between two consecutive updates. Every part
+ * of that was wrong:
+ *
+ *   - **The test almost never fired.** Crossing from 0.5 to 0.05 is 0.315 m of a
+ *     0.7 m band, so it needed 19 m/s of vertical motion to happen inside one
+ *     frame at 60 Hz. Measured: a camera lifted clear at 10.5 m/s left the lens
+ *     completely dry. What *did* satisfy it was a teleport — which is to say a
+ *     camera cut, which is the one time there is no water.
+ *   - **Full rain coverage is not what a dive leaves.** It put a storm's whole
+ *     droplet population on the glass, on a cloudless day, from one dunk.
+ *   - **And then dried it as rain.** `dryTime` is 7.5 s: still visibly wet after
+ *     15, clear only after 30.
+ *
+ * A film charges while the lens is under and drains when it is out, with no edge
+ * test anywhere, so a slow swim up and a wave over the lens both do the obvious
+ * thing and a cut does nothing.
+ */
+/** Seconds for immersion to load the front element. Short: it is instant. */
+const FILM_WET_TAU = 0.14;
+/**
+ * Seconds for it to drain in air.
+ *
+ * Draining, not evaporating — which is the whole difference from `dryTime`.
+ * Water runs off a vertical surface in about a second, leaving a scatter of
+ * pinned beads behind it; it does not sit there for half a minute.
+ */
+const FILM_DRAIN_TAU = 0.85;
+/**
+ * Droplet coverage at a fully loaded film, as a fraction of the storm maximum.
+ *
+ * Below 1 on purpose. Surfacing leaves a scatter of large drops and a few
+ * runners, not the four-lattice downpour that coverage 1 asks for.
+ */
+const FILM_COVERAGE = 0.7;
+/**
+ * How much of the glass treatment — the misting and the backdrop defocus — a
+ * loaded film asks for, as a fraction of what the same coverage of rain asks
+ * for.
+ *
+ * **This is the number that fixes the picture**, and it is low because the
+ * defocus is what was destroying the frame rather than the droplets. Attributed
+ * by capture: with the defocus alone at storm weight the surfacing frame is
+ * ghosted and milky, and with it off the same frame is sharp and correctly
+ * coloured with water on the lens. Nine taps on a ring of 0.012 screen heights
+ * are nine ghosts, not a blur, once 70% of the pixel is coming from them, and in
+ * linear space they smear the sun's glitter over everything before the tone
+ * curve ever sees it.
+ *
+ * Not zero: a lens that has just broken the surface genuinely is not focusing,
+ * and a beat of softness that clears as the water runs off is the effect. It is
+ * brief because the film is.
+ */
+const FILM_GLASS = 0.3;
+
 export class LensRain {
   private readonly params: LensRainParams;
 
@@ -205,7 +328,8 @@ export class LensRain {
   /** Smoothed coverage. Rises on `wetTime`, falls on the much longer `dryTime`. */
   private wetness = 0;
   private submersion = 0;
-  private previousSubmersion = 0;
+  /** Water carried out of the sea on the front element, 0..1. See `FILM_*`. */
+  private film = 0;
   private quality = 3;
   private disposed = false;
 
@@ -214,8 +338,17 @@ export class LensRain {
   private gravityMagnitudeTarget = 1;
 
   // --- master ---------------------------------------------------------------
-  /** Effective coverage after drying, submersion and the tier policy. */
+  /** Effective droplet coverage after drying, submersion and the tier policy. */
   private readonly uAmount = uniform(0);
+  /**
+   * Weight on the *glass* — the misting and the backdrop defocus — as opposed to
+   * on the droplets.
+   *
+   * Equal to `uAmount` for rain, and well below it for a film carried out of the
+   * water. The two used to be one uniform, which is what made a dive look like a
+   * squall: see `FILM_GLASS`.
+   */
+  private readonly uGlass = uniform(0);
   private readonly uClock = uniform(0);
   /** Unit "down" on the glass, in the square screen metric. */
   private readonly uGravity = uniform(new THREE.Vector2(0, -1));
@@ -229,7 +362,23 @@ export class LensRain {
 
   // --- glass ----------------------------------------------------------------
   private readonly uFog = uniform(0);
+  /**
+   * The *derived* gather radius, not the authored one.
+   *
+   * `applyParams` scales `params.fogRadius` by `sqrt(taps / GLASS_TAPS)` before
+   * writing it here, so tap density stays constant as the tier changes the count.
+   * The same authored-versus-derived split `uRollRadius` already uses.
+   */
   private readonly uFogRadius = uniform(DEFAULT_LENS_RAIN_PARAMS.fogRadius);
+  /**
+   * Tap count, twice — `Loop` needs an integer node for its bound and the
+   * spiral's `sqrt(i / n)` needs the same number as a float. Both are uniforms
+   * rather than one being derived in the shader, because this changes only on a
+   * tier change and converting per fragment would be a cost paid every frame for
+   * a value that almost never moves. `DepthOfField` carries the identical pair.
+   */
+  private readonly uGlassSampleCount: any = uniform(0, 'int');
+  private readonly uGlassSamples = uniform(0);
   private readonly uBackdropBlur = uniform(0);
   private readonly uDispersion = uniform(0);
 
@@ -555,7 +704,7 @@ export class LensRain {
         // the droplets themselves, because a drop is clear — it is the glass
         // around it that is fogged, and a runner wipes its own path clean.
         const mist = this.uFog
-          .mul(this.uAmount)
+          .mul(this.uGlass)
           .mul(clump.smoothstep(0.2, 0.8))
           .mul(cover.oneMinus())
           .clamp(0, 1)
@@ -579,43 +728,55 @@ export class LensRain {
         // squall and absent in clean rain, while this is a property of there
         // being water on the element at all.
         const backdrop = this.uBackdropBlur
-          .mul(this.uAmount)
+          .mul(this.uGlass)
           .mul(cover.oneMinus())
           .clamp(0, 1)
           .toVar('lrBackdrop');
 
         const softWeight = mist.max(backdrop).toVar('lrSoftW');
 
-        // Two rings rather than one. The single four-tap ring this replaces was
-        // sized for a haze mixed in at low weight; carrying a real defocus it
-        // reads as four ghosts of the image rather than as a blur, because four
-        // samples on a circle *are* four ghosts once the weight is high enough to
-        // see them. The second ring at 0.45 of the radius fills the middle of the
-        // kernel, which is what turns it into something with a peak.
+        // A sunflower spiral, not a pair of rings. See `GLASS_TAPS` for the
+        // measurement that forced this: fixed rings put their samples far enough
+        // apart to stay individually visible, and what the storm preset showed
+        // was eight copies of the image rather than one blurred one.
+        //
+        // `sqrt((i + 0.5) / n)` for the radius rather than `(i + 0.5) / n`,
+        // because a disc's area grows as the square of its radius — a linear
+        // radius clusters every tap near the centre and leaves the rim
+        // under-sampled, which is the same failure in a different place.
+        //
+        // The quadratic falloff gives the kernel a peak instead of a flat disc.
+        // A box blur of a bright highlight is a bright disc, and this frame is
+        // full of specular highlights on water.
         //
         // **The branch is on the uniforms, not on `softWeight`.** `softWeight` is
         // per-pixel — it carries the clumping field and the droplet coverage —
-        // and eight texture reads inside a non-uniform branch is exactly what the
-        // note at the top of this file says must never happen: WGSL's uniformity
-        // analysis rejects it and GLSL's implicit derivatives are undefined
-        // there. Gating on whether the *effect* is on and then weighting the
-        // result per pixel gives the same image with a coherent branch.
+        // and a loop of texture reads inside a non-uniform branch is exactly what
+        // the note at the top of this file says must never happen: WGSL's
+        // uniformity analysis rejects it and GLSL's implicit derivatives are
+        // undefined there. Gating on whether the *effect* is on and then
+        // weighting the result per pixel gives the same image with a coherent
+        // branch.
         const soft = vec3(src.rgb).toVar('lrSoft');
         If(this.uFog.add(this.uBackdropBlur).greaterThan(0.0001), () => {
-          const r = vec2(this.uFogRadius.div(aspect), this.uFogRadius).toVar();
-          const tap = (dx: number, dy: number): any =>
-            colorNode.sample(suv.add(r.mul(vec2(dx, dy))).clamp(UV_INSET, 1 - UV_INSET)).rgb;
-          const outer = tap(0.924, 0.383)
-            .add(tap(-0.383, 0.924))
-            .add(tap(-0.924, -0.383))
-            .add(tap(0.383, -0.924));
-          const inner = tap(0.318, 0.318)
-            .add(tap(-0.318, 0.318))
-            .add(tap(0.318, -0.318))
-            .add(tap(-0.318, -0.318));
-          // Centre weighted double, so the kernel has a peak instead of being a
-          // flat disc — a box blur of a bright highlight is a bright disc.
-          soft.assign(src.rgb.mul(2).add(inner.mul(1.4)).add(outer).div(7.6));
+          const r = vec2(this.uFogRadius.div(aspect), this.uFogRadius).toVar('lrR');
+          // The centre tap, at full weight. Already in hand, so it costs nothing.
+          const accum = vec3(src.rgb).toVar('lrAccum');
+          const weight = float(1).toVar('lrAccumW');
+
+          Loop(this.uGlassSampleCount, ({ i }: any) => {
+            const fi = float(i).toVar('lrI');
+            const theta = fi.mul(GOLDEN_ANGLE).toVar('lrTheta');
+            const t = fi.add(0.5).div(this.uGlassSamples).sqrt().toVar('lrT');
+            const offset = vec2(cos(theta), sin(theta)).mul(t).mul(r).toVar('lrOff');
+            const w = t.mul(t).mul(0.8).oneMinus().toVar('lrTapW');
+            accum.addAssign(
+              colorNode.sample(suv.add(offset).clamp(UV_INSET, 1 - UV_INSET)).rgb.mul(w),
+            );
+            weight.addAssign(w);
+          });
+
+          soft.assign(accum.div(weight.max(1e-4)));
         });
 
         const glass = mix(src.rgb, soft, softWeight).toVar('lrGlass');
@@ -764,13 +925,13 @@ export class LensRain {
     const tau = this.intensity > this.wetness ? this.params.wetTime : this.params.dryTime;
     this.wetness += (this.intensity - this.wetness) * (1 - Math.exp(-step / Math.max(0.01, tau)));
 
-    // Surfacing floods the lens. Detected as an edge rather than driven from the
-    // submersion value directly, so the flood happens once on the way out and
-    // then dries through the ordinary path — no extra state, no second system.
-    if (this.submersion < 0.05 && this.previousSubmersion > 0.5) {
-      this.wetness = 1;
-    }
-    this.previousSubmersion = this.submersion;
+    // The film the lens carries out of the sea. Charged by *being under the
+    // water* and drained by being out of it — a rate on both sides, with no edge
+    // test, which is what makes a slow swim up, a crest washing over the lens and
+    // a camera cut each do the obvious thing. `FILM_WET_TAU` documents what the
+    // edge test this replaces could and could not detect.
+    const filmTau = this.submersion > this.film ? FILM_WET_TAU : FILM_DRAIN_TAU;
+    this.film += (this.submersion - this.film) * (1 - Math.exp(-step / filmTau));
 
     const blend = 1 - Math.exp(-step / GRAVITY_TAU);
     const gravity = this.uGravity.value as THREE.Vector2;
@@ -802,30 +963,31 @@ export class LensRain {
     this.uClock.value = this.clock;
     this.wetness = this.intensity;
     /**
-     * Zero, not `this.submersion` — the edge detector is cleared rather than
-     * carried across.
+     * The film is dropped rather than carried across, because a reset is a
+     * *teleport* and no water crosses one.
      *
-     * A reset is a *teleport*, and the surfacing flood in `update` infers a
-     * continuous motion: it fires when submersion falls from above 0.5 to below
-     * 0.05, on the reasonable assumption that the only way to do that is to come
-     * up through the surface. Carrying the previous shot's submersion over a
-     * reset made a camera cut satisfy the same test. Cutting from the underwater
-     * shot to a clear-day one therefore flooded the lens to full coverage on the
-     * first settle step, and since the lens dries on a 26 s constant and a settle
-     * run is a second and a half, the clear-day frame was photographed through
-     * a screenful of droplets.
+     * This is the same hazard the edge detector this replaces had, and it is
+     * worth keeping the record of what it cost. That version fired when
+     * submersion fell from above 0.5 to below 0.05, on the reasonable assumption
+     * that the only way to do that is to come up through the surface — and a
+     * camera cut satisfied it exactly. Cutting from the underwater shot to a
+     * clear-day one flooded the lens to full coverage on the first settle step,
+     * and since it then dried on the rain constant while a settle run is a second
+     * and a half, the clear-day frame was photographed through a screenful of
+     * droplets. That is what the `island-approach` baseline looked like, being
+     * the shot that follows `underwater` in the list.
      *
-     * That is what it looked like in the `island-approach` baseline, which
-     * follows `underwater` in the shot list: a clear midday frame photographed
-     * through a wet lens.
+     * The rate-based film cannot fire on a cut at all — there is no edge to
+     * detect — but it *can* still be carried over one if it is not cleared here,
+     * which is the half of the bug that survives the redesign.
      *
      * It is *not* what `tests/isolation.spec.ts` measures, which was worth
      * checking rather than assuming — that test goes storm to clear-day with
-     * nothing submerged in between, and its figure is unmoved by this fix
-     * (1.598 before, 1.595 after). Its residual is sea state surviving the
-     * reset, which is a separate leak and still open.
+     * nothing submerged in between, and its figure was unmoved (1.598 before,
+     * 1.595 after). Its residual is sea state surviving the reset, which is a
+     * separate leak and still open.
      */
-    this.previousSubmersion = 0;
+    this.film = 0;
 
     const gravity = this.uGravity.value as THREE.Vector2;
     gravity.copy(this.gravityTarget);
@@ -848,17 +1010,50 @@ export class LensRain {
   // -------------------------------------------------------------------------
 
   /**
-   * The master uniform, and the only thing the shader is told about rain rate,
-   * drying, submersion or tier.
+   * The two master uniforms, and between them the only thing the shader is told
+   * about rain rate, drying, immersion or tier.
    *
-   * Underwater the lens is not in air and there is nothing on it to bead, so the
-   * effect fades out over the first half of the crossing. Faded rather than cut:
-   * a hull rolling through the waterline crosses `submersion` several times a
-   * second and a hard switch would strobe.
+   * They are two rather than one because the water on a lens and the *state of
+   * the lens* are not the same quantity. Rain moves both together. A film
+   * carried out of the sea puts drops on the glass without asking for a squall's
+   * worth of misting and defocus behind them, which is what `FILM_GLASS` sets
+   * and what stops a dive on a clear day reading as weather.
+   *
+   * Underwater the lens is not in air and there is nothing on it to bead, so both
+   * fade out over the first half of the crossing. Faded rather than cut: a hull
+   * rolling through the waterline crosses `submersion` several times a second and
+   * a hard switch would strobe.
    */
   private applyAmount(): void {
+    if (this.quality === 0) {
+      this.uAmount.value = 0;
+      this.uGlass.value = 0;
+      return;
+    }
+
+    // Two gates, because rain and a film need different amounts of daylight.
+    //
+    // Rain only needs the lens to be *mostly* out of the water — drops are
+    // landing on it from above and the moment it clears they are there.
     const emerged = 1 - smoothstepNumber(this.submersion, 0.12, 0.45);
-    this.uAmount.value = this.quality === 0 ? 0 : Math.max(0, this.wetness) * emerged;
+    // A film needs it *properly* clear, and the waterline shot is exactly where
+    // the difference shows. An eye eight centimetres under with crests washing
+    // over it sits at `submersion` around 0.47, dipping below 0.45 as each one
+    // passes — enough for the looser gate to open. What that produced was a
+    // half-submerged frame beaded from top to bottom, including over the half
+    // that is under the water, where there is no air for a drop to bead against.
+    // Water cannot drain off a lens that is still in the sea.
+    const clear = 1 - smoothstepNumber(this.submersion, 0.02, 0.16);
+
+    const rain = Math.max(0, this.wetness);
+    // Whichever of the two has more water on the glass wins, rather than the two
+    // summing: rain falling on a lens that is already wet from a dive does not
+    // make it wetter than either, and adding them would push a surfacing frame in
+    // a squall past the coverage the lattices are tuned for. Each is gated by its
+    // own emergence before the comparison, not after — they are different
+    // quantities and the looser gate must not carry the stricter one.
+    this.uAmount.value = Math.max(rain * emerged, this.film * FILM_COVERAGE * clear);
+    this.uGlass.value = Math.max(rain * emerged, this.film * FILM_GLASS * clear);
   }
 
   private applyParams(): void {
@@ -868,7 +1063,19 @@ export class LensRain {
     this.uLensDepth.value = Math.max(0, p.lensDepth);
     this.uCapSlope.value = clampNumber(p.capSlope, 0.05, 0.98);
     this.uClump.value = clampNumber(p.clump, 0, 0.95);
-    this.uFogRadius.value = Math.max(0, p.fogRadius);
+
+    // Tap count from the tier, and the radius derived from the tap count.
+    //
+    // The second half is the part that was missing. Sample density over a disc
+    // is `N / (pi r^2)`, so holding density constant means `r` scales with
+    // `sqrt(N)`. Handing a lower tier the same radius on fewer taps does not buy
+    // a cheaper blur, it buys a visibly broken one — which is the defect this
+    // whole gather was rewritten to fix, and it would have come straight back at
+    // the middle tier if only the count moved.
+    const taps = tier >= 3 ? GLASS_TAPS : tier >= 2 ? GLASS_TAPS_MID : 0;
+    this.uGlassSamples.value = taps;
+    this.uGlassSampleCount.value = taps;
+    this.uFogRadius.value = Math.max(0, p.fogRadius) * Math.sqrt(taps / GLASS_TAPS);
     this.uGlint.value = Math.max(0, p.glint);
     this.uGlintPower.value = Math.max(1, p.glintPower);
     (this.uGlintColor.value as THREE.Color).copy(p.glintColor);
