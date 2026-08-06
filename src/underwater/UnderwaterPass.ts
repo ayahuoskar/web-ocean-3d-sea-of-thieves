@@ -516,6 +516,16 @@ export class UnderwaterPass {
         // received half the treatment it had just finished computing the full
         // amount of. The path length is the whole answer; the eye's own depth is
         // already in it, through `eyeH`.
+        //
+        // The one depth-derived quantity that deliberately stays on the
+        // *undisplaced* pixel, now that the transmission and the shaft march both
+        // follow the refractive warp below. It has to: it scales the warp, so
+        // deriving it from the warped sample would be circular. It also does not
+        // need to — `1 - exp(-1.4 d)` has saturated to 1 by three metres of
+        // water, so a fish and the fifty metres of sea behind it hand back the
+        // same value and this term carries no silhouette edge for the warp to
+        // pull out of register. Which is exactly why the two terms that do carry
+        // one were the two that broke.
         const pixelSubmersion = float(1)
           .sub(waterPath.mul(-1.4).exp())
           .clamp(0, 1)
@@ -569,12 +579,44 @@ export class UnderwaterPass {
           .toVar('uwPull');
         warp.addAssign(pullDir.mul(meniscus.mul(this.uMeniscusPull)));
 
-        const warped = colorNode
-          .sample(suv.add(warp).clamp(vec2(0.001, 0.001), vec2(0.999, 0.999)))
-          .toVar('uwWarped');
+        const warpedUv = suv
+          .add(warp)
+          .clamp(vec2(0.001, 0.001), vec2(0.999, 0.999))
+          .toVar('uwWarpedUv');
+        const warped = colorNode.sample(warpedUv).toVar('uwWarped');
 
         // --- 2. transmission --------------------------------------------------
-        const transmit = exp(this.uSigma.mul(waterPath.negate())).toVar('uwT');
+        //
+        // Along the ray the colour was actually fetched from, not along this
+        // pixel's own. Fogging a displaced sample with the *undisplaced* pixel's
+        // water path dissolves anything narrower than the displacement, and it
+        // does it in the most alarming way available: a 0.42 m fish eleven metres
+        // out has a short path and therefore almost no fog, so its silhouette was
+        // filled with distant background colour and then barely attenuated —
+        // arriving as a pale, flat, faintly glowing patch exactly where the fish
+        // was. The fish's own colour landed on background pixels whose path is
+        // fifty metres, where the transmittance term annihilated it. Kelp blades
+        // went the same way, and on a moving camera they shimmered, because the
+        // warp evolves.
+        //
+        // At 0.012 uv and the +-1.5 the crossed sines reach, the displacement is
+        // 0.018 uv — 23 px across a 1280-wide frame, against a body the
+        // `reef-dive` shot sizes at thirty. Anything wider than the displacement
+        // was unharmed, which is why the coral heads and the seafloor looked
+        // right and only the two thin things in the scene did not.
+        //
+        // Only the depth is re-fetched. The ray *geometry* — heading, the
+        // crossing distance, the axial cosine, which side of the surface the eye
+        // is on — is smooth in uv, and 0.018 uv is about a degree of a 55-degree
+        // field, so re-solving it (and the wave-height refinement inside it)
+        // would buy a correction far below the term it corrects. Depth is the one
+        // quantity here with discontinuities in it, so depth is the one worth
+        // sampling twice.
+        const warpedDist = viewDistance(warpedUv).div(axialCos).toVar('uwDistW');
+        const warpedStart = mix(warpedDist.min(enters), float(0), eyeUnder).toVar('uwStartW');
+        const warpedEnd = mix(warpedDist, warpedDist.min(leaves), eyeUnder).toVar('uwEndW');
+        const warpedPath = warpedEnd.sub(warpedStart).max(0).toVar('uwPathW');
+        const transmit = exp(this.uSigma.mul(warpedPath.negate())).toVar('uwT');
 
         // How much daylight is left at the camera's own depth. Drives both the
         // inscatter brightness and the shaft brightness, so diving gets darker.
@@ -630,17 +672,29 @@ export class UnderwaterPass {
           // reason the god rays never converged on the sun.
           const worldDir = worldRay;
 
-          // `dist` is already along this pixel's ray — see the transmission term
-          // above, which now makes the same correction rather than leaving the
-          // two describing different path lengths.
+          // Bounded by the **refracted** segment, the same one the transmission
+          // term uses, and for the same reason.
+          //
+          // What ends the march is the geometry the ray runs into, so if the
+          // image of that geometry is displaced by the warp then the end of the
+          // march has to travel with it. Bounding the march at the undisplaced
+          // distance while the image moves leaves the shafts stopping short in a
+          // silhouette that is no longer there — which arrives as a dark, sharp
+          // copy of the fish offset from the fish, and a set of dark stripes
+          // beside the kelp rather than behind it. It is the same defect as the
+          // washed-out silhouette the transmission term had, in the one term that
+          // subtracts light instead of adding it, and it is more legible than the
+          // original because a shadow with nothing casting it reads immediately
+          // as wrong.
+          //
           // Shafts exist only in the submerged part of the ray, and that segment
         // does not necessarily start at the eye. From an eye above the surface
         // looking down, it starts where the ray enters the water — the march used
         // to begin at t = 0 regardless, so it spent its samples in the air above
         // the surface and stopped before reaching the water it was supposed to be
         // integrating.
-        const marchStart = submergedStart.toVar('uwMarchStart');
-        const march = min(waterPath, this.uShaftRange).toVar('uwMarch');
+        const marchStart = warpedStart.toVar('uwMarchStart');
+        const march = min(warpedPath, this.uShaftRange).toVar('uwMarch');
           const stepLength = march.mul(this.uInvSteps).toVar('uwStep');
 
           // Mip level matched to the march's own sampling rate.
