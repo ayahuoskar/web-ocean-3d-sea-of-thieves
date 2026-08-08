@@ -7,22 +7,18 @@ export type DirectorMode = CameraMode | 'cinematic';
 export type BoatView = 'deck' | 'chase';
 
 export interface CameraTarget {
-  /** World position of the ship's buoyancy-driven origin. */
   position: THREE.Vector3;
-  /** Heading in radians. Ship local +X is forward. */
   heading: number;
 }
 
 export interface CameraDirectorOptions {
   camera: THREE.PerspectiveCamera;
   domElement: HTMLElement;
-  /** Current rendered/sampled ocean height in world metres. */
   surfaceHeight: (x: number, z: number) => number;
 }
 
 const DEFAULT_FOCUS_DISTANCE = 400;
 
-// Third-person chase rig.
 const CHASE_DISTANCE = 34;
 const CHASE_HEIGHT = 14;
 const CHASE_DISTANCE_MIN = 12;
@@ -32,10 +28,6 @@ const CHASE_PITCH_MIN = -0.5;
 const CHASE_PITCH_MAX = 1.15;
 const CHASE_RECENTRE_TAU = 2.2;
 
-// Ocean Feel Lab deck rig.
-// The ship is 27 m long and local +X points toward the bow. Placing the eye a
-// few metres aft of centre gives a helm-like view while still keeping enough bow
-// and rigging in frame to make the hull motion readable.
 const DECK_EYE_FORWARD = -4.6;
 const DECK_EYE_HEIGHT = 4.35;
 const DECK_SAMPLE_FORWARD = 10.8;
@@ -49,7 +41,6 @@ const DECK_STABILIZATION_STEP = 0.05;
 const DECK_MIN_WATER_CLEARANCE = 0.8;
 const DECK_ROTATION_RESPONSE = 18;
 
-// Fly rig.
 const FLY_SPEED = 22;
 const FLY_SPEED_MIN = 1.5;
 const FLY_SPEED_MAX = 600;
@@ -59,19 +50,13 @@ const FLY_DAMPING = 6;
 const MOUSE_SENSITIVITY = 0.0022;
 
 /**
- * Owns the camera rigs and the transitions between them.
+ * Owns all camera rigs and the transitions between them.
  *
- * Boat mode now contains two views:
- *
- *  - Deck: first-person-ish helm view for judging the sea from the ship.
- *  - Chase: the original third-person orbiting follow camera.
- *
- * Deck mode deliberately derives its pitch and roll from the same ocean surface
- * the buoyancy system samples. That gives us a useful prototype without threading
- * a new ship quaternion through the whole app: a crest arriving at the bow raises
- * the forward sample before the stern sample, so the camera reads the same event
- * the hull is reacting to. The stabilization blend then lets us separate ship
- * motion from head motion, which is the key game-feel experiment.
+ * Boat mode contains two views. Deck is the Ocean Feel Lab view: the eye stays
+ * attached to the hull while pitch/roll are estimated from four ocean samples,
+ * mirroring the idea behind the ship's buoyancy probes. A stabilization blend
+ * then decides how much of that raw hull attitude reaches the player's head.
+ * Chase preserves the original third-person follow camera.
  */
 export class CameraDirector {
   readonly camera: THREE.PerspectiveCamera;
@@ -81,27 +66,22 @@ export class CameraDirector {
   private readonly domElement: HTMLElement;
   private readonly surfaceHeight: (x: number, z: number) => number;
 
-  // Shared input state.
   private readonly keys = new Set<string>();
   private pointerLocked = false;
 
-  // Fly state.
   private flySpeed = FLY_SPEED;
   private yaw = 0;
   private pitch = 0;
   private readonly flyVelocity = new THREE.Vector3();
 
-  // Boat state.
   private target: CameraTarget | null = null;
   private boatView: BoatView = 'deck';
   private boatDragging = false;
 
-  // Chase sub-rig.
   private chaseYaw = 0;
   private chasePitch = 0;
   private chaseDistance = CHASE_DISTANCE;
 
-  // Deck sub-rig.
   private deckLookYaw = 0;
   private deckLookPitch = 0;
   private deckStabilization = DECK_STABILIZATION_DEFAULT;
@@ -110,7 +90,6 @@ export class CameraDirector {
   private labHudAccumulator = 0;
   private readonly labHud: HTMLDivElement;
 
-  // Cinematic state.
   private readonly cinematic = new CinematicDirector();
   private readonly cinematicPose = {
     position: new THREE.Vector3(),
@@ -118,22 +97,18 @@ export class CameraDirector {
   };
   private readonly shipOrders: CinematicShipInput = { throttle: 0, rudder: 0 };
 
-  // Transition state.
   private transition = 0;
   private readonly fromPosition = new THREE.Vector3();
   private readonly fromQuaternion = new THREE.Quaternion();
   private static readonly TRANSITION_SECONDS = 0.85;
 
-  // Scratch. The frame path should not allocate.
   private readonly tmpVec = new THREE.Vector3();
   private readonly tmpVec2 = new THREE.Vector3();
-  private readonly tmpVec3 = new THREE.Vector3();
   private readonly tmpQuat = new THREE.Quaternion();
   private readonly tmpEuler = new THREE.Euler(0, 0, 0, 'YXZ');
   private readonly desiredPosition = new THREE.Vector3();
   private readonly desiredQuaternion = new THREE.Quaternion();
 
-  // Deck rig scratch.
   private readonly deckForward = new THREE.Vector3();
   private readonly deckRight = new THREE.Vector3();
   private readonly deckSurfaceForward = new THREE.Vector3();
@@ -175,12 +150,10 @@ export class CameraDirector {
     return this.mode;
   }
 
-  /** Current Boat sub-view, exposed so a later UI can bind to it directly. */
   get boatViewMode(): BoatView {
     return this.boatView;
   }
 
-  /** 0 = raw hull attitude, 1 = fully horizon-stabilized head. */
   get deckStabilizationValue(): number {
     return this.deckStabilization;
   }
@@ -208,9 +181,6 @@ export class CameraDirector {
       case 'cinematic':
         return Math.max(1, this.camera.position.distanceTo(this.cinematicPose.target));
       case 'boat':
-        // A deck view is about the wave field ahead, not the ship origin a few
-        // metres behind the lens. Keeping focus long also prevents the horizon
-        // from looking like miniature photography in DepthOfField.
         if (this.boatView === 'deck') return 180;
         return this.target
           ? Math.max(1, this.camera.position.distanceTo(this.target.position))
@@ -230,7 +200,6 @@ export class CameraDirector {
     this.target = target;
   }
 
-  /** Switch between the ocean-lab deck view and the original chase view. */
   setBoatView(view: BoatView): void {
     if (view === this.boatView) return;
     this.captureTransitionStart();
@@ -239,7 +208,6 @@ export class CameraDirector {
     this.updateLabHud(true);
   }
 
-  /** Set head/horizon stabilization directly, useful for a future slider. */
   setDeckStabilization(value: number): void {
     this.deckStabilization = THREE.MathUtils.clamp(value, 0, 1);
     this.updateLabHud(true);
@@ -281,12 +249,10 @@ export class CameraDirector {
 
   pin(position: THREE.Vector3, target: THREE.Vector3): void {
     this.transition = 0;
-
     this.camera.position.copy(position);
     this.tmpQuat.setFromRotationMatrix(lookAtMatrix(position, target, UP));
     this.camera.quaternion.copy(this.tmpQuat);
     this.camera.updateMatrixWorld(true);
-
     this.desiredPosition.copy(position);
     this.desiredQuaternion.copy(this.tmpQuat);
 
@@ -434,14 +400,6 @@ export class CameraDirector {
     }
   }
 
-  /**
-   * First-person-ish deck camera driven by the local wave plane.
-   *
-   * The buoyancy solver uses four probes. We intentionally mirror that idea
-   * here: forward/back samples produce pitch, port/starboard samples produce
-   * roll. The camera position stays welded to the ship's heave, while attitude
-   * is blended toward world-up by `deckStabilization`.
-   */
   private updateDeck(dt: number): void {
     const target = this.target;
     if (!target) {
@@ -454,7 +412,6 @@ export class CameraDirector {
     const cosH = Math.cos(heading);
     const sinH = Math.sin(heading);
 
-    // Ship local +X forward and +Z starboard in world space.
     this.deckForward.set(cosH, 0, sinH);
     this.deckRight.set(-sinH, 0, cosH);
 
@@ -483,25 +440,17 @@ export class CameraDirector {
     this.deckWavePitch = Math.atan(forwardSlope);
     this.deckWaveRoll = Math.atan(sideSlope);
 
-    // Approximate the deck plane normal. On flat water right x forward = +Y.
     this.deckSurfaceForward.copy(this.deckForward).setY(forwardSlope).normalize();
     this.deckSurfaceRight.copy(this.deckRight).setY(sideSlope).normalize();
-    this.deckShipUp
-      .crossVectors(this.deckSurfaceRight, this.deckSurfaceForward)
-      .normalize();
+    this.deckShipUp.crossVectors(this.deckSurfaceRight, this.deckSurfaceForward).normalize();
     if (this.deckShipUp.y < 0) this.deckShipUp.multiplyScalar(-1);
 
-    // The eye is attached to the hull rather than floating independently. The
-    // vertical correction is the amount an aft point on the rigid deck moves
-    // when the bow pitches up/down around the hull origin.
     this.desiredPosition
       .copy(target.position)
       .addScaledVector(this.deckForward, DECK_EYE_FORWARD)
       .addScaledVector(UP, DECK_EYE_HEIGHT);
     this.desiredPosition.y += DECK_EYE_FORWARD * forwardSlope;
 
-    // Keep the lens just clear of a crest while still allowing waves to tower
-    // over the rail and briefly fill the view.
     const eyeSurface = this.surfaceHeight(this.desiredPosition.x, this.desiredPosition.z);
     this.desiredPosition.y = Math.max(
       this.desiredPosition.y,
@@ -526,11 +475,7 @@ export class CameraDirector {
       .copy(this.desiredPosition)
       .addScaledVector(this.deckLookDirection, DECK_LOOK_DISTANCE);
 
-    // Blend the head's up axis toward world up. Position still follows the ship
-    // fully, so high stabilization does not make the player slide around the deck.
-    this.deckCameraUp
-      .lerpVectors(UP, this.deckShipUp, inherited)
-      .normalize();
+    this.deckCameraUp.lerpVectors(UP, this.deckShipUp, inherited).normalize();
 
     this.tmpQuat.setFromRotationMatrix(
       lookAtMatrix(this.desiredPosition, this.deckLookTarget, this.deckCameraUp),
@@ -538,9 +483,6 @@ export class CameraDirector {
     this.desiredQuaternion.copy(this.tmpQuat);
 
     if (this.transition === 0) {
-      // Translation is exact so the eye never visibly detaches from the deck.
-      // Only rotation is damped, which removes readback micro-jitter without
-      // turning a swell into camera lag.
       this.camera.position.copy(this.desiredPosition);
       const response = dt <= 0 ? 1 : 1 - Math.exp(-DECK_ROTATION_RESPONSE * dt);
       this.camera.quaternion.slerp(this.desiredQuaternion, response);
@@ -557,7 +499,6 @@ export class CameraDirector {
     const orders = this.cinematic.update(dt, this.cinematicPose);
     this.shipOrders.throttle = orders.throttle;
     this.shipOrders.rudder = orders.rudder;
-
     this.desiredPosition.copy(this.cinematicPose.position);
     this.tmpQuat.setFromRotationMatrix(
       lookAtMatrix(this.cinematicPose.position, this.cinematicPose.target, UP),
@@ -585,8 +526,6 @@ export class CameraDirector {
     this.shipOrders.rudder = 0;
     this.labHud.remove();
   }
-
-  // ------------------------------------------------------------------ input
 
   private onKeyDown = (event: KeyboardEvent): void => {
     if (isTypingTarget(event.target)) return;
@@ -671,8 +610,6 @@ export class CameraDirector {
       event.preventDefault();
 
       if (this.boatView === 'deck') {
-        // Wheel becomes a live game-feel dial in Deck mode. Scroll up for a
-        // steadier horizon, down for more raw hull attitude.
         const direction = event.deltaY > 0 ? -1 : 1;
         this.setDeckStabilization(
           this.deckStabilization + direction * DECK_STABILIZATION_STEP,
