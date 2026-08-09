@@ -1,7 +1,11 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { CameraMode } from '../ui/types';
-import { type CinematicEnvironment, CinematicDirector, type CinematicShipInput } from './Cinematic';
+import {
+  type CinematicEnvironment,
+  CinematicDirector,
+  type CinematicShipInput,
+} from './Cinematic';
 
 export type DirectorMode = CameraMode | 'cinematic';
 export type BoatView = 'deck' | 'chase';
@@ -28,18 +32,23 @@ const CHASE_PITCH_MIN = -0.5;
 const CHASE_PITCH_MAX = 1.15;
 const CHASE_RECENTRE_TAU = 2.2;
 
-const DECK_EYE_FORWARD = -4.6;
-const DECK_EYE_HEIGHT = 4.35;
+const DECK_EYE_HEIGHT = 3.75;
 const DECK_SAMPLE_FORWARD = 10.8;
 const DECK_SAMPLE_SIDE = 3.6;
-const DECK_LOOK_DISTANCE = 120;
-const DECK_MOUSE_SENSITIVITY = 0.0031;
-const DECK_PITCH_MIN = -1.15;
-const DECK_PITCH_MAX = 0.82;
-const DECK_STABILIZATION_DEFAULT = 0.55;
+const DECK_LOOK_DISTANCE = 140;
+const DECK_MOUSE_SENSITIVITY = 0.0023;
+const DECK_PITCH_MIN = -1.35;
+const DECK_PITCH_MAX = 1.05;
+const DECK_STABILIZATION_DEFAULT = 0.58;
 const DECK_STABILIZATION_STEP = 0.05;
-const DECK_MIN_WATER_CLEARANCE = 0.8;
-const DECK_ROTATION_RESPONSE = 18;
+const DECK_MIN_WATER_CLEARANCE = 0.72;
+const DECK_ROTATION_RESPONSE = 20;
+const DECK_WALK_SPEED = 3.25;
+const DECK_SPRINT_SPEED = 5.2;
+const DECK_FORWARD_MIN = -9.2;
+const DECK_FORWARD_MAX = 9.6;
+const DECK_SIDE_MAX = 2.9;
+const DECK_FOV = 76;
 
 const FLY_SPEED = 22;
 const FLY_SPEED_MIN = 1.5;
@@ -50,13 +59,14 @@ const FLY_DAMPING = 6;
 const MOUSE_SENSITIVITY = 0.0022;
 
 /**
- * Owns all camera rigs and the transitions between them.
+ * Camera director with an Ocean Feel Lab deck rig.
  *
- * Boat mode contains two views. Deck is the Ocean Feel Lab view: the eye stays
- * attached to the hull while pitch/roll are estimated from four ocean samples,
- * mirroring the idea behind the ship's buoyancy probes. A stabilization blend
- * then decides how much of that raw hull attitude reaches the player's head.
- * Chase preserves the original third-person follow camera.
+ * Deck mode is intentionally a lightweight character controller rather than a
+ * full collision engine. The player walks in the ship's local forward/right
+ * plane, is constrained to a hull-shaped footprint, and inherits the sampled
+ * local wave plane. That is enough to judge the thing this prototype cares
+ * about: whether a moving ship remains comfortable and convincing when you are
+ * free to walk around on it.
  */
 export class CameraDirector {
   readonly camera: THREE.PerspectiveCamera;
@@ -65,6 +75,7 @@ export class CameraDirector {
   private mode: DirectorMode = 'orbit';
   private readonly domElement: HTMLElement;
   private readonly surfaceHeight: (x: number, z: number) => number;
+  private readonly baseFov: number;
 
   private readonly keys = new Set<string>();
   private pointerLocked = false;
@@ -85,10 +96,13 @@ export class CameraDirector {
   private deckLookYaw = 0;
   private deckLookPitch = 0;
   private deckStabilization = DECK_STABILIZATION_DEFAULT;
+  private deckWalkForward = -4.6;
+  private deckWalkSide = 0;
   private deckWavePitch = 0;
   private deckWaveRoll = 0;
   private labHudAccumulator = 0;
   private readonly labHud: HTMLDivElement;
+  private readonly crosshair: HTMLDivElement;
 
   private readonly cinematic = new CinematicDirector();
   private readonly cinematicPose = {
@@ -124,6 +138,7 @@ export class CameraDirector {
     this.camera = options.camera;
     this.domElement = options.domElement;
     this.surfaceHeight = options.surfaceHeight;
+    this.baseFov = this.camera.fov;
 
     this.orbit = new OrbitControls(this.camera, this.domElement);
     this.orbit.enableDamping = true;
@@ -134,11 +149,13 @@ export class CameraDirector {
     this.orbit.maxPolarAngle = Math.PI;
 
     this.labHud = this.createLabHud();
+    this.crosshair = this.createCrosshair();
     this.updateLabHud(true);
 
     const { signal } = this.abort;
     window.addEventListener('keydown', this.onKeyDown, { signal });
     window.addEventListener('keyup', this.onKeyUp, { signal });
+    window.addEventListener('blur', this.releaseMovementKeys, { signal });
     this.domElement.addEventListener('mousedown', this.onMouseDown, { signal });
     document.addEventListener('pointerlockchange', this.onPointerLockChange, { signal });
     document.addEventListener('mousemove', this.onMouseMove, { signal });
@@ -181,7 +198,7 @@ export class CameraDirector {
       case 'cinematic':
         return Math.max(1, this.camera.position.distanceTo(this.cinematicPose.target));
       case 'boat':
-        if (this.boatView === 'deck') return 180;
+        if (this.boatView === 'deck') return 190;
         return this.target
           ? Math.max(1, this.camera.position.distanceTo(this.target.position))
           : DEFAULT_FOCUS_DISTANCE;
@@ -203,8 +220,10 @@ export class CameraDirector {
   setBoatView(view: BoatView): void {
     if (view === this.boatView) return;
     this.captureTransitionStart();
+    if (this.boatView === 'deck') this.exitPointerLock();
     this.boatView = view;
     this.boatDragging = false;
+    this.applyLensForMode();
     this.updateLabHud(true);
   }
 
@@ -218,7 +237,9 @@ export class CameraDirector {
 
     this.captureTransitionStart();
 
-    if (this.mode === 'fly') this.exitPointerLock();
+    if (this.mode === 'fly' || (this.mode === 'boat' && this.boatView === 'deck')) {
+      this.exitPointerLock();
+    }
     if (this.mode === 'cinematic') {
       this.cinematic.setEnabled(false);
       this.shipOrders.throttle = 0;
@@ -227,6 +248,7 @@ export class CameraDirector {
 
     this.mode = mode;
     this.boatDragging = false;
+    this.keys.clear();
 
     if (mode === 'orbit') {
       this.camera.getWorldDirection(this.tmpVec);
@@ -244,6 +266,7 @@ export class CameraDirector {
     if (mode === 'cinematic') this.cinematic.setEnabled(true);
 
     this.orbit.enabled = mode === 'orbit';
+    this.applyLensForMode();
     this.updateLabHud(true);
   }
 
@@ -256,20 +279,14 @@ export class CameraDirector {
     this.desiredPosition.copy(position);
     this.desiredQuaternion.copy(this.tmpQuat);
 
-    switch (this.mode) {
-      case 'orbit':
-        this.orbit.target.copy(target);
-        this.orbit.update();
-        break;
-      case 'fly':
-        this.tmpEuler.setFromQuaternion(this.tmpQuat);
-        this.yaw = this.tmpEuler.y;
-        this.pitch = this.tmpEuler.x;
-        this.flyVelocity.set(0, 0, 0);
-        break;
-      case 'boat':
-      case 'cinematic':
-        break;
+    if (this.mode === 'orbit') {
+      this.orbit.target.copy(target);
+      this.orbit.update();
+    } else if (this.mode === 'fly') {
+      this.tmpEuler.setFromQuaternion(this.tmpQuat);
+      this.yaw = this.tmpEuler.y;
+      this.pitch = this.tmpEuler.x;
+      this.flyVelocity.set(0, 0, 0);
     }
   }
 
@@ -328,7 +345,6 @@ export class CameraDirector {
 
     const forward = this.tmpVec.set(0, 0, -1).applyQuaternion(this.desiredQuaternion);
     const right = this.tmpVec2.set(1, 0, 0).applyQuaternion(this.desiredQuaternion);
-
     const boost = this.keys.has('shiftleft') || this.keys.has('shiftright') ? FLY_BOOST : 1;
     const speed = this.flySpeed * boost;
 
@@ -393,11 +409,7 @@ export class CameraDirector {
       this.camera.quaternion.slerp(this.desiredQuaternion, lag);
     }
 
-    this.labHudAccumulator += dt;
-    if (this.labHudAccumulator > 0.14) {
-      this.labHudAccumulator = 0;
-      this.updateLabHud(false);
-    }
+    this.tickLabHud(dt);
   }
 
   private updateDeck(dt: number): void {
@@ -411,13 +423,13 @@ export class CameraDirector {
     const heading = target.heading;
     const cosH = Math.cos(heading);
     const sinH = Math.sin(heading);
-
     this.deckForward.set(cosH, 0, sinH);
     this.deckRight.set(-sinH, 0, cosH);
 
+    this.updateDeckWalking(dt);
+
     const x = target.position.x;
     const z = target.position.z;
-
     const frontY = this.surfaceHeight(
       x + this.deckForward.x * DECK_SAMPLE_FORWARD,
       z + this.deckForward.z * DECK_SAMPLE_FORWARD,
@@ -447,9 +459,11 @@ export class CameraDirector {
 
     this.desiredPosition
       .copy(target.position)
-      .addScaledVector(this.deckForward, DECK_EYE_FORWARD)
+      .addScaledVector(this.deckForward, this.deckWalkForward)
+      .addScaledVector(this.deckRight, this.deckWalkSide)
       .addScaledVector(UP, DECK_EYE_HEIGHT);
-    this.desiredPosition.y += DECK_EYE_FORWARD * forwardSlope;
+    this.desiredPosition.y +=
+      this.deckWalkForward * forwardSlope + this.deckWalkSide * sideSlope;
 
     const eyeSurface = this.surfaceHeight(this.desiredPosition.x, this.desiredPosition.z);
     this.desiredPosition.y = Math.max(
@@ -476,7 +490,6 @@ export class CameraDirector {
       .addScaledVector(this.deckLookDirection, DECK_LOOK_DISTANCE);
 
     this.deckCameraUp.lerpVectors(UP, this.deckShipUp, inherited).normalize();
-
     this.tmpQuat.setFromRotationMatrix(
       lookAtMatrix(this.desiredPosition, this.deckLookTarget, this.deckCameraUp),
     );
@@ -488,17 +501,50 @@ export class CameraDirector {
       this.camera.quaternion.slerp(this.desiredQuaternion, response);
     }
 
-    this.labHudAccumulator += dt;
-    if (this.labHudAccumulator > 0.1) {
-      this.labHudAccumulator = 0;
-      this.updateLabHud(false);
-    }
+    this.tickLabHud(dt);
+  }
+
+  private updateDeckWalking(dt: number): void {
+    if (!(dt > 0)) return;
+
+    const forwardInput = (this.keys.has('keyw') ? 1 : 0) - (this.keys.has('keys') ? 1 : 0);
+    const sideInput = (this.keys.has('keyd') ? 1 : 0) - (this.keys.has('keya') ? 1 : 0);
+    if (forwardInput === 0 && sideInput === 0) return;
+
+    const length = Math.hypot(forwardInput, sideInput) || 1;
+    const fi = forwardInput / length;
+    const si = sideInput / length;
+    const c = Math.cos(this.deckLookYaw);
+    const s = Math.sin(this.deckLookYaw);
+
+    // Move relative to where the player is looking, projected onto the deck.
+    const localForward = fi * c - si * s;
+    const localSide = fi * s + si * c;
+    const sprint = this.keys.has('shiftleft') || this.keys.has('shiftright');
+    const speed = sprint ? DECK_SPRINT_SPEED : DECK_WALK_SPEED;
+
+    this.deckWalkForward = THREE.MathUtils.clamp(
+      this.deckWalkForward + localForward * speed * dt,
+      DECK_FORWARD_MIN,
+      DECK_FORWARD_MAX,
+    );
+
+    // Narrow the allowed footprint toward bow/stern so the invisible movement
+    // boundary roughly follows the hull instead of being a rectangular box.
+    const endT = THREE.MathUtils.clamp((Math.abs(this.deckWalkForward) - 4) / 6, 0, 1);
+    const sideLimit = THREE.MathUtils.lerp(DECK_SIDE_MAX, 1.45, endT);
+    this.deckWalkSide = THREE.MathUtils.clamp(
+      this.deckWalkSide + localSide * speed * dt,
+      -sideLimit,
+      sideLimit,
+    );
   }
 
   private updateCinematic(dt: number): void {
     const orders = this.cinematic.update(dt, this.cinematicPose);
     this.shipOrders.throttle = orders.throttle;
     this.shipOrders.rudder = orders.rudder;
+
     this.desiredPosition.copy(this.cinematicPose.position);
     this.tmpQuat.setFromRotationMatrix(
       lookAtMatrix(this.cinematicPose.position, this.cinematicPose.target, UP),
@@ -525,6 +571,7 @@ export class CameraDirector {
     this.shipOrders.throttle = 0;
     this.shipOrders.rudder = 0;
     this.labHud.remove();
+    this.crosshair.remove();
   }
 
   private onKeyDown = (event: KeyboardEvent): void => {
@@ -559,9 +606,18 @@ export class CameraDirector {
     this.keys.delete(event.code.toLowerCase());
   };
 
+  private releaseMovementKeys = (): void => {
+    this.keys.clear();
+  };
+
   private onMouseDown = (): void => {
     if (this.mode === 'fly' && !this.pointerLocked) {
       void this.domElement.requestPointerLock?.();
+      return;
+    }
+    if (this.mode === 'boat' && this.boatView === 'deck') {
+      if (!this.pointerLocked) void this.domElement.requestPointerLock?.();
+      return;
     }
     if (this.mode === 'boat') this.boatDragging = true;
   };
@@ -572,29 +628,31 @@ export class CameraDirector {
 
   private onPointerLockChange = (): void => {
     this.pointerLocked = document.pointerLockElement === this.domElement;
+    this.updateLabHud(true);
   };
 
   private onMouseMove = (event: MouseEvent): void => {
+    if (this.mode === 'boat' && this.boatView === 'deck') {
+      if (!this.pointerLocked) return;
+      this.deckLookYaw -= event.movementX * DECK_MOUSE_SENSITIVITY;
+      this.deckLookPitch -= event.movementY * DECK_MOUSE_SENSITIVITY;
+      this.deckLookPitch = THREE.MathUtils.clamp(
+        this.deckLookPitch,
+        DECK_PITCH_MIN,
+        DECK_PITCH_MAX,
+      );
+      return;
+    }
+
     if (this.mode === 'boat') {
       if (!this.boatDragging) return;
-
-      if (this.boatView === 'deck') {
-        this.deckLookYaw -= event.movementX * DECK_MOUSE_SENSITIVITY;
-        this.deckLookPitch -= event.movementY * DECK_MOUSE_SENSITIVITY;
-        this.deckLookPitch = THREE.MathUtils.clamp(
-          this.deckLookPitch,
-          DECK_PITCH_MIN,
-          DECK_PITCH_MAX,
-        );
-      } else {
-        this.chaseYaw -= event.movementX * CHASE_SENSITIVITY;
-        this.chasePitch += event.movementY * CHASE_SENSITIVITY;
-        this.chasePitch = THREE.MathUtils.clamp(
-          this.chasePitch,
-          CHASE_PITCH_MIN,
-          CHASE_PITCH_MAX,
-        );
-      }
+      this.chaseYaw -= event.movementX * CHASE_SENSITIVITY;
+      this.chasePitch += event.movementY * CHASE_SENSITIVITY;
+      this.chasePitch = THREE.MathUtils.clamp(
+        this.chasePitch,
+        CHASE_PITCH_MIN,
+        CHASE_PITCH_MAX,
+      );
       return;
     }
 
@@ -608,7 +666,6 @@ export class CameraDirector {
   private onWheel = (event: WheelEvent): void => {
     if (this.mode === 'boat') {
       event.preventDefault();
-
       if (this.boatView === 'deck') {
         const direction = event.deltaY > 0 ? -1 : 1;
         this.setDeckStabilization(
@@ -649,6 +706,21 @@ export class CameraDirector {
     if (document.pointerLockElement === this.domElement) document.exitPointerLock();
   }
 
+  private applyLensForMode(): void {
+    const wanted = this.mode === 'boat' && this.boatView === 'deck' ? DECK_FOV : this.baseFov;
+    if (Math.abs(this.camera.fov - wanted) < 0.01) return;
+    this.camera.fov = wanted;
+    this.camera.updateProjectionMatrix();
+  }
+
+  private tickLabHud(dt: number): void {
+    this.labHudAccumulator += dt;
+    if (this.labHudAccumulator > 0.1) {
+      this.labHudAccumulator = 0;
+      this.updateLabHud(false);
+    }
+  }
+
   private createLabHud(): HTMLDivElement {
     const hud = document.createElement('div');
     hud.setAttribute('data-ocean-feel-lab', '');
@@ -658,11 +730,11 @@ export class CameraDirector {
     hud.style.zIndex = '30';
     hud.style.pointerEvents = 'none';
     hud.style.padding = '10px 12px';
-    hud.style.border = '1px solid rgba(255,255,255,0.22)';
+    hud.style.border = '1px solid rgba(216,246,255,0.28)';
     hud.style.borderRadius = '9px';
-    hud.style.background = 'rgba(4,18,26,0.68)';
+    hud.style.background = 'rgba(3,22,31,0.68)';
     hud.style.backdropFilter = 'blur(8px)';
-    hud.style.color = '#e9fbff';
+    hud.style.color = '#ecfbff';
     hud.style.font = '600 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
     hud.style.letterSpacing = '0.02em';
     hud.style.whiteSpace = 'pre-line';
@@ -670,23 +742,45 @@ export class CameraDirector {
     return hud;
   }
 
+  private createCrosshair(): HTMLDivElement {
+    const dot = document.createElement('div');
+    dot.style.position = 'fixed';
+    dot.style.left = '50%';
+    dot.style.top = '50%';
+    dot.style.width = '5px';
+    dot.style.height = '5px';
+    dot.style.marginLeft = '-2.5px';
+    dot.style.marginTop = '-2.5px';
+    dot.style.borderRadius = '50%';
+    dot.style.background = 'rgba(239,252,255,0.82)';
+    dot.style.boxShadow = '0 0 0 1px rgba(0,20,28,0.5)';
+    dot.style.pointerEvents = 'none';
+    dot.style.zIndex = '31';
+    document.body.append(dot);
+    return dot;
+  }
+
   private updateLabHud(force: boolean): void {
     const visible = this.mode === 'boat';
     this.labHud.style.display = visible ? 'block' : 'none';
+    const deckVisible = visible && this.boatView === 'deck';
+    this.crosshair.style.display = deckVisible ? 'block' : 'none';
     if (!visible && !force) return;
 
     if (this.boatView === 'deck') {
       const stabilization = Math.round(this.deckStabilization * 100);
       const pitch = THREE.MathUtils.radToDeg(this.deckWavePitch).toFixed(1);
       const roll = THREE.MathUtils.radToDeg(this.deckWaveRoll).toFixed(1);
+      const lookState = this.pointerLocked ? 'mouse look active · Esc releases' : 'click sea to mouse look';
       this.labHud.textContent =
-        `OCEAN FEEL LAB · DECK\n` +
-        `head stabilization ${stabilization}% · wave pitch ${pitch}° · roll ${roll}°\n` +
-        `drag look · wheel / [ ] stabilization · R centre · V chase`;
+        `OCEAN FEEL LAB · WALKABLE DECK\n` +
+        `${lookState}\n` +
+        `WASD walk · Shift sprint · arrows sail · V chase\n` +
+        `stabilization ${stabilization}% · pitch ${pitch}° · roll ${roll}°`;
     } else {
       this.labHud.textContent =
         `OCEAN FEEL LAB · CHASE\n` +
-        `drag orbit · wheel distance · V deck`;
+        `drag orbit · wheel distance · arrows sail · V walk deck`;
     }
   }
 }
