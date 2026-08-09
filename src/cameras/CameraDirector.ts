@@ -1,74 +1,26 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { CameraMode } from '../ui/types';
-import { type CinematicEnvironment, CinematicDirector, type CinematicShipInput } from './Cinematic';
+import {
+  type CinematicEnvironment,
+  CinematicDirector,
+  type CinematicShipInput,
+} from './Cinematic';
 
-/**
- * Modes the director can be put into.
- *
- * A superset of the UI's `CameraMode`, not a replacement for it. `'cinematic'`
- * is a camera rig that exists whether or not anything has drawn a button for it,
- * and widening the union here rather than in `src/ui/types` means the rig and
- * its control can land independently — while `setMode` still accepts everything
- * the UI is already able to send, because `CameraMode` is assignable to this.
- * When the UI grows the fourth mode the two types simply become identical and
- * this alias can go.
- */
 export type DirectorMode = CameraMode | 'cinematic';
+export type BoatView = 'deck' | 'chase';
 
 export interface CameraTarget {
-  /** World position the boat camera chases. */
   position: THREE.Vector3;
-  /** Heading in radians for the chase camera to sit behind. */
   heading: number;
 }
 
 export interface CameraDirectorOptions {
   camera: THREE.PerspectiveCamera;
   domElement: HTMLElement;
-  /** Queries wave height so the camera never sinks through a crest. */
   surfaceHeight: (x: number, z: number) => number;
 }
 
-/**
- * Fly speed, and the range the wheel moves it over.
- *
- * 22 m/s is a reasonable default for looking at the ship and useless for
- * anything else in this world: the island is 1.4 km away, so crossing to it at
- * the default takes over a minute, and once there the same speed is far too
- * quick to look at a tree with. A fixed speed plus a boost key cannot serve both
- * — which is why every editor fly camera in the industry puts the speed on the
- * wheel.
- *
- * Geometric steps, not linear ones. The useful range spans two and a half
- * orders of magnitude, and a linear step that is sensible at 200 m/s is
- * imperceptible at 2. Each notch is a fixed *ratio*, so the control feels the
- * same everywhere in the range.
- */
-/**
- * The chase rig's orbit, and why it has one at all.
- *
- * The camera used to be a pure function of the hull: stern bearing, fixed
- * distance, fixed height. That is a good default framing and a bad *only*
- * framing — at the helm the viewer could not look at the island they were
- * sailing toward, could not see what was off the bow, and could not look at
- * their own ship. Every third-person game solves it the same way, by letting the
- * mouse orbit the follow point while the rig keeps following.
- *
- * The offsets recentre when the mouse is released, on a 2.2 s constant. Games
- * split on this and both answers are defensible: leaving the camera where it was
- * put is predictable, and returning it means a viewer who looked over their
- * shoulder in a chase does not then sail for a minute facing sideways. The
- * return is slow enough to read as the camera settling rather than as the game
- * taking the controls back, and it is suspended entirely while a drag is live.
- */
-/**
- * Focus distance used where a mode has nothing to focus on, metres.
- *
- * Far enough that a wide lens at the apertures this project uses is effectively
- * focused at infinity — so "no answer" renders as a sharp frame rather than as
- * an arbitrary plane of sharpness somewhere in the middle of the sea.
- */
 const DEFAULT_FOCUS_DISTANCE = 400;
 
 const CHASE_DISTANCE = 34;
@@ -76,10 +28,27 @@ const CHASE_HEIGHT = 14;
 const CHASE_DISTANCE_MIN = 12;
 const CHASE_DISTANCE_MAX = 120;
 const CHASE_SENSITIVITY = 0.0052;
-/** Just short of straight down and straight up the mast. */
 const CHASE_PITCH_MIN = -0.5;
 const CHASE_PITCH_MAX = 1.15;
 const CHASE_RECENTRE_TAU = 2.2;
+
+const DECK_EYE_HEIGHT = 3.75;
+const DECK_SAMPLE_FORWARD = 10.8;
+const DECK_SAMPLE_SIDE = 3.6;
+const DECK_LOOK_DISTANCE = 140;
+const DECK_MOUSE_SENSITIVITY = 0.0023;
+const DECK_PITCH_MIN = -1.35;
+const DECK_PITCH_MAX = 1.05;
+const DECK_STABILIZATION_DEFAULT = 0.58;
+const DECK_STABILIZATION_STEP = 0.05;
+const DECK_MIN_WATER_CLEARANCE = 0.72;
+const DECK_ROTATION_RESPONSE = 20;
+const DECK_WALK_SPEED = 3.25;
+const DECK_SPRINT_SPEED = 5.2;
+const DECK_FORWARD_MIN = -9.2;
+const DECK_FORWARD_MAX = 9.6;
+const DECK_SIDE_MAX = 2.9;
+const DECK_FOV = 76;
 
 const FLY_SPEED = 22;
 const FLY_SPEED_MIN = 1.5;
@@ -90,10 +59,14 @@ const FLY_DAMPING = 6;
 const MOUSE_SENSITIVITY = 0.0022;
 
 /**
- * Owns the camera across four modes and, critically, owns the transitions
- * between them — cutting instantly between an orbit rig and a chase rig is the
- * single most jarring thing a demo like this can do, so every switch is a timed
- * ease from the current pose to the new one.
+ * Camera director with an Ocean Feel Lab deck rig.
+ *
+ * Deck mode is intentionally a lightweight character controller rather than a
+ * full collision engine. The player walks in the ship's local forward/right
+ * plane, is constrained to a hull-shaped footprint, and inherits the sampled
+ * local wave plane. That is enough to judge the thing this prototype cares
+ * about: whether a moving ship remains comfortable and convincing when you are
+ * free to walk around on it.
  */
 export class CameraDirector {
   readonly camera: THREE.PerspectiveCamera;
@@ -102,47 +75,47 @@ export class CameraDirector {
   private mode: DirectorMode = 'orbit';
   private readonly domElement: HTMLElement;
   private readonly surfaceHeight: (x: number, z: number) => number;
+  private readonly baseFov: number;
 
-  // Fly state
   private readonly keys = new Set<string>();
-  /** Metres per second the fly camera accelerates at. Driven by the wheel. */
+  private pointerLocked = false;
+
   private flySpeed = FLY_SPEED;
-  /** Chase-rig orbit offsets from the stern bearing, and its dolly. */
+  private yaw = 0;
+  private pitch = 0;
+  private readonly flyVelocity = new THREE.Vector3();
+
+  private target: CameraTarget | null = null;
+  private boatView: BoatView = 'deck';
+  private boatDragging = false;
+
   private chaseYaw = 0;
   private chasePitch = 0;
   private chaseDistance = CHASE_DISTANCE;
-  private chaseDragging = false;
-  private yaw = 0;
-  private pitch = 0;
-  private pointerLocked = false;
-  private readonly flyVelocity = new THREE.Vector3();
 
-  // Chase state
-  private target: CameraTarget | null = null;
+  private deckLookYaw = 0;
+  private deckLookPitch = 0;
+  private deckStabilization = DECK_STABILIZATION_DEFAULT;
+  private deckWalkForward = -4.6;
+  private deckWalkSide = 0;
+  private deckWavePitch = 0;
+  private deckWaveRoll = 0;
+  private labHudAccumulator = 0;
+  private readonly labHud: HTMLDivElement;
+  private readonly crosshair: HTMLDivElement;
 
-  // Cinematic state
   private readonly cinematic = new CinematicDirector();
   private readonly cinematicPose = {
     position: new THREE.Vector3(),
     target: new THREE.Vector3(),
   };
-  /**
-   * The hull orders the active mode is issuing, republished every frame.
-   *
-   * Zero in every mode but Cinematic, and zeroed the instant Cinematic is left,
-   * so a caller that forwards this unconditionally into
-   * `ShipController.setInput` can never leave the hull carrying an order the
-   * viewer did not give it.
-   */
   private readonly shipOrders: CinematicShipInput = { throttle: 0, rudder: 0 };
 
-  // Transition state
   private transition = 0;
   private readonly fromPosition = new THREE.Vector3();
   private readonly fromQuaternion = new THREE.Quaternion();
   private static readonly TRANSITION_SECONDS = 0.85;
 
-  // Scratch — the update path must not allocate.
   private readonly tmpVec = new THREE.Vector3();
   private readonly tmpVec2 = new THREE.Vector3();
   private readonly tmpQuat = new THREE.Quaternion();
@@ -150,12 +123,22 @@ export class CameraDirector {
   private readonly desiredPosition = new THREE.Vector3();
   private readonly desiredQuaternion = new THREE.Quaternion();
 
+  private readonly deckForward = new THREE.Vector3();
+  private readonly deckRight = new THREE.Vector3();
+  private readonly deckSurfaceForward = new THREE.Vector3();
+  private readonly deckSurfaceRight = new THREE.Vector3();
+  private readonly deckShipUp = new THREE.Vector3();
+  private readonly deckCameraUp = new THREE.Vector3();
+  private readonly deckLookDirection = new THREE.Vector3();
+  private readonly deckLookTarget = new THREE.Vector3();
+
   private readonly abort = new AbortController();
 
   constructor(options: CameraDirectorOptions) {
     this.camera = options.camera;
     this.domElement = options.domElement;
     this.surfaceHeight = options.surfaceHeight;
+    this.baseFov = this.camera.fov;
 
     this.orbit = new OrbitControls(this.camera, this.domElement);
     this.orbit.enableDamping = true;
@@ -163,17 +146,19 @@ export class CameraDirector {
     this.orbit.minDistance = 3;
     this.orbit.maxDistance = 1200;
     this.orbit.target.set(0, 2, 0);
-    // Allow going below the surface — the underwater view is a headline feature.
     this.orbit.maxPolarAngle = Math.PI;
+
+    this.labHud = this.createLabHud();
+    this.crosshair = this.createCrosshair();
+    this.updateLabHud(true);
 
     const { signal } = this.abort;
     window.addEventListener('keydown', this.onKeyDown, { signal });
     window.addEventListener('keyup', this.onKeyUp, { signal });
+    window.addEventListener('blur', this.releaseMovementKeys, { signal });
     this.domElement.addEventListener('mousedown', this.onMouseDown, { signal });
     document.addEventListener('pointerlockchange', this.onPointerLockChange, { signal });
     document.addEventListener('mousemove', this.onMouseMove, { signal });
-    // Not passive: the wheel has to stop the page scrolling under the canvas
-    // while the fly camera is using it.
     this.domElement.addEventListener('wheel', this.onWheel, { signal, passive: false });
     window.addEventListener('mouseup', this.onMouseUp, { signal });
   }
@@ -182,58 +167,30 @@ export class CameraDirector {
     return this.mode;
   }
 
-  /**
-   * Throttle and rudder the active mode wants from the hero ship this frame.
-   *
-   * Forward it to `ShipController.setInput` unconditionally, every frame, in
-   * every mode — the zeroes the other three modes publish are what release the
-   * hull when Cinematic ends. Reading it only while Cinematic is active leaves
-   * the controller holding the last order the flight issued, which it will act
-   * on the moment Boat mode enables it again.
-   *
-   * Live object; do not retain it.
-   */
+  get boatViewMode(): BoatView {
+    return this.boatView;
+  }
+
+  get deckStabilizationValue(): number {
+    return this.deckStabilization;
+  }
+
   get shipInput(): Readonly<CinematicShipInput> {
     return this.shipOrders;
   }
 
-  /** Beat name the cinematic flight is playing, for a HUD label. */
   get cinematicBeat(): string {
     return this.cinematic.beatName;
   }
 
-  /** Position on the cinematic loop in seconds. Meaningless in other modes. */
   get cinematicTime(): number {
     return this.cinematic.time;
   }
 
-  /**
-   * The world the cinematic tour wants this frame — hour, rain, cloud, fog.
-   * Meaningless in other modes; see `Cinematic.environment`.
-   *
-   * `time` defaults to the live clock. Passing it explicitly is what lets a
-   * deterministic reset ask what the world *will* look like at the moment it is
-   * rewinding to, before it seeds the effects that accumulate.
-   */
   cinematicEnvironment(time?: number): Readonly<CinematicEnvironment> {
     return this.cinematic.environment(time);
   }
 
-  /**
-   * Distance from the eye to whatever this mode is looking at, metres.
-   *
-   * Per mode, because "what is this shot about" is a different question in each
-   * one, and there is no single answer a lens could be focused on. Orbit and
-   * Cinematic both carry an explicit look point; the chase rig has the hull;
-   * Fly has neither, so it takes where the view ray meets the sea, which is what
-   * a viewer flying over water is almost always looking at.
-   *
-   * Closed-form in every mode, with no filtering against the previous frame.
-   * That is required rather than tidy: `DepthOfField` reads this every frame,
-   * and a focus that drifted toward its target over time would make a capture
-   * depend on how many frames preceded it — the property the whole visual
-   * harness rests on.
-   */
   focusDistance(): number {
     switch (this.mode) {
       case 'orbit':
@@ -241,13 +198,12 @@ export class CameraDirector {
       case 'cinematic':
         return Math.max(1, this.camera.position.distanceTo(this.cinematicPose.target));
       case 'boat':
+        if (this.boatView === 'deck') return 190;
         return this.target
           ? Math.max(1, this.camera.position.distanceTo(this.target.position))
           : DEFAULT_FOCUS_DISTANCE;
       case 'fly': {
         this.camera.getWorldDirection(this.tmpVec);
-        // Looking level or up: nothing to focus on but the sky, which a wide
-        // lens at any sane aperture renders sharp anyway.
         if (this.tmpVec.y > -0.02) return DEFAULT_FOCUS_DISTANCE;
         const surface = this.surfaceHeight(this.camera.position.x, this.camera.position.z);
         const drop = this.camera.position.y - surface;
@@ -261,27 +217,40 @@ export class CameraDirector {
     this.target = target;
   }
 
+  setBoatView(view: BoatView): void {
+    if (view === this.boatView) return;
+    this.captureTransitionStart();
+    if (this.boatView === 'deck') this.exitPointerLock();
+    this.boatView = view;
+    this.boatDragging = false;
+    this.applyLensForMode();
+    this.updateLabHud(true);
+  }
+
+  setDeckStabilization(value: number): void {
+    this.deckStabilization = THREE.MathUtils.clamp(value, 0, 1);
+    this.updateLabHud(true);
+  }
+
   setMode(mode: DirectorMode): void {
     if (mode === this.mode) return;
 
-    // Capture the current pose so the new rig can be eased into rather than cut to.
-    this.fromPosition.copy(this.camera.position);
-    this.fromQuaternion.copy(this.camera.quaternion);
-    this.transition = 1;
+    this.captureTransitionStart();
 
-    if (this.mode === 'fly') this.exitPointerLock();
+    if (this.mode === 'fly' || (this.mode === 'boat' && this.boatView === 'deck')) {
+      this.exitPointerLock();
+    }
     if (this.mode === 'cinematic') {
-      // Released here, not on the next update, so the orders are already zero
-      // for whatever reads them first after the switch.
       this.cinematic.setEnabled(false);
       this.shipOrders.throttle = 0;
       this.shipOrders.rudder = 0;
     }
+
     this.mode = mode;
+    this.boatDragging = false;
+    this.keys.clear();
 
     if (mode === 'orbit') {
-      // Re-seat the orbit target ahead of the camera so the first drag does not
-      // whip the view around to a stale pivot.
       this.camera.getWorldDirection(this.tmpVec);
       this.orbit.target.copy(this.camera.position).addScaledVector(this.tmpVec, 40);
       this.orbit.update();
@@ -294,88 +263,42 @@ export class CameraDirector {
       this.flyVelocity.set(0, 0, 0);
     }
 
-    // Rewinds the flight to its opening beat. The pose it opens on is not where
-    // the camera currently is, which is exactly what the transition above is
-    // for: the ease runs from wherever the viewer left the previous rig onto the
-    // flight's first mark, so entering the mode is a move rather than a cut.
     if (mode === 'cinematic') this.cinematic.setEnabled(true);
 
     this.orbit.enabled = mode === 'orbit';
+    this.applyLensForMode();
+    this.updateLabHud(true);
   }
 
-  /**
-   * Places the camera exactly, in whatever mode is active, and synchronises that
-   * mode's internal state so the next `update()` does not immediately undo it.
-   *
-   * A plain `camera.position.set` is not enough for any mode but Orbit: Fly
-   * integrates from its own yaw/pitch and would snap back on the next frame, and
-   * the chase rig damps toward a pose derived from the ship. Each mode therefore
-   * needs its state re-derived from the requested pose, which is what this does.
-   *
-   * Also cancels any in-flight mode transition — a capture taken mid-ease is not
-   * reproducible.
-   */
   pin(position: THREE.Vector3, target: THREE.Vector3): void {
     this.transition = 0;
-
     this.camera.position.copy(position);
     this.tmpQuat.setFromRotationMatrix(lookAtMatrix(position, target, UP));
     this.camera.quaternion.copy(this.tmpQuat);
     this.camera.updateMatrixWorld(true);
-
     this.desiredPosition.copy(position);
     this.desiredQuaternion.copy(this.tmpQuat);
 
-    switch (this.mode) {
-      case 'orbit':
-        this.orbit.target.copy(target);
-        this.orbit.update();
-        break;
-      case 'fly':
-        // Re-derive the integrator's yaw/pitch from the pose it must hold.
-        this.tmpEuler.setFromQuaternion(this.tmpQuat);
-        this.yaw = this.tmpEuler.y;
-        this.pitch = this.tmpEuler.x;
-        this.flyVelocity.set(0, 0, 0);
-        break;
-      case 'boat':
-        // Nothing to seed: the chase pose is derived from the target each frame.
-        // `snapToTarget` is the deterministic entry point for this mode.
-        break;
-      case 'cinematic':
-        // Nothing to seed either, and for a stronger reason: the flight's pose
-        // is a function of its clock, and no clock reading corresponds to an
-        // arbitrary requested pose. A pin here therefore survives exactly until
-        // the next `update` re-samples the curve. `resetCinematic` is the
-        // deterministic entry point for this mode — it pins *and* moves the
-        // clock, which is the only way the two can agree.
-        break;
+    if (this.mode === 'orbit') {
+      this.orbit.target.copy(target);
+      this.orbit.update();
+    } else if (this.mode === 'fly') {
+      this.tmpEuler.setFromQuaternion(this.tmpQuat);
+      this.yaw = this.tmpEuler.y;
+      this.pitch = this.tmpEuler.x;
+      this.flyVelocity.set(0, 0, 0);
     }
   }
 
-  /**
-   * Places the chase camera at its ideal pose for the current target with no
-   * damping, so a capture does not depend on how many frames the rig has had to
-   * converge.
-   */
   snapToTarget(): void {
     if (this.mode !== 'boat' || !this.target) return;
     this.transition = 0;
-    this.updateChase(0);
+    this.updateBoat(0);
     this.camera.position.copy(this.desiredPosition);
     this.camera.quaternion.copy(this.desiredQuaternion);
     this.camera.updateMatrixWorld(true);
   }
 
-  /**
-   * Places the camera at exactly the pose the cinematic flight holds at `time`,
-   * with no transition and no damping, and leaves its clock there.
-   *
-   * The counterpart to `snapToTarget` for this mode, and the reason the flight
-   * carries no per-frame state: a capture taken after this call depends on
-   * `time` and on nothing else — not on how many frames the mode has run, not on
-   * what the previous capture did.
-   */
   resetCinematic(time = 0): void {
     if (this.mode !== 'cinematic') return;
     this.transition = 0;
@@ -395,7 +318,7 @@ export class CameraDirector {
         this.updateFly(dt);
         break;
       case 'boat':
-        this.updateChase(dt);
+        this.updateBoat(dt);
         break;
       case 'cinematic':
         this.updateCinematic(dt);
@@ -408,7 +331,6 @@ export class CameraDirector {
       this.camera.position.lerpVectors(this.fromPosition, this.desiredPosition, t);
       this.camera.quaternion.slerpQuaternions(this.fromQuaternion, this.desiredQuaternion, t);
     }
-
   }
 
   private updateOrbit(): void {
@@ -423,12 +345,9 @@ export class CameraDirector {
 
     const forward = this.tmpVec.set(0, 0, -1).applyQuaternion(this.desiredQuaternion);
     const right = this.tmpVec2.set(1, 0, 0).applyQuaternion(this.desiredQuaternion);
-
     const boost = this.keys.has('shiftleft') || this.keys.has('shiftright') ? FLY_BOOST : 1;
     const speed = this.flySpeed * boost;
 
-    // Accelerate toward the requested direction, then damp — instant velocity
-    // changes make a flying camera feel like a cursor rather than a body.
     if (this.keys.has('keyw')) this.flyVelocity.addScaledVector(forward, speed * dt);
     if (this.keys.has('keys')) this.flyVelocity.addScaledVector(forward, -speed * dt);
     if (this.keys.has('keyd')) this.flyVelocity.addScaledVector(right, speed * dt);
@@ -437,13 +356,17 @@ export class CameraDirector {
     if (this.keys.has('controlleft')) this.flyVelocity.y -= speed * dt;
 
     this.flyVelocity.multiplyScalar(Math.max(0, 1 - FLY_DAMPING * dt));
-
     this.desiredPosition.copy(this.camera.position).addScaledVector(this.flyVelocity, dt);
 
     if (this.transition === 0) {
       this.camera.position.copy(this.desiredPosition);
       this.camera.quaternion.copy(this.desiredQuaternion);
     }
+  }
+
+  private updateBoat(dt: number): void {
+    if (this.boatView === 'deck') this.updateDeck(dt);
+    else this.updateChase(dt);
   }
 
   private updateChase(dt: number): void {
@@ -453,18 +376,12 @@ export class CameraDirector {
       return;
     }
 
-    // Recentre toward the stern whenever the viewer is not driving it. Framed as
-    // an exponential rather than a lerp so the rate is the same at any frame
-    // rate — the same reason the follow below is one.
-    if (!this.chaseDragging) {
+    if (!this.boatDragging) {
       const settle = 1 - Math.exp(-dt / CHASE_RECENTRE_TAU);
       this.chaseYaw -= this.chaseYaw * settle;
       this.chasePitch -= this.chasePitch * settle;
     }
 
-    // Sit behind and above the target, looking slightly down at it — with the
-    // viewer's orbit applied on top of the hull's own bearing, so the rig keeps
-    // following while the camera can point anywhere.
     const bearing = this.target.heading + this.chaseYaw;
     const lift = CHASE_HEIGHT / CHASE_DISTANCE + this.chasePitch;
     const planar = Math.cos(Math.atan(lift));
@@ -473,44 +390,156 @@ export class CameraDirector {
       0,
       Math.cos(bearing) * planar,
     );
+
     this.desiredPosition
       .copy(this.target.position)
       .addScaledVector(back, -this.chaseDistance)
       .add(this.tmpVec2.set(0, this.chaseDistance * lift * planar, 0));
 
-    // Never below the sea. A rig orbited to a low pitch in a seaway would
-    // otherwise dip through the surface every swell, which reads as the camera
-    // being swamped rather than as a low angle.
     const surface = this.surfaceHeight(this.desiredPosition.x, this.desiredPosition.z);
     if (this.desiredPosition.y < surface + 1.6) this.desiredPosition.y = surface + 1.6;
 
     this.tmpVec2.copy(this.target.position).y += 4;
-    this.tmpQuat.setFromRotationMatrix(
-      lookAtMatrix(this.desiredPosition, this.tmpVec2, UP),
-    );
+    this.tmpQuat.setFromRotationMatrix(lookAtMatrix(this.desiredPosition, this.tmpVec2, UP));
     this.desiredQuaternion.copy(this.tmpQuat);
 
     if (this.transition === 0) {
-      // Critically damped follow so the camera lags the boat a little in chop
-      // without ever overshooting into a wobble.
       const lag = 1 - Math.exp(-4 * dt);
       this.camera.position.lerp(this.desiredPosition, lag);
       this.camera.quaternion.slerp(this.desiredQuaternion, lag);
     }
+
+    this.tickLabHud(dt);
   }
 
-  /**
-   * Samples the authored flight and republishes its hull orders.
-   *
-   * Note what is *not* here: no damping toward the sampled pose. Every other rig
-   * in this class lags its target, because every other rig is following
-   * something it does not control — a mouse, a key, a hull in a seaway. The
-   * flight already contains its own easing, in the shape of the curve, and a lag
-   * filter on top would be a second-order term with memory: the pose after a
-   * `resetCinematic` would then depend on where the camera happened to be
-   * standing beforehand, which is precisely the determinism the mode is built
-   * around.
-   */
+  private updateDeck(dt: number): void {
+    const target = this.target;
+    if (!target) {
+      this.desiredPosition.copy(this.camera.position);
+      this.desiredQuaternion.copy(this.camera.quaternion);
+      return;
+    }
+
+    const heading = target.heading;
+    const cosH = Math.cos(heading);
+    const sinH = Math.sin(heading);
+    this.deckForward.set(cosH, 0, sinH);
+    this.deckRight.set(-sinH, 0, cosH);
+
+    this.updateDeckWalking(dt);
+
+    const x = target.position.x;
+    const z = target.position.z;
+    const frontY = this.surfaceHeight(
+      x + this.deckForward.x * DECK_SAMPLE_FORWARD,
+      z + this.deckForward.z * DECK_SAMPLE_FORWARD,
+    );
+    const backY = this.surfaceHeight(
+      x - this.deckForward.x * DECK_SAMPLE_FORWARD,
+      z - this.deckForward.z * DECK_SAMPLE_FORWARD,
+    );
+    const starboardY = this.surfaceHeight(
+      x + this.deckRight.x * DECK_SAMPLE_SIDE,
+      z + this.deckRight.z * DECK_SAMPLE_SIDE,
+    );
+    const portY = this.surfaceHeight(
+      x - this.deckRight.x * DECK_SAMPLE_SIDE,
+      z - this.deckRight.z * DECK_SAMPLE_SIDE,
+    );
+
+    const forwardSlope = (frontY - backY) / (DECK_SAMPLE_FORWARD * 2);
+    const sideSlope = (starboardY - portY) / (DECK_SAMPLE_SIDE * 2);
+    this.deckWavePitch = Math.atan(forwardSlope);
+    this.deckWaveRoll = Math.atan(sideSlope);
+
+    this.deckSurfaceForward.copy(this.deckForward).setY(forwardSlope).normalize();
+    this.deckSurfaceRight.copy(this.deckRight).setY(sideSlope).normalize();
+    this.deckShipUp.crossVectors(this.deckSurfaceRight, this.deckSurfaceForward).normalize();
+    if (this.deckShipUp.y < 0) this.deckShipUp.multiplyScalar(-1);
+
+    this.desiredPosition
+      .copy(target.position)
+      .addScaledVector(this.deckForward, this.deckWalkForward)
+      .addScaledVector(this.deckRight, this.deckWalkSide)
+      .addScaledVector(UP, DECK_EYE_HEIGHT);
+    this.desiredPosition.y +=
+      this.deckWalkForward * forwardSlope + this.deckWalkSide * sideSlope;
+
+    const eyeSurface = this.surfaceHeight(this.desiredPosition.x, this.desiredPosition.z);
+    this.desiredPosition.y = Math.max(
+      this.desiredPosition.y,
+      eyeSurface + DECK_MIN_WATER_CLEARANCE,
+    );
+
+    const viewHeading = heading + this.deckLookYaw;
+    const relativeForward = Math.cos(this.deckLookYaw);
+    const relativeRight = Math.sin(this.deckLookYaw);
+    const viewSlope = forwardSlope * relativeForward + sideSlope * relativeRight;
+    const rawHullPitch = Math.atan(viewSlope);
+    const inherited = 1 - this.deckStabilization;
+    const viewPitch = this.deckLookPitch + rawHullPitch * inherited;
+    const cosPitch = Math.cos(viewPitch);
+
+    this.deckLookDirection.set(
+      Math.cos(viewHeading) * cosPitch,
+      Math.sin(viewPitch),
+      Math.sin(viewHeading) * cosPitch,
+    );
+    this.deckLookTarget
+      .copy(this.desiredPosition)
+      .addScaledVector(this.deckLookDirection, DECK_LOOK_DISTANCE);
+
+    this.deckCameraUp.lerpVectors(UP, this.deckShipUp, inherited).normalize();
+    this.tmpQuat.setFromRotationMatrix(
+      lookAtMatrix(this.desiredPosition, this.deckLookTarget, this.deckCameraUp),
+    );
+    this.desiredQuaternion.copy(this.tmpQuat);
+
+    if (this.transition === 0) {
+      this.camera.position.copy(this.desiredPosition);
+      const response = dt <= 0 ? 1 : 1 - Math.exp(-DECK_ROTATION_RESPONSE * dt);
+      this.camera.quaternion.slerp(this.desiredQuaternion, response);
+    }
+
+    this.tickLabHud(dt);
+  }
+
+  private updateDeckWalking(dt: number): void {
+    if (!(dt > 0)) return;
+
+    const forwardInput = (this.keys.has('keyw') ? 1 : 0) - (this.keys.has('keys') ? 1 : 0);
+    const sideInput = (this.keys.has('keyd') ? 1 : 0) - (this.keys.has('keya') ? 1 : 0);
+    if (forwardInput === 0 && sideInput === 0) return;
+
+    const length = Math.hypot(forwardInput, sideInput) || 1;
+    const fi = forwardInput / length;
+    const si = sideInput / length;
+    const c = Math.cos(this.deckLookYaw);
+    const s = Math.sin(this.deckLookYaw);
+
+    // Move relative to where the player is looking, projected onto the deck.
+    const localForward = fi * c - si * s;
+    const localSide = fi * s + si * c;
+    const sprint = this.keys.has('shiftleft') || this.keys.has('shiftright');
+    const speed = sprint ? DECK_SPRINT_SPEED : DECK_WALK_SPEED;
+
+    this.deckWalkForward = THREE.MathUtils.clamp(
+      this.deckWalkForward + localForward * speed * dt,
+      DECK_FORWARD_MIN,
+      DECK_FORWARD_MAX,
+    );
+
+    // Narrow the allowed footprint toward bow/stern so the invisible movement
+    // boundary roughly follows the hull instead of being a rectangular box.
+    const endT = THREE.MathUtils.clamp((Math.abs(this.deckWalkForward) - 4) / 6, 0, 1);
+    const sideLimit = THREE.MathUtils.lerp(DECK_SIDE_MAX, 1.45, endT);
+    this.deckWalkSide = THREE.MathUtils.clamp(
+      this.deckWalkSide + localSide * speed * dt,
+      -sideLimit,
+      sideLimit,
+    );
+  }
+
   private updateCinematic(dt: number): void {
     const orders = this.cinematic.update(dt, this.cinematicPose);
     this.shipOrders.throttle = orders.throttle;
@@ -528,25 +557,6 @@ export class CameraDirector {
     }
   }
 
-  /**
-   * How submerged the camera is, 0..1, with a soft band around the surface.
-   *
-   * This ramp is the *only* thing standing between the camera and a hard cut at
-   * the waterline, and that is deliberate.
-   *
-   * There used to be an `avoidSurfacePenetration` step that teleported the camera
-   * out of a 0.35 m band either side of the surface, on the theory that it stopped
-   * the underwater state flickering at a crest. What it actually built was a wall:
-   * approaching the surface from above put the camera inside the band, which
-   * snapped it back to `surface + 0.35`, and since no plausible frame moves the
-   * camera 0.7 m at once there was no way through in either direction. Diving and
-   * surfacing — the headline feature the fly camera exists for — were impossible
-   * except by teleport.
-   *
-   * The flicker it guarded against is not real either. The state is not a boolean;
-   * it is this value, and it cross-fades over the whole 0.7 m band, so a crest
-   * passing the lens moves it smoothly rather than toggling anything.
-   */
   submersion(): number {
     const surface = this.surfaceHeight(this.camera.position.x, this.camera.position.z);
     const depth = surface - this.camera.position.y;
@@ -557,18 +567,38 @@ export class CameraDirector {
     this.abort.abort();
     this.orbit.dispose();
     this.exitPointerLock();
-    // Zeroes the published orders on the way out, for the same reason leaving
-    // the mode does: a disposed director must not be the last thing that told
-    // the hull to open its throttle.
     this.cinematic.setEnabled(false);
     this.shipOrders.throttle = 0;
     this.shipOrders.rudder = 0;
+    this.labHud.remove();
+    this.crosshair.remove();
   }
-
-  // ------------------------------------------------------------------ input
 
   private onKeyDown = (event: KeyboardEvent): void => {
     if (isTypingTarget(event.target)) return;
+
+    if (this.mode === 'boat' && !event.repeat) {
+      const code = event.code.toLowerCase();
+      if (code === 'keyv') {
+        this.setBoatView(this.boatView === 'deck' ? 'chase' : 'deck');
+        return;
+      }
+      if (code === 'keyr' && this.boatView === 'deck') {
+        this.deckLookYaw = 0;
+        this.deckLookPitch = 0;
+        this.updateLabHud(true);
+        return;
+      }
+      if (code === 'bracketleft' && this.boatView === 'deck') {
+        this.setDeckStabilization(this.deckStabilization - DECK_STABILIZATION_STEP);
+        return;
+      }
+      if (code === 'bracketright' && this.boatView === 'deck') {
+        this.setDeckStabilization(this.deckStabilization + DECK_STABILIZATION_STEP);
+        return;
+      }
+    }
+
     this.keys.add(event.code.toLowerCase());
   };
 
@@ -576,78 +606,182 @@ export class CameraDirector {
     this.keys.delete(event.code.toLowerCase());
   };
 
+  private releaseMovementKeys = (): void => {
+    this.keys.clear();
+  };
+
   private onMouseDown = (): void => {
     if (this.mode === 'fly' && !this.pointerLocked) {
       void this.domElement.requestPointerLock?.();
+      return;
     }
-    // Boat mode drags to orbit. No pointer lock: the helm is a mode a viewer
-    // sits in for minutes at a time and locking the cursor there would trap it.
-    if (this.mode === 'boat') this.chaseDragging = true;
+    if (this.mode === 'boat' && this.boatView === 'deck') {
+      if (!this.pointerLocked) void this.domElement.requestPointerLock?.();
+      return;
+    }
+    if (this.mode === 'boat') this.boatDragging = true;
   };
 
   private onMouseUp = (): void => {
-    this.chaseDragging = false;
+    this.boatDragging = false;
   };
 
   private onPointerLockChange = (): void => {
     this.pointerLocked = document.pointerLockElement === this.domElement;
+    this.updateLabHud(true);
   };
 
   private onMouseMove = (event: MouseEvent): void => {
-    if (this.mode === 'boat') {
-      if (!this.chaseDragging) return;
-      this.chaseYaw -= event.movementX * CHASE_SENSITIVITY;
-      this.chasePitch += event.movementY * CHASE_SENSITIVITY;
-      this.chasePitch = THREE.MathUtils.clamp(this.chasePitch, CHASE_PITCH_MIN, CHASE_PITCH_MAX);
+    if (this.mode === 'boat' && this.boatView === 'deck') {
+      if (!this.pointerLocked) return;
+      this.deckLookYaw -= event.movementX * DECK_MOUSE_SENSITIVITY;
+      this.deckLookPitch -= event.movementY * DECK_MOUSE_SENSITIVITY;
+      this.deckLookPitch = THREE.MathUtils.clamp(
+        this.deckLookPitch,
+        DECK_PITCH_MIN,
+        DECK_PITCH_MAX,
+      );
       return;
     }
+
+    if (this.mode === 'boat') {
+      if (!this.boatDragging) return;
+      this.chaseYaw -= event.movementX * CHASE_SENSITIVITY;
+      this.chasePitch += event.movementY * CHASE_SENSITIVITY;
+      this.chasePitch = THREE.MathUtils.clamp(
+        this.chasePitch,
+        CHASE_PITCH_MIN,
+        CHASE_PITCH_MAX,
+      );
+      return;
+    }
+
     if (this.mode !== 'fly' || !this.pointerLocked) return;
     this.yaw -= event.movementX * MOUSE_SENSITIVITY;
     this.pitch -= event.movementY * MOUSE_SENSITIVITY;
-    // Stop just short of vertical; passing it would flip the horizon.
     const limit = Math.PI / 2 - 0.01;
     this.pitch = THREE.MathUtils.clamp(this.pitch, -limit, limit);
   };
 
-  /**
-   * Wheel changes fly speed; every other mode leaves the event alone.
-   *
-   * Orbit mode is the one that must not be touched: `OrbitControls` owns the
-   * wheel there for dolly, and swallowing it would break zoom. So this returns
-   * without calling `preventDefault` unless the fly camera is actually the thing
-   * being driven — a guard, not a global capture.
-   */
   private onWheel = (event: WheelEvent): void => {
     if (this.mode === 'boat') {
       event.preventDefault();
-      const steps = event.deltaY > 0 ? 1 : -1;
-      this.chaseDistance = THREE.MathUtils.clamp(
-        this.chaseDistance * Math.pow(1.14, steps),
-        CHASE_DISTANCE_MIN,
-        CHASE_DISTANCE_MAX,
-      );
+      if (this.boatView === 'deck') {
+        const direction = event.deltaY > 0 ? -1 : 1;
+        this.setDeckStabilization(
+          this.deckStabilization + direction * DECK_STABILIZATION_STEP,
+        );
+      } else {
+        const steps = event.deltaY > 0 ? 1 : -1;
+        this.chaseDistance = THREE.MathUtils.clamp(
+          this.chaseDistance * Math.pow(1.14, steps),
+          CHASE_DISTANCE_MIN,
+          CHASE_DISTANCE_MAX,
+        );
+      }
       return;
     }
+
     if (this.mode !== 'fly') return;
     event.preventDefault();
-    // Only the sign is used. Wheel deltas are not comparable between a mouse, a
-    // trackpad and a browser's `deltaMode`, so a notch is a notch.
     const steps = event.deltaY > 0 ? -1 : 1;
     this.setFlySpeed(this.flySpeed * Math.pow(FLY_SPEED_STEP, steps));
   };
 
-  /** Fly speed in m/s, clamped to the useful range. */
   setFlySpeed(value: number): void {
     this.flySpeed = THREE.MathUtils.clamp(value, FLY_SPEED_MIN, FLY_SPEED_MAX);
   }
 
-  /** Current fly speed in m/s, for a HUD readout. */
   get flySpeedValue(): number {
     return this.flySpeed;
   }
 
+  private captureTransitionStart(): void {
+    this.fromPosition.copy(this.camera.position);
+    this.fromQuaternion.copy(this.camera.quaternion);
+    this.transition = 1;
+  }
+
   private exitPointerLock(): void {
     if (document.pointerLockElement === this.domElement) document.exitPointerLock();
+  }
+
+  private applyLensForMode(): void {
+    const wanted = this.mode === 'boat' && this.boatView === 'deck' ? DECK_FOV : this.baseFov;
+    if (Math.abs(this.camera.fov - wanted) < 0.01) return;
+    this.camera.fov = wanted;
+    this.camera.updateProjectionMatrix();
+  }
+
+  private tickLabHud(dt: number): void {
+    this.labHudAccumulator += dt;
+    if (this.labHudAccumulator > 0.1) {
+      this.labHudAccumulator = 0;
+      this.updateLabHud(false);
+    }
+  }
+
+  private createLabHud(): HTMLDivElement {
+    const hud = document.createElement('div');
+    hud.setAttribute('data-ocean-feel-lab', '');
+    hud.style.position = 'fixed';
+    hud.style.left = '18px';
+    hud.style.bottom = '18px';
+    hud.style.zIndex = '30';
+    hud.style.pointerEvents = 'none';
+    hud.style.padding = '10px 12px';
+    hud.style.border = '1px solid rgba(216,246,255,0.28)';
+    hud.style.borderRadius = '9px';
+    hud.style.background = 'rgba(3,22,31,0.68)';
+    hud.style.backdropFilter = 'blur(8px)';
+    hud.style.color = '#ecfbff';
+    hud.style.font = '600 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+    hud.style.letterSpacing = '0.02em';
+    hud.style.whiteSpace = 'pre-line';
+    document.body.append(hud);
+    return hud;
+  }
+
+  private createCrosshair(): HTMLDivElement {
+    const dot = document.createElement('div');
+    dot.style.position = 'fixed';
+    dot.style.left = '50%';
+    dot.style.top = '50%';
+    dot.style.width = '5px';
+    dot.style.height = '5px';
+    dot.style.marginLeft = '-2.5px';
+    dot.style.marginTop = '-2.5px';
+    dot.style.borderRadius = '50%';
+    dot.style.background = 'rgba(239,252,255,0.82)';
+    dot.style.boxShadow = '0 0 0 1px rgba(0,20,28,0.5)';
+    dot.style.pointerEvents = 'none';
+    dot.style.zIndex = '31';
+    document.body.append(dot);
+    return dot;
+  }
+
+  private updateLabHud(force: boolean): void {
+    const visible = this.mode === 'boat';
+    this.labHud.style.display = visible ? 'block' : 'none';
+    const deckVisible = visible && this.boatView === 'deck';
+    this.crosshair.style.display = deckVisible ? 'block' : 'none';
+    if (!visible && !force) return;
+
+    if (this.boatView === 'deck') {
+      const stabilization = Math.round(this.deckStabilization * 100);
+      const pitch = THREE.MathUtils.radToDeg(this.deckWavePitch).toFixed(1);
+      const roll = THREE.MathUtils.radToDeg(this.deckWaveRoll).toFixed(1);
+      const lookState = this.pointerLocked ? 'mouse look active · Esc releases' : 'click sea to mouse look';
+      this.labHud.textContent =
+        `OCEAN FEEL LAB · WALKABLE DECK\n` +
+        `${lookState}\n` +
+        `WASD walk · Shift sprint · arrows sail · V chase\n` +
+        `stabilization ${stabilization}% · pitch ${pitch}° · roll ${roll}°`;
+    } else {
+      this.labHud.textContent =
+        `OCEAN FEEL LAB · CHASE\n` +
+        `drag orbit · wheel distance · arrows sail · V walk deck`;
+    }
   }
 }
 
